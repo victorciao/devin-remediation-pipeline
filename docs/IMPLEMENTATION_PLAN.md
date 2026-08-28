@@ -4,9 +4,10 @@
 > plan-review step (T-1, §2) reviews against, and what every later change must be
 > reconciled with. Referenced from the README.
 >
-> **Revision 3** — incorporates T-1 review round 1 (5 blocking / 15 major / 10 minor / 2 nit)
-> and round 2 (7 major / 8 minor / 2 nit). See §20 for the revision log and the
-> finding-by-finding disposition of both rounds.
+> **Revision 5** — incorporates T-1 review rounds 1–4: round 1 (5 blocking / 15 major /
+> 10 minor / 2 nit), round 2 (7 major / 8 minor / 2 nit), round 3 (2 major / 4 minor / 2 nit)
+> and round 4 (1 major / 2 minor / 3 nit). See §20 for the revision log and the
+> finding-by-finding disposition of every round.
 
 Produce the deliverables for an event-driven Devin remediation pipeline that finds, ranks, and
 remediates issues in Apache Superset, opening cross-linked PRs + issues with observability.
@@ -103,7 +104,8 @@ Captured at `HEAD = a140e74`, snapshot committed to `fixtures/baseline.json`:
   `fixtures/codeql_alerts.json` — LANE 1 therefore has live data. Rule mix:
   `py/stack-trace-exposure` (×2), `py/overly-large-range` (×4), `py/url-redirection` (×2),
   `js/xss`, `js/xss-through-exception`, `js/clear-text-storage-of-sensitive-data`.
-- **35** unconditional skip sites under `tests/`, **as produced by the §5 LANE 2 enumerator**
+- **35** unconditional skip decorator instances under `tests/` *(R4-n-03 — instances, not
+  distinct nodes; see the §5 enumerator limits)*, **as produced by the §5 LANE 2 enumerator**
   *(R2-M-04, corrected by R3-M-02)*, plus **33** conditional sites recorded separately in
   `baseline.excluded_conditional_skips`, split by reason *(R3-m-03)*: **30**
   `conditional_environment_guard` (every `skipif`/`skipUnless` in the tree is an availability or
@@ -235,8 +237,8 @@ question 3.
   (`tests/integration_tests/databases/commands_tests.py:118`). Excluded, and counted separately
   under a two-value reason enum so the exclusion is auditable *(R3-m-03)*:
   `conditional_environment_guard` for `skipif` / `skipUnless` (every one of the target's sites is
-  an availability or backend guard — `ocient_is_installed()`, `only_postgresql`,
-  marshmallow-version, perf-suite — i.e. correct by design, not debt) and `expected_failure_xfail`
+  an availability or backend guard — `ocient_is_installed()`, hive/boto3/thrift/pyhive/pydruid
+  availability, marshmallow-version, perf-suite — i.e. correct by design, not debt) and `expected_failure_xfail`
   for `xfail` (an expected failure that is still collected and reported, not disabled coverage).
   The enumerator and `scripts/build_baseline.py` share this definition. Because a shared
   definition makes a count-equality assertion tautological, the §17 guard is **fixture-based**
@@ -246,6 +248,19 @@ question 3.
   target checkout and compares against `baseline.totals`.
   `tests/integration_tests/model_tests.py` is **not** a source: all 11 of its skips are
   `skipUnless(is_module_installed(...))` guards.
+- **LANE 2 enumerator limits**, stated so the 35/33 split is not read as a complete inventory of
+  every way a Superset test can be disabled *(R4-m-01, R4-m-02, R4-n-03)*:
+  - The enumerator is **decorator-based**. Module- or class-level `pytestmark = pytest.mark.skip(…)`
+    assignments and imperative in-body `pytest.skip()` / `self.skipTest()` calls are **out of
+    scope** — in the target every such site is environment-conditional, so no backlog candidate
+    is lost, but they appear in neither the included nor the excluded set.
+  - Import-binding resolution covers **absolute** imports only. An indirect mark alias reached
+    through a relative import (`from .conftest import only_postgresql`, where `conftest` binds
+    `only_postgresql = pytest.mark.skipif(…)`) resolves to a bare local name and is likewise out
+    of scope. Its six usages are `skipif`-derived and therefore correctly non-candidates, but
+    they are **not** among the 30 recorded `conditional_environment_guard` rows.
+  - **35** and **33** count *decorator instances*, not distinct test nodes: a node carrying two
+    conditional decorators contributes two rows (e.g. `model_tests.py:62` and `:103`).
 - **LANE 3 — EOL-passed `@deprecated` removals**; scan scope `superset/**/*.py` *(n-01)*, EOL
   and caller/override gating per §4.2, verified via targeted
   `tests/unit_tests/db_engine_specs/`. Enumeration is AST-based (the decorator may sit several
@@ -577,7 +592,7 @@ README ships a config reference table with default, allowed values, and safety c
 | `kpi_sink` | `local` | `local`, `gsheet` | `gsheet` while `mode = simulate` is a **config validation error at startup** (non-zero exit, no partial run) *(R2-m-07)* |
 | `major_only_requires_human` | `true` | `true`, `false` | **routing-only** — see below |
 | `alert_source` | `api` | `api`, `sarif_file` | — |
-| `ci_evidence_mode` | resolved by §3 0d | `github`, `local` | `local` forces `auto_merge_enabled = false` |
+| `ci_evidence_mode` | resolved by §3 0d, then subject to the §10.1 one-way `local → github` re-resolution *(R4-n-02)* | `github`, `local` | `local` forces `auto_merge_enabled = false` |
 | `ci_wait_timeout_s` | `5400` | `> 0` | on expiry → `ci_evidence_unavailable`, evidence downgraded to `local`, never auto-merge *(R2-M-06)* |
 | `auto_merge_enabled` | `false` | `true`, `false` | **safety-relevant** *(R2-m-05)* — forced `false` whenever `ci_evidence_mode = local`, and never sufficient on its own (§6 tier, §9 invariants and §10 gates all still apply) |
 | `issue_sink` | `issues` | `issues`, `pr_comment` | `pr_comment` tags the run `artifact_degraded` |
@@ -655,11 +670,29 @@ fixture alerts yield four distinct `candidate_id`s.
 alert shifts the digest and would mint a new `candidate_id` for the same underlying alert —
 inflating the burn-down denominator and re-dispatching handled work. Dedupe is therefore not
 keyed on `candidate_id` alone: before dispatching a LANE 1 candidate the orchestrator (1) runs
-the `<!-- devin-remediation-id: … -->` marker search over existing issues/PRs, and (2) matches
-the weaker key `(rule_id, file_path, normalized_symbol)` against `state/candidates.jsonl`. A hit
-on either links the shifted alert to its prior candidate record (recorded as
-`superseded_by: <new candidate_id>` on the old row and `supersedes` on the new one) and suppresses
-re-dispatch. The positional digest remains the primary identity; these are the drift safety nets.
+the `<!-- devin-remediation-id: … -->` marker search over existing issues/PRs, and (2) attempts a
+**drift match** against `state/candidates.jsonl`. A hit on either links the shifted alert to its
+prior candidate record (`superseded_by: <new candidate_id>` on the old row, `supersedes` on the
+new one) and suppresses re-dispatch. The positional digest remains the primary identity; these
+are the drift safety nets.
+
+**The drift match must not undo the positional discriminator** *(R4-M-01)*. `(rule_id,
+file_path, normalized_symbol)` is exactly the key shown above to collide on live data, so using
+it alone would suppress three of the four co-located `py/overly-large-range` alerts as false
+drift hits. The match is therefore two-condition and lossy-by-default-off:
+
+1. **Unambiguity** — the weak key must have multiplicity **1** on both sides: exactly one alert
+   in the current scan and exactly one prior state row carry it. Any multiplicity > 1 disables
+   the drift path for that key entirely; every alert under it is treated as distinct and
+   dispatched on its `position_digest`.
+2. **Content anchor** — even when unambiguous, the candidates must agree on
+   `region_digest = sha256(<the alert's source region text, whitespace-normalized>)[:12]`, or
+   failing that on the offset of the alert region relative to the enclosing symbol's start line.
+   A pure line shift preserves both; a genuinely different alert does not.
+
+Neither condition can be relaxed by config. §17 asserts both directions: the four co-located
+fixture alerts are all dispatched (none suppressed as drift), and a single alert re-read after a
+pure line shift is linked rather than re-dispatched.
 
 `state/candidates.jsonl` (append-only, last-write-wins by `candidate_id`) is the **dedupe and
 resume source of truth** — distinct from the Layer 1 observability log. States:
@@ -796,8 +829,18 @@ code-review loop converges with green CI.
   flips `local → github` exactly once and logs the transition; a pending workflow-approval state
   leaves it at `local` *(R3-m-02)*.
 - `test_shifted_alert_reuses_prior_candidate` — an alert whose only change is a line offset is
-  linked to its prior `candidate_id` via the marker search / secondary
-  `(rule_id, path, normalized_symbol)` match and is not re-dispatched *(R3-m-04)*.
+  linked to its prior `candidate_id` via the marker search / drift match and is not re-dispatched
+  *(R3-m-04)*.
+
+**Added to close T-1 review round 4**
+
+- `test_colocated_alerts_all_dispatched` — all four `py/overly-large-range` fixture alerts are
+  dispatched; none is suppressed as a drift match, because their weak key has multiplicity 4
+  *(R4-M-01)*. Paired with `test_drift_match_requires_region_digest`, where an unambiguous weak
+  key but a differing `region_digest` does **not** link.
+- `test_enumerator_scope_limits` — `pytestmark` assignments, imperative `pytest.skip()` bodies
+  and relative-import mark aliases yield neither candidates nor exclusion rows, matching the §5
+  documented scope *(R4-m-01, R4-m-02)*.
 
 **Added to close §19 gaps** *(M-11)*
 
@@ -862,7 +905,9 @@ code-review loop converges with green CI.
 - **REPO B (Superset fork)** — ≥1 real, verified remediation per first lane (a CodeQL-alert fix
   and a re-enabled skipped/flaky test) as cross-linked PR + convention-compliant companion issue
   with the CI gate stack green **under the recorded `ci_evidence_mode`** (§10.1), which
-  `RESULTS.md` must name; `RESULTS.md` lists selected issues, gate/score rationale, and links.
+  `RESULTS.md` must name. Each candidate is labelled with the mode in force **at its own gate
+  evaluation** *(R4-n-02)*, so a candidate evidenced before a mid-run `local → github` upgrade is
+  reported as `local`; the transition itself is a separate logged event. `RESULTS.md` lists selected issues, gate/score rationale, and links.
 
 ---
 
@@ -933,6 +978,24 @@ majors confirmed closed, none regressed). Disposition:
 | R3-m-04 positional digests drift across commits | **Accepted.** Drift documented with marker search + weaker `(rule_id, path, normalized_symbol)` match and `supersedes` linkage before dispatch (§14.1) + test. |
 | R3-n-01 `license_check` is the job id | **Accepted.** Rendered context `License Check` used wherever contexts are matched (§10, §19). |
 | R3-n-02 stale counts/fixture name in `docs/PHASE0_DISCOVERY.md` | **Accepted.** Raw pre-scoping count annotated as such, final counts corrected to 35 / 33 with the xfail split, fixture reference corrected to `fixtures/baseline.json`. |
+
+No finding was rejected.
+
+### Revision 5 — T-1 plan review round 4
+
+Reviewer verdict `changes_required`: 0 blocking, 1 major, 2 minor, 3 nit. All eight round-3
+findings confirmed resolved against the real tree (the reviewer re-ran
+`scripts/build_baseline.py` itself and reproduced `fixtures/baseline.json`). The one major was a
+**regression introduced by Revision 4 itself**. Disposition:
+
+| Finding | Disposition |
+|---|---|
+| R4-M-01 the R3-m-04 drift net re-introduces the R2-M-01 collision | **Accepted.** Correct and serious: `(rule_id, path, normalized_symbol)` is the very key §14.1 documents as colliding, so three of the four co-located `py/overly-large-range` alerts would have been suppressed as false drift hits. The drift match is now two-condition — weak-key multiplicity must be 1 on both sides, **and** a `region_digest` (or symbol-relative offset) must agree — neither relaxable by config, plus a §17 test asserting all four co-located alerts are dispatched (§14.1, §17). |
+| R4-m-01 relative-import mark aliases resolve to bare names | **Accepted.** `from .conftest import only_postgresql` is out of the enumerator's absolute-import resolution, so its six usages are in neither set. They are `skipif`-derived and so correctly non-candidates; §5 now states the limit explicitly and no longer implies `only_postgresql` is among the 30 recorded guards. |
+| R4-m-02 `pytestmark` and imperative skips invisible | **Accepted.** §5 now names module/class-level `pytestmark` and in-body `pytest.skip()` / `skipTest()` as out of the decorator-based scope, with a §17 test. |
+| R4-n-01 header still says "Revision 3" | **Accepted.** Header now reads Revision 5 / rounds 1–4. |
+| R4-n-02 §13 row and §19 silent on the mode upgrade | **Accepted.** §13 row cites the §10.1 one-way re-resolution; §19 states each candidate is labelled with the mode in force at its own gate evaluation. |
+| R4-n-03 35/33 are decorator instances | **Accepted.** Stated as decorator instances in §3 0e, §5 and the discovery doc. |
 
 No finding was rejected.
 
