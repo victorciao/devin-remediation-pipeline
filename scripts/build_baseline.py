@@ -19,20 +19,25 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-#: LANE 2 scope (plan §5): unconditional skips only. ``xfail`` is a different signal (an
-#: expected failure, not disabled coverage) and every ``skipif``/``skipUnless`` site in the
-#: target repo is a correct-by-design environment guard, so both are excluded.
-SKIP_DECORATORS = ("pytest.mark.skip", "unittest.skip")
+#: LANE 2 scope (plan §5): unconditional skips only. Decorator names are resolved against
+#: the module's import bindings first, so an alias import (``from unittest import skip``
+#: then ``@skip("Flaky")``) is enumerated like a fully qualified one.
+SKIP_DECORATORS = ("pytest.mark.skip", "unittest.skip", "unittest.case.skip")
 
 #: Conditional-skip decorators, counted separately so the exclusion is auditable rather
-#: than invisible.
+#: than invisible. ``xfail`` is a different signal again — an expected failure that is still
+#: collected — so it carries its own exclusion reason.
 CONDITIONAL_SKIP_MARKERS = ("skipif", "skipUnless", "xfail")
+XFAIL_MARKERS = ("xfail",)
 
 #: LANE 3 (plan §4.2): the repo declares no static version (``pyproject.toml`` uses
 #: ``dynamic = ["version"]`` and ``package.json`` says ``0.0.0-dev``), so the current major
 #: is derived from the highest concrete release offered by the bug-report issue form.
 VERSION_SOURCE = ".github/ISSUE_TEMPLATE/bug-report.yml"
 EOL_MAJOR_LAG = 2
+
+#: One enumerated site: string/int fields only, so the record serializes straight to JSON.
+Record = dict[str, str | int | None]
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -51,6 +56,32 @@ def _decorator_name(node: ast.expr) -> str:
     return ""
 
 
+def _import_bindings(tree: ast.Module) -> dict[str, str]:
+    """Map each locally bound name to the dotted path it refers to."""
+    bindings: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bindings[alias.asname or alias.name.split(".")[0]] = (
+                    alias.name if alias.asname else alias.name.split(".")[0]
+                )
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            for alias in node.names:
+                bindings[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return bindings
+
+
+def _resolve(name: str, bindings: dict[str, str]) -> str:
+    """Rewrite a decorator's dotted name through the module's import bindings."""
+    if not name:
+        return name
+    head, _, rest = name.partition(".")
+    target = bindings.get(head)
+    if target is None:
+        return name
+    return f"{target}.{rest}" if rest else target
+
+
 def _decorator_reason(node: ast.expr) -> str | None:
     if not isinstance(node, ast.Call):
         return None
@@ -67,36 +98,50 @@ def _is_unconditional_skip(name: str) -> bool:
     """Return True for a decorator that disables a test outright."""
     if any(marker in name for marker in CONDITIONAL_SKIP_MARKERS):
         return False
-    return any(name == s or name.endswith(s) for s in SKIP_DECORATORS)
+    return any(name == s or name.endswith(f".{s}") for s in SKIP_DECORATORS)
 
 
-def collect_skipped_tests(repo: Path) -> tuple[list[dict], list[dict]]:
+def _exclusion_reason(name: str) -> str | None:
+    """Classify a conditional decorator into its auditable exclusion reason."""
+    if any(marker in name for marker in XFAIL_MARKERS):
+        return "expected_failure_xfail"
+    if any(marker in name for marker in CONDITIONAL_SKIP_MARKERS):
+        return "conditional_environment_guard"
+    return None
+
+
+def collect_skipped_tests(repo: Path) -> tuple[list[Record], list[Record]]:
     """Enumerate LANE 2 candidates and the conditional sites deliberately excluded."""
-    included: list[dict] = []
-    excluded: list[dict] = []
+    included: list[Record] = []
+    excluded: list[Record] = []
     for path in sorted((repo / "tests").rglob("*.py")):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except (SyntaxError, UnicodeDecodeError):
             continue
+        bindings = _import_bindings(tree)
         for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if not isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ):
                 continue
             for dec in node.decorator_list:
-                name = _decorator_name(dec)
-                record = {
+                written = _decorator_name(dec)
+                name = _resolve(written, bindings)
+                record: Record = {
                     "path": str(path.relative_to(repo)),
                     "line": node.lineno,
                     "symbol": node.name,
-                    "decorator": name,
+                    "decorator": written,
+                    "resolved_decorator": name,
                     "reason": _decorator_reason(dec),
                     "kind": "class" if isinstance(node, ast.ClassDef) else "function",
                 }
                 if _is_unconditional_skip(name):
                     record["nodeid"] = f"{record['path']}::{node.name}"
                     included.append(record)
-                elif any(marker in name for marker in CONDITIONAL_SKIP_MARKERS):
-                    record["excluded_reason"] = "conditional_environment_guard"
+                elif (reason := _exclusion_reason(name)) is not None:
+                    record["excluded_reason"] = reason
                     excluded.append(record)
     return included, excluded
 
@@ -119,15 +164,25 @@ def _removed_in(dec: ast.expr) -> str | None:
     return None
 
 
-def collect_deprecations(repo: Path) -> list[dict]:
+def _eol_passed(deprecated_in: str, current_major: int) -> bool:
+    """Return True when a deprecation's major is at least EOL_MAJOR_LAG behind current."""
+    head = deprecated_in.split(".")[0]
+    return head.isdigit() and int(head) <= current_major - EOL_MAJOR_LAG
+
+
+def collect_deprecations(repo: Path) -> list[Record]:
     """Enumerate ``@deprecated(deprecated_in=...)`` sites with their qualified names."""
-    out: list[dict] = []
+    out: list[Record] = []
     for path in sorted((repo / "superset").rglob("*.py")):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except (SyntaxError, UnicodeDecodeError):
             continue
-        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        parents = {
+            child: node
+            for node in ast.walk(tree)
+            for child in ast.iter_child_nodes(node)
+        }
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -137,9 +192,13 @@ def collect_deprecations(repo: Path) -> list[dict]:
                     continue
                 owner = parents.get(node)
                 qualname = (
-                    f"{owner.name}.{node.name}" if isinstance(owner, ast.ClassDef) else node.name
+                    f"{owner.name}.{node.name}"
+                    if isinstance(owner, ast.ClassDef)
+                    else node.name
                 )
-                module = str(path.relative_to(repo)).removesuffix(".py").replace("/", ".")
+                module = (
+                    str(path.relative_to(repo)).removesuffix(".py").replace("/", ".")
+                )
                 out.append(
                     {
                         "path": str(path.relative_to(repo)),
@@ -173,7 +232,8 @@ def current_release(repo: Path) -> tuple[str, int]:
         if in_block:
             match = RELEASE_RE.match(line)
             if match:
-                releases.append(tuple(int(g) for g in match.groups()))  # type: ignore[arg-type]
+                major, minor, patch = (int(g) for g in match.groups())
+                releases.append((major, minor, patch))
             elif line.strip().startswith("- type:"):
                 break
     if not releases:
@@ -236,10 +296,7 @@ def main() -> int:
         "excluded_conditional_skips": len(excluded),
         "deprecations": len(deprecations),
         "eol_passed_deprecations": sum(
-            1
-            for d in deprecations
-            if d["deprecated_in"].split(".")[0].isdigit()
-            and int(d["deprecated_in"].split(".")[0]) <= major - EOL_MAJOR_LAG
+            1 for d in deprecations if _eol_passed(str(d["deprecated_in"]), major)
         ),
         "codeql_open_alerts": len(codeql["open"]),
     }

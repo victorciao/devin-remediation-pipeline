@@ -33,11 +33,11 @@ Session token identity: `devin-ai-integration[bot]` (GitHub App installation tok
 | Lane | Live signal on the fork | Verdict |
 |---|---|---|
 | LANE 1 — CodeQL | `.github/workflows/codeql-analysis.yml` exists and is the assumed anchor (`schedule: cron "0 4 * * *"`, `security-events: write`, matrix `python`/`javascript`). But **the workflow has never run on this fork** (0 Actions runs) and the alerts API is 403, so **the live alert count is currently unknowable and is very likely zero**. Forks do not inherit the upstream's code-scanning alerts. | **Scope shift.** §3's "no CodeQL alerts present" pause condition is met. |
-| LANE 2 — skipped/flaky tests | **97** skip sites under `tests/`. Confirmed rich seam in the two named files: `tests/integration_tests/sqllab_tests.py` has 11 `@pytest.mark.skip(...)` decorators (lines 84, 136, 152, 206, 223, 236, 362, 557, 603, 626, 867); `tests/integration_tests/model_tests.py` has 11 `@unittest.skipUnless(...)` (env-conditional, not backlog). | **Healthy — viable demo lane today.** |
+| LANE 2 — skipped/flaky tests | **97** skip sites under `tests/` — a raw pre-scoping grep over *all* skip forms (unconditional, `skipif`/`skipUnless`, `xfail`), superseded by the §5 enumerator scope below.  Confirmed rich seam in the two named files: `tests/integration_tests/sqllab_tests.py` has 11 `@pytest.mark.skip(...)` decorators (lines 84, 136, 152, 206, 223, 236, 362, 557, 603, 626, 867); `tests/integration_tests/model_tests.py` has 11 `@unittest.skipUnless(...)` (env-conditional, not backlog). | **Healthy — viable demo lane today.** |
 | LANE 3 — EOL `@deprecated` | 4 parseable sites: `superset/db_engine_specs/base.py:1542` `normalize_indexes` (`deprecated_in="3.0"`), `:2325` `get_url_for_impersonation` (`6.0.0`), `:2347` `update_impersonation_config` (`6.0.0`), `superset/databases/api.py:976` (`4.0`). Verifier path `tests/unit_tests/db_engine_specs/` exists. | **Healthy.** |
 | Open issues | `GET /issues` returns empty — forks have Issues disabled by default. | **Blocks §7 companion issues until enabled.** |
 
-Baseline snapshot for burn-down will be captured as `fixtures/baseline_<date>.json` (skip-site inventory + deprecation inventory + empty CodeQL set), and the SIMULATE fixture derived from it.
+Baseline snapshot for burn-down will be captured as `fixtures/baseline.json` (skip-site inventory + deprecation inventory + empty CodeQL set), and the SIMULATE fixture derived from it.
 
 ## Consequences for §5 lane priority
 
@@ -70,5 +70,8 @@ is taken from `alert.updated_at` regardless (plan §5).
 
 The baseline was regenerated after these fixes (`scripts/build_baseline.py <repo> fixtures
 fixtures/codeql_alerts.json`), so `fixtures/baseline.json` records
-`baseline_valid_lanes: [codeql, skipped_tests, deprecations]`, `current_release: 6.1.0`, 34
-LANE 2 candidates, 33 excluded conditional skips, and 2 EOL-passed deprecations.
+`baseline_valid_lanes: [codeql, skipped_tests, deprecations]`, `current_release: 6.1.0`, **35**
+LANE 2 candidates (the enumerator resolves decorator names through import bindings, so the
+alias-imported `@skip("Flaky")` at `tests/integration_tests/databases/commands_tests.py:118`
+counts), 33 excluded conditional sites split by reason — 30 `conditional_environment_guard` and
+3 `expected_failure_xfail` — and 2 EOL-passed deprecations.

@@ -103,11 +103,14 @@ Captured at `HEAD = a140e74`, snapshot committed to `fixtures/baseline.json`:
   `fixtures/codeql_alerts.json` — LANE 1 therefore has live data. Rule mix:
   `py/stack-trace-exposure` (×2), `py/overly-large-range` (×4), `py/url-redirection` (×2),
   `js/xss`, `js/xss-through-exception`, `js/clear-text-storage-of-sensitive-data`.
-- **34** unconditional skip sites under `tests/`, **as produced by the §5 LANE 2 enumerator**
-  *(R2-M-04)*, plus **33** conditional sites recorded separately in
-  `baseline.excluded_conditional_skips` with `excluded_reason: conditional_environment_guard`
-  (every `skipif`/`skipUnless` in the tree is an availability or backend guard, and `xfail` is
-  an expected-failure signal, not disabled coverage — see §5).
+- **35** unconditional skip sites under `tests/`, **as produced by the §5 LANE 2 enumerator**
+  *(R2-M-04, corrected by R3-M-02)*, plus **33** conditional sites recorded separately in
+  `baseline.excluded_conditional_skips`, split by reason *(R3-m-03)*: **30**
+  `conditional_environment_guard` (every `skipif`/`skipUnless` in the tree is an availability or
+  backend guard) and **3** `expected_failure_xfail` (an expected failure is still collected, so
+  it is not disabled coverage — see §5). The 35th included site is the alias-imported
+  `@skip("Flaky")` at `tests/integration_tests/databases/commands_tests.py:118`, which a
+  dotted-name-only matcher missed.
 - **4** `@deprecated(deprecated_in=...)` sites, none carrying `removed_in`, of which **2** are
   EOL-passed under §4.2 (`normalize_indexes` at `3.0`,
   `DatabaseRestApi.table_extra_metadata_deprecated` at `4.0`).
@@ -223,13 +226,24 @@ question 3.
   with the §18 non-goal, rather than leaving them undefined.
 - **LANE 2 — skipped/flaky-test backlog** (`tests/integration_tests/sqllab_tests.py` and the
   wider `tests/` tree); re-enable and verify. **Enumerator scope** *(M-01, R2-M-04)*: match
-  `@pytest.mark.skip` and `@unittest.skip` — unconditional skips **only**. Excluded, and counted
-  separately so the exclusion is auditable: `skipif` / `skipUnless` (every one of the target's
-  sites is an availability or backend guard — `ocient_is_installed()`, `only_postgresql`,
-  marshmallow-version, perf-suite — i.e. correct by design, not debt) and `xfail` (an expected
-  failure that is still collected and reported, not disabled coverage). The enumerator and
-  `scripts/build_baseline.py` share this definition, and a §17 test asserts
-  `enumerator_count == baseline.totals.skipped_tests` so the two can never drift.
+  `@pytest.mark.skip` and `@unittest.skip` — unconditional skips **only**. **Decorator names are
+  resolved through the module's import bindings before matching** *(R3-M-02)*: `import`/`from …
+  import … as …` statements are collected per file and the decorator's leading segment rewritten,
+  so `from unittest import skip` + `@skip("Flaky")` and `from pytest import mark` +
+  `@mark.skip` resolve to `unittest.skip` / `pytest.mark.skip` and are enumerated. Matching the
+  written dotted name alone silently dropped a real candidate
+  (`tests/integration_tests/databases/commands_tests.py:118`). Excluded, and counted separately
+  under a two-value reason enum so the exclusion is auditable *(R3-m-03)*:
+  `conditional_environment_guard` for `skipif` / `skipUnless` (every one of the target's sites is
+  an availability or backend guard — `ocient_is_installed()`, `only_postgresql`,
+  marshmallow-version, perf-suite — i.e. correct by design, not debt) and `expected_failure_xfail`
+  for `xfail` (an expected failure that is still collected and reported, not disabled coverage).
+  The enumerator and `scripts/build_baseline.py` share this definition. Because a shared
+  definition makes a count-equality assertion tautological, the §17 guard is **fixture-based**
+  *(R3-M-02)*: a checked-in mini-tree containing a bare aliased `@skip`, a fully qualified
+  `@pytest.mark.skip`, a `skipUnless` guard and an `xfail` must classify as 2 included / 2
+  excluded with the right reasons, and a separate drift test re-runs the enumerator over the
+  target checkout and compares against `baseline.totals`.
   `tests/integration_tests/model_tests.py` is **not** a source: all 11 of its skips are
   `skipUnless(is_module_installed(...))` guards.
 - **LANE 3 — EOL-passed `@deprecated` removals**; scan scope `superset/**/*.py` *(n-01)*, EOL
@@ -424,8 +438,10 @@ upstream `.asf.yaml`** *(R2-m-01)* are exactly:
 `playwright-tests-required`, `dependency-review`, `enforce-single-migration-head`.
 
 Other CI-only workflows the pipeline also runs, but which are **not** `.asf.yaml`-required:
-`license_check` (an Apache-RAT / `setup-java` workflow invoking `./scripts/check_license.sh` —
-not a pre-commit hook either).
+**`License Check`** *(R3-n-01 — the rendered check context is the job's `name:`, not its
+`license_check:` job id)*: an Apache-RAT / `setup-java` workflow invoking
+`./scripts/check_license.sh` — not a pre-commit hook either. Everywhere the plan matches
+contexts against a PR head it uses the rendered strings.
 
 That required set is applied by ASF infra to `apache/superset` only — a fork inherits the
 workflows but not the branch protection.
@@ -455,6 +471,16 @@ has ever completed).
 recorded `ci_evidence_unavailable`, its evidence is downgraded to `local`, and it is **never**
 auto-merge eligible. Without this bound a fork whose workflows never trigger blocks the
 orchestrator indefinitely.
+
+**One-way upgrade** *(R3-m-02)* — 0d resolves the mode from *history*, so a fork whose Actions
+were only just enabled would otherwise stay pinned to `local` forever even though the pipeline's
+own first PR can trigger the contexts. After a generated PR head has any required context report
+within `ci_wait_timeout_s`, the mode re-resolves `local → github` once, logged as an explicit
+mode transition in the Layer 1 event log. The transition is one-way (never `github → local`
+except via the timeout downgrade above, which is per candidate). A fork PR sitting in
+**pending workflow approval** — GitHub's first-time-contributor / fork gate — reports no context
+and therefore keeps the mode at `local`; that state is recorded as
+`ci_evidence_unavailable: awaiting_workflow_approval` rather than treated as a failure.
 
 ---
 
@@ -522,9 +548,12 @@ pre-existing session for an identical request, which would defeat the two retry 
 requires — the §14.1 retry of a stuck/timed-out session under the same `candidate_id`, and the
 §9.1 re-author after `invalid_red_baseline`. Every creation therefore carries an **attempt
 ordinal** in both the prompt preamble and the `attempt:<n>` tag, making each retry a distinct
-request. The orchestrator asserts `is_new_session == true` for any attempt `> 1`; a dedupe hit
-there is a fatal orchestration error, not a silent no-op. `is_new_session` is recorded in the
-Layer 1 event log.
+request. The orchestrator then verifies, for any attempt `> 1`, that the response really is a new
+session. `is_new_session` is typed `boolean | null`, so the check is **tri-state** *(R3-m-01)*:
+`true` → proceed; `false` → dedupe hit → fatal orchestration error; `null`/absent → unknown, fall
+back to comparing the returned `session_id` against the id recorded for the previous attempt
+(equal → fatal, different → proceed). A missing field must not abort a legitimate retry. Both the
+raw tri-state value and the resolved decision are recorded in the Layer 1 event log.
 
 ---
 
@@ -621,6 +650,16 @@ position_digest = sha256("{start_line}:{start_column}-{end_line}:{end_column}")[
 taken from `most_recent_instance.location`. It is stable across re-scans of unchanged code
 (unlike `alert.number`) while still separating co-located alerts. A §17 test asserts the four
 fixture alerts yield four distinct `candidate_id`s.
+
+**Cross-commit drift** *(R3-m-04)*. Absolute line/column means an unrelated edit *above* the
+alert shifts the digest and would mint a new `candidate_id` for the same underlying alert —
+inflating the burn-down denominator and re-dispatching handled work. Dedupe is therefore not
+keyed on `candidate_id` alone: before dispatching a LANE 1 candidate the orchestrator (1) runs
+the `<!-- devin-remediation-id: … -->` marker search over existing issues/PRs, and (2) matches
+the weaker key `(rule_id, file_path, normalized_symbol)` against `state/candidates.jsonl`. A hit
+on either links the shifted alert to its prior candidate record (recorded as
+`superseded_by: <new candidate_id>` on the old row and `supersedes` on the new one) and suppresses
+re-dispatch. The positional digest remains the primary identity; these are the drift safety nets.
 
 `state/candidates.jsonl` (append-only, last-write-wins by `candidate_id`) is the **dedupe and
 resume source of truth** — distinct from the Layer 1 observability log. States:
@@ -719,8 +758,9 @@ code-review loop converges with green CI.
 - a `skipUnless` fixture yields **zero** LANE 2 candidates *(M-01)*.
 - a deprecation with an internal caller or an override-surface reference fails `automatability`
   *(M-02)*; `normalize_indexes` passes and `get_url_for_impersonation` does not.
-- an implementer diff touching an assertion is rejected while a skip-marker-only diff is
-  accepted; a LANE 2 test passing pre-fix yields `stale_skip` *(B-04)*.
+- an **implementer** diff touching an assertion **or a skip marker** is rejected, while the
+  **reviewer's** skip-marker-only diff is accepted *(B-04, corrected by R3-M-01 — one specified
+  behaviour per role, matching §9.2/§9.3)*; a LANE 2 test passing pre-fix yields `stale_skip`.
 - tier mapping at the threshold boundaries (`59/60`, `19/20`) and the `score_cap` clamp *(B-05)*.
 
 **Added to close T-1 review round 2**
@@ -732,10 +772,14 @@ code-review loop converges with green CI.
   a form with no concrete release raises a startup config error rather than silently emptying
   LANE 3 *(R2-M-02)*.
 - `test_burndown_reports_na_for_invalid_baseline_lane` *(R2-M-03)*.
-- `test_enumerator_count_matches_baseline_totals` and `test_xfail_and_skipif_yield_no_candidates`
-  *(R2-M-04)*.
+- `test_enumerator_classifies_skip_fixture_tree` — the checked-in mini-tree (aliased bare
+  `@skip`, qualified `@pytest.mark.skip`, `skipUnless`, `xfail`) yields 2 included and 2 excluded
+  with reasons `conditional_environment_guard` / `expected_failure_xfail` *(R2-M-04, R3-M-02,
+  R3-m-03)*, plus `test_enumerator_matches_baseline_totals` as the drift check against the
+  target checkout.
 - `test_retry_asserts_new_session` — attempt `> 1` returning `is_new_session == false` is a fatal
-  orchestration error *(R2-M-05)*.
+  orchestration error; `null` falls back to the session-id comparison and only a **repeated**
+  session id is fatal *(R2-M-05, R3-m-01)*.
 - `test_ci_wait_timeout_downgrades_evidence` — expiry → `ci_evidence_unavailable`, evidence
   `local`, not auto-merge eligible *(R2-M-06)*.
 - `test_implementer_skip_marker_hunk_rejected` and
@@ -745,6 +789,15 @@ code-review loop converges with green CI.
   with reason `out_of_scope_frontend` *(R2-m-04)*.
 - `test_gsheet_sink_rejected_in_simulate` *(R2-m-07)*.
 - `test_pr_comment_sink_state_transition_and_validation` *(R2-m-06)*.
+
+**Added to close T-1 review round 3**
+
+- `test_ci_evidence_mode_upgrades_once` — a required context reporting on a generated PR head
+  flips `local → github` exactly once and logs the transition; a pending workflow-approval state
+  leaves it at `local` *(R3-m-02)*.
+- `test_shifted_alert_reuses_prior_candidate` — an alert whose only change is a line offset is
+  linked to its prior `candidate_id` via the marker search / secondary
+  `(rule_id, path, normalized_symbol)` match and is not re-dispatched *(R3-m-04)*.
 
 **Added to close §19 gaps** *(M-11)*
 
@@ -797,7 +850,7 @@ code-review loop converges with green CI.
   `needs-human-review` after 5 iterations; `major`-only → human; >10 → 10 dispatched + deferred;
   alerts on seeded bad metrics; KPI rollup at `reports/kpis.md`.
 - **CONTRIBUTION COMPLIANCE** — qualified by `ci_evidence_mode` *(R2-m-08)*: under `github`, the
-  reported contexts (`lint-check`, `license_check`, `pre-commit (current)`) are the evidence;
+  reported contexts (`lint-check`, `License Check`, `pre-commit (current)`) are the evidence;
   under `local`, the credential-free proxies are — `test_generated_pr_contribution_compliance`
   (RAT header, ruff/mypy clean, `Signed-off-by` trailer) and
   `test_pr_title_matches_pr_lint_regex`, plus attached `pre-commit run --files` output. The
@@ -864,6 +917,24 @@ confirmed closed, 26 of 32 findings resolved outright, none regressed). Disposit
 No finding was rejected. All three former open questions are closed: OQ1/OQ2 by the 0d probe
 resolving `ci_evidence_mode = local` and `auto_merge_enabled = false` (§10.1, §13), OQ3 by the
 §4.2 candidate table.
+
+### Revision 4 — T-1 plan review round 3
+
+Reviewer verdict `changes_required`: 0 blocking, 2 major, 4 minor, 2 nit (all seven round-2
+majors confirmed closed, none regressed). Disposition:
+
+| Finding | Disposition |
+|---|---|
+| R3-M-01 §17 bullet contradicts §9.2/§9.3 on skip markers | **Accepted.** The stale bullet accepted an *implementer* skip-marker-only diff, which R2-M-07 had already made a rejection. Rewritten per role: implementer assertion **or** skip-marker hunk → rejected; reviewer skip-marker-only diff → accepted (§17). |
+| R3-M-02 enumerator misses alias-imported skips | **Accepted.** The matcher compared written dotted names, so `from unittest import skip` + `@skip("Flaky")` (`tests/integration_tests/databases/commands_tests.py:118`) was dropped. `scripts/build_baseline.py` now resolves decorator names through per-module import bindings; baseline regenerated: **35** included (was 34). The tautological count-equality test is replaced by a fixture-tree classification test plus a drift check (§3 0e, §5, §17). |
+| R3-m-01 `is_new_session` may be `null` | **Accepted.** Retry check made tri-state with a `session_id` comparison fallback so a missing field cannot abort a legitimate retry (§12.2). |
+| R3-m-02 `ci_evidence_mode` pinned to `local` with no upgrade path | **Accepted.** One-way `local → github` re-resolution once a generated PR head reports a required context, logged as a mode transition; pending workflow approval recorded as `awaiting_workflow_approval` and keeps `local` (§10.1). |
+| R3-m-03 all exclusions labelled `conditional_environment_guard` | **Accepted.** Two-value reason enum: 30 `conditional_environment_guard` + 3 `expected_failure_xfail` (§3 0e, §5, enumerator). |
+| R3-m-04 positional digests drift across commits | **Accepted.** Drift documented with marker search + weaker `(rule_id, path, normalized_symbol)` match and `supersedes` linkage before dispatch (§14.1) + test. |
+| R3-n-01 `license_check` is the job id | **Accepted.** Rendered context `License Check` used wherever contexts are matched (§10, §19). |
+| R3-n-02 stale counts/fixture name in `docs/PHASE0_DISCOVERY.md` | **Accepted.** Raw pre-scoping count annotated as such, final counts corrected to 35 / 33 with the xfail split, fixture reference corrected to `fixtures/baseline.json`. |
+
+No finding was rejected.
 
 ---
 
