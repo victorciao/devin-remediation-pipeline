@@ -4,10 +4,13 @@
 > plan-review step (T-1, §2) reviews against, and what every later change must be
 > reconciled with. Referenced from the README.
 >
-> **Revision 8** — incorporates T-1 review rounds 1–7: round 1 (5 blocking / 15 major /
+> **Revision 9 (consolidated)** — the plan-review loop is closed: round 8 returned
+> `approved_with_minor` with **0 blocking and 0 major**, and this revision folds in its three
+> minor and three nit findings. Incorporates T-1 review rounds 1–8: round 1 (5 blocking / 15 major /
 > 10 minor / 2 nit), round 2 (7 major / 8 minor / 2 nit), round 3 (2 major / 4 minor / 2 nit),
 > round 4 (1 major / 2 minor / 3 nit), round 5 (1 major / 4 minor / 2 nit), round 6
-> (1 major / 2 minor / 2 nit) and round 7 (1 major / 4 minor / 4 nit). See §20 for the
+> (1 major / 2 minor / 2 nit), round 7 (1 major / 4 minor / 4 nit) and round 8
+> (0 major / 3 minor / 3 nit). See §20 for the
 > revision log and the finding-by-finding disposition of every round.
 
 Produce the deliverables for an event-driven Devin remediation pipeline that finds, ranks, and
@@ -182,12 +185,14 @@ score = min( business_impact × verifiability × automatability × signal_qualit
 judgment *(M-15)*:
 
 - The **gate** asks whether *any* well-scoped transformation / pass-fail signal exists at all.
-  It is **rubric `>= 2` AND every lane-specific hard condition** *(R7-m-03)* — the LANE 2 breadth
-  check (§4 gate 2, reason `class_scope_too_broad`), the LANE 2 overlap check (§9.2, reason
-  `blocked_by_enclosing_skip`) and the LANE 3
+  It is **rubric `>= 2` AND every lane-specific hard condition** *(R7-m-03)*. The complete list
+  at this revision *(R8-n-01)*: the LANE 1 scope check (§5, reason `out_of_scope_frontend`), the
+  LANE 2 breadth check (§4 gate 2, reasons `class_scope_too_broad` / `class_breadth_unknown`),
+  the LANE 2 overlap check (§9.2, reason `blocked_by_enclosing_skip`) and the LANE 3
   `no_internal_callers_and_no_override_surface` check (§4.2, reasons `public_api_surface` /
   `internal_caller`). A rubric `1` fails the gate, and so does any hard condition, each with its
-  own recorded reason; a gate module implementing only the rubric threshold is wrong.
+  own recorded reason; a gate module implementing only the rubric threshold is wrong. A lane that
+  adds a hard condition must add it here and to §17.
 - The **score factor** grades *how cleanly*, on `2..5`. Because gate-failing `1`s are already
   removed, the factor carries only residual quality information and cannot double-count a
   no/yes decision.
@@ -287,8 +292,13 @@ question 3.
     (their bases contribute no test methods and none of their methods is parametrized), but a
     future subclass that inherits its tests would report `0`, which is why §4 human-routes a
     `kind = class` row with `enclosed_tests = 0` instead of scoring it as a single-item
-    candidate. Where a live collection is available, `pytest --collect-only <nodeid>` supersedes
-    the AST count.
+    candidate. **Precedence** *(R8-m-03)*: the gate uses the live
+    `pytest --collect-only <nodeid>` count whenever a collection is obtainable, and the AST lower
+    bound otherwise; `class_breadth_unknown` applies only to a `kind = class` row for which no
+    live count could be obtained **and** the AST count is `0`. `collects_single_item` is derived
+    from `enclosed_tests` and inherits the same caveat *(R8-n-03)* — it is not meaningful for a
+    `kind = class` row reporting `enclosed_tests = 0`, and §9.1 never reads it for such a row
+    because §4 gates it out first.
   - **Indirect mark aliases** — a name bound at module level to a `pytest.mark.*` object and
     re-exported (`only_postgresql = pytest.mark.skipif(…)` in `conftest.py`, used as
     `@only_postgresql`) — are out of scope **regardless of import style** *(R5-m-03)*: five of the
@@ -467,17 +477,29 @@ as a special case of the same rule.
   node** and nothing else. Otherwise a nested child — which passes the §4 breadth gate on its own
   `enclosed_tests = 0` — would ship a PR deleting its 52-test parent's class marker, routing
   around the very gate `lane2_class_breadth_max` exists to enforce.
-- **LANE 2 overlap rule** *(R7-M-01, R7-m-01)* — because the committed diff cannot touch the
-  parent, a child whose `enclosing_skip_nodeid` names a candidate that **fails** the breadth gate
-  cannot be remediated independently: merging it would leave the test still skipped, so §19's
-  "re-enabled test" claim would be false. Such a child fails the gate with reason
-  `blocked_by_enclosing_skip` and is deferred, human-routed together with its parent. Where the
-  parent *passes* the gate, the two overlap: before dispatch the orchestrator tests **nodeid
-  containment** against active state rows — not the §14.1 marker search, whose key
-  `candidate_id = sha256(lane|repo|stable_locator)` differs between `path::Class` and
-  `path::Class::method` and would therefore match nothing *(R7-m-01)* — and dispatches only the
-  enclosing candidate, recording the suppressed one as `related_candidate_id` on both the event
-  and the state row.
+- **LANE 2 overlap rule** *(R7-M-01, R7-m-01, R8-m-01)* — because the committed diff cannot touch
+  the parent, the governing principle is general: **a child cannot be remediated independently
+  while any ancestor marker would survive the merge**, since merging it would leave the test
+  skipped and §19's "re-enabled test" claim would be false. Concretely, for a child carrying
+  `enclosing_skip_nodeid`:
+  - the enclosing candidate is **dispatched in this run** (it passed every gate and is high-tier)
+    — the two overlap, so the orchestrator dispatches only the enclosing candidate and suppresses
+    the child, recording `related_candidate_id` on both rows. Overlap is detected by **nodeid
+    containment** over the **current-run candidate rows** *(R8-n-02 — deliberately not §14.1's
+    `superseded_by`-filtered "active" set, which is LANE 1 drift vocabulary)*, not by the §14.1
+    marker search, whose key `candidate_id = sha256(lane|repo|stable_locator)` differs between
+    `path::Class` and `path::Class::method` and would therefore match nothing *(R7-m-01)*.
+  - the enclosing candidate is **not dispatched in this run** for any reason — it failed the
+    breadth gate (`class_scope_too_broad` / `class_breadth_unknown`), failed any other gate,
+    scored below `tier_high_min`, or was deferred by `budget_N` — then the child fails the gate
+    with reason `blocked_by_enclosing_skip` and is human-routed together with its parent. This
+    branch is the default: it covers every state other than a confirmed same-run parent dispatch.
+- **Suppressed / blocked lifecycle** *(R8-m-02)* — both outcomes above are **non-terminal**. The
+  row is written as `suppressed_by_containment` or `blocked_by_enclosing_skip` with its
+  `related_candidate_id`, and is re-evaluated from scratch on every subsequent run: once the
+  ancestor marker is gone from the target, the child re-enumerates as an ordinary candidate and
+  dispatches normally. Such rows count in the §11 burn-down **denominator** (the backlog item is
+  still open) and never in the numerator, so suppression cannot inflate progress.
 - The **implementer** commits non-test paths only and rebases onto the reviewer's commit at
   JOIN. It has **no** LANE 2 carve-out.
 - Every commit uses `git commit --signoff`. Push races resolve by rebase-retry (max 3), then
@@ -606,6 +628,9 @@ Answers "how would an engineering leader know this is working?"
   rate, criterion-coverage rate, expected-reason match rate on red baselines,
   `disagreement_unresolved` rate, sessions-per-candidate by role, implementer-test-edit
   violation rate (~0 expected).
+- **Suppressed LANE 2 rows** *(R8-m-02)* — a candidate held in `blocked_by_enclosing_skip` or
+  `suppressed_by_containment` (§9.2) counts in the burn-down **denominator** only, never as
+  progress, and is re-evaluated on every run.
 - **Burn-down validity** *(R2-M-03)* — burn-down is computed only for lanes listed in
   `baseline.baseline_valid_lanes`; a lane whose baseline was captured while it was
   `capability_unavailable` reports `n/a` with that reason, never a spurious increase from zero.
@@ -803,6 +828,8 @@ resume source of truth** — distinct from the Layer 1 observability log. States
 ```
 enumerated → gated → scored → dispatching → issue_created → pr_created → converged → terminal
                                           └→ pr_created → comment_created → …   (issue_sink = pr_comment)
+         └→ blocked_by_enclosing_skip | suppressed_by_containment   (LANE 2 overlap; NON-terminal,
+                                                                     re-evaluated every run — §9.2)
 ```
 
 Before any write the pipeline re-reads state **and** searches the target repo for the marker
@@ -957,7 +984,7 @@ code-review loop converges with green CI.
   `class_scope_too_broad`; one with `enclosed_tests = 0` fails with `class_breadth_unknown`
   *(R6-m-02, R7-m-04)*.
 
-**Added to close T-1 review round 7**
+**Added to close T-1 review rounds 7–8**
 
 - `test_nested_child_commits_only_own_marker` — the committed test-path diff of a nested
   candidate contains no marker outside its own node, even though its scratch patch lifted the
@@ -972,6 +999,15 @@ code-review loop converges with green CI.
 - `test_descendant_marker_excluded_from_aggregate` — a class-row baseline whose only `SKIPPED`
   items carry their own markers is valid, and those items are logged as
   `still_skipped_descendants` *(R7-n-04)*.
+- `test_child_blocked_when_parent_not_dispatched_for_any_reason` — a child is gated
+  `blocked_by_enclosing_skip` when its parent is dropped, low-tier or budget-deferred, not only
+  when the parent fails the breadth gate *(R8-m-01)*.
+- `test_blocked_child_redispatches_once_ancestor_marker_gone` — the blocked/suppressed row is
+  non-terminal: a later run with the ancestor marker removed dispatches it, and while blocked it
+  sits in the burn-down denominator only *(R8-m-02)*.
+- `test_live_collection_count_overrides_ast_lower_bound` — the breadth gate prefers
+  `pytest --collect-only`; `class_breadth_unknown` fires only when no live count is obtainable
+  and the AST count is 0 *(R8-m-03)*.
 - `test_drift_survives_repeated_shifts` — a second consecutive line shift of the same alert still
   links, because state-side multiplicity counts **active** rows only *(R5-m-01)*.
 - `test_enumerator_scope_limits` — `pytestmark` assignments, imperative `pytest.skip()` bodies
@@ -1196,6 +1232,38 @@ collided. Disposition:
 | R7-n-04 descendant markers leave a class row unclassifiable | **Accepted.** §9.1 excludes items carrying their own unconditional marker from the aggregate and logs them as `still_skipped_descendants`, consistent with §9.2 lifting ancestors only. |
 
 No finding was rejected.
+
+### Revision 9 (consolidated) — T-1 plan review round 8, loop closed
+
+Reviewer verdict `approved_with_minor`: **0 blocking, 0 major**, 3 minor, 3 nit. All nine round-7
+findings confirmed resolved against real repository facts: `fixtures/baseline.json` reproduced
+byte-identically from a fresh clone at `a140e74` apart from `captured_at`; the four class breadths
+independently re-derived from the AST as 52 / 25 / 13 / 11 with the base classes
+(`BaseTestChartDataApi`, `SupersetTestCase`) confirmed to contribute no test methods, so the counts
+are exact at this HEAD; the two nested rows confirmed as `TestPostChartDataApi::test_chart_data_dttm_filter`
+and `::test_chart_data_async`; and no included row found inside a conditionally-skipped class, so
+the new `blocked_by_enclosing_skip` path is exercised on exactly those two rows and 29 function-level
+candidates remain reachable for the §19 LANE 2 evidence. Disposition of round 8:
+
+| Finding | Disposition |
+|---|---|
+| R8-m-01 overlap rule covered only the breadth-gate branch | **Accepted.** §9.2 now states the general principle — a child cannot be remediated while **any** ancestor marker survives the merge — and enumerates two exhaustive branches: parent dispatched this run (containment-suppress the child) versus parent not dispatched *for any reason* (gate the child `blocked_by_enclosing_skip`), the latter being the default. §17 case added. |
+| R8-m-02 no lifecycle for a suppressed/blocked child | **Accepted.** Both outcomes are explicitly non-terminal states in the §14.1 state machine, re-evaluated every run and re-dispatched once the ancestor marker is gone; §11 counts them in the burn-down denominator only. §17 case added. |
+| R8-m-03 AST count vs live collection precedence undefined | **Accepted.** §5 states the precedence: live `pytest --collect-only` where obtainable, AST lower bound otherwise, and `class_breadth_unknown` only when no live count is obtainable and the AST count is 0. §17 case added. |
+| R8-n-01 §4.1 hard-condition list incomplete | **Accepted.** LANE 1 `out_of_scope_frontend` and `class_breadth_unknown` added; the list is declared complete and must be extended with any new lane condition. |
+| R8-n-02 "active state rows" overloads §14.1's drift vocabulary | **Accepted.** LANE 2 containment now reads **current-run candidate rows**, explicitly not the `superseded_by`-filtered set. |
+| R8-n-03 `collects_single_item` inherits the lower-bound caveat | **Accepted.** Noted in §5, with the observation that §4 gates such a row out before §9.1 reads the field. |
+
+**Cap note** — §2 bounds T-1 at `iteration_cap = 5`. The loop ran to 8 because rounds 5–7 each
+surfaced a genuine major that was a second-order consequence of the previous round's fix, all
+inside LANE 2 skip-marker semantics. Per §2 the overrun was escalated to the human owner, who
+authorised one final round with the standing instruction that any remaining major settleable only
+by writing the enumerator be carried into implementation rather than looped again. Round 8 raised
+none.
+
+No finding was rejected. **The plan-review loop is closed at round 8** with 0 blocking and 0 major;
+blocking has been 0 since round 1. This revision is the consolidated plan handed to the human owner
+for final approval before T2–T13 implementation begins.
 
 ---
 
