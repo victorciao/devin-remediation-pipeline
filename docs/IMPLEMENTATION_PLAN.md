@@ -3,6 +3,9 @@
 > **Status:** version-controlled source of truth. This document is what the build-time
 > plan-review step (T-1, §2) reviews against, and what every later change must be
 > reconciled with. Referenced from the README.
+>
+> **Revision 2** — incorporates the T-1 plan review (5 blocking / 15 major / 10 minor / 2 nit).
+> See §20 for the revision log and the finding-by-finding disposition.
 
 Produce the deliverables for an event-driven Devin remediation pipeline that finds, ranks, and
 remediates issues in Apache Superset, opening cross-linked PRs + issues with observability.
@@ -46,9 +49,10 @@ components that depend on an unresolved unknown.
 The implementing Devin session(s) build REPO A via this workflow:
 
 1. **PLAN REVIEW (T-1)** — a reviewer agent reviews the committed `docs/IMPLEMENTATION_PLAN.md`
-   BEFORE any build. Blocking/major findings on the plan loop back to the planner/human;
-   revisions are committed back to `docs/IMPLEMENTATION_PLAN.md` so history is auditable.
-   Bounded by `iteration_cap = 5`, then human escalation.
+   BEFORE any build. Blocking/major plan findings are resolved by the **human owner** (or a
+   dedicated PLANNER session, if one is created — build-time has no standing planner role) and
+   committed back to `docs/IMPLEMENTATION_PLAN.md` so history is auditable. Bounded by
+   `iteration_cap = 5`, then human escalation. *(m-08)*
 2. **IMPLEMENT + TEST CONCURRENTLY** — once the plan is approved, an IMPLEMENTER agent builds
    REPO A modules while a distinct REVIEWER agent independently authors REPO A's own tests.
 3. **CODE-REVIEW LOOP** — reviewer/implementer iterate until no blocking/major findings remain,
@@ -74,6 +78,34 @@ error). The implementer must not author/edit build-time tests (an implementer ed
 - **Review pause** — if scope shifts from assumptions (e.g. no CodeQL alerts present, or a
   missing token scope), pause for human review before Phase 1 build.
 
+### 0d — Target-repo capability preconditions (blocking exit criteria)
+
+A lane or dispatch path whose precondition is unmet is disabled for the run and recorded as
+`capability_unavailable`; it never silently no-ops. *(B-01, B-02, B-03)*
+
+| Precondition | Check | If unmet |
+|---|---|---|
+| Issues enabled | `GET /repos/{o}/{r}` → `has_issues == true` | dispatch preflight aborts **before any write**; degraded path `issue_sink = pr_comment` (§7) |
+| Actions enabled + workflows registered | `GET /actions/workflows` → `total_count > 0` | `ci_evidence_mode` falls back to `local` (§10); auto-merge hard-disabled |
+| Code scanning available | `GET /code-scanning/alerts` → 200 | LANE 1 falls back to `alert_source = sarif_file` (§5); no live LANE 1 evidence |
+| Token capability | `repo` (or fine-grained Contents/Issues/PR/Actions/Code-scanning write) | hard stop |
+
+### 0e — Recorded Phase 0 outcome for `victorciao/superset`
+
+Captured at `HEAD = a140e74`, snapshot committed to `fixtures/baseline.json`:
+
+- Issues were **disabled** and Actions had **0 runs / 0 registered workflows**; code scanning
+  returned `no analysis found`. All three were remediated during Phase 0 by the repo owner's
+  token: Issues enabled, Actions enabled (`allowed_actions: all`, 49 workflows registered),
+  and **CodeQL default setup configured** (`python`, `javascript-typescript`, default suite).
+- The resulting first CodeQL analysis produced **11 open alerts**, committed to
+  `fixtures/codeql_alerts.json` — LANE 1 therefore has live data. Rule mix:
+  `py/stack-trace-exposure` (×2), `py/overly-large-range` (×4), `py/url-redirection` (×2),
+  `js/xss`, `js/xss-through-exception`, `js/clear-text-storage-of-sensitive-data`.
+- **37** unconditional skip sites under `tests/` (the LANE 2 backlog; `skipUnless`
+  availability guards excluded — see M-01) and **4** `@deprecated(deprecated_in=...)` sites,
+  none carrying `removed_in` (see M-02).
+
 ---
 
 ## §4 Two-stage selection: GATE → SCORE
@@ -92,24 +124,72 @@ to build.
 ### Stage 2 — SCORE (only for gate-passing candidates)
 
 ```
-score = business_impact × verifiability × automatability × signal_quality / risk
+score = min( business_impact × verifiability × automatability × signal_quality / max(risk, 1),
+             score_cap )
 ```
 
-- Each factor on a 1–5 rubric (define per-lane rubrics in config).
-- `risk` is floored at 1 and the composite capped, so a near-zero risk estimate can't make a
-  trivial change outrank a genuine security fix.
+- Each factor on a 1–5 rubric (per-lane rubric tables live in config; see §4.1).
+- `risk` is floored at 1 and the composite capped at `score_cap = 200`, so a near-zero risk
+  estimate can't make a trivial change outrank a genuine security fix.
+- **Tier thresholds** *(B-05)* — `tier_high_min = 60`, `tier_medium_min = 20`; below
+  `tier_medium_min` → low → log/drop. Worked example: `4 × 4 × 4 × 4 / max(2,1) = 128` → high.
+  The thresholds and the cap are tunable knobs (§13); the tier → action mapping in §6 is not.
+
+### §4.1 Gate vs. score, and the per-lane rubrics
+
+`automatability` and `verifiability` appear in both stages, and they are **not** the same
+judgment *(M-15)*:
+
+- The **gate** asks whether *any* well-scoped transformation / pass-fail signal exists at all —
+  binary, equivalent to rubric `>= 2`. A rubric `1` fails the gate and never reaches scoring.
+- The **score factor** grades *how cleanly*, on `2..5`. Because gate-failing `1`s are already
+  removed, the factor carries only residual quality information and cannot double-count a
+  no/yes decision.
+
+Per-lane rubric tables are config data (`config/rubrics.yaml`), one table per lane per factor,
+each row mapping an observable property to a value. Defaults:
+
+| Lane | `business_impact` anchor | `signal_quality` anchor | `risk` anchor |
+|---|---|---|---|
+| 1 — CodeQL | alert `security_severity_level` (critical 5 … note 1) | rule precision + `updated_at` freshness | blast radius of the touched module |
+| 2 — skipped test | breadth of the covered surface | skip `reason` specificity (a `TODO:` with a cause = 4; bare skip = 2) | test-only diff ⇒ 1–2 |
+| 3 — deprecation | public-API exposure | age in majors past `deprecated_in` | caller/override count (see M-02 gate) |
+
+### §4.2 EOL definition for LANE 3 *(M-02)*
+
+No `@deprecated` site in the target repo carries `removed_in`, so EOL must be derived:
+
+> **EOL** = `removed_in` present and `<=` current version, **or** (no `removed_in`)
+> `major(deprecated_in) <= current_major - eol_major_lag`, with `eol_major_lag = 2`.
+
+Additional hard gate `no_internal_callers_and_no_override_surface`: a symbol still called inside
+`superset/`, or named as an override point by `superset/db_engine_specs/lib.py` or
+`superset/db_engine_specs/README.md`, fails `automatability` and is human-routed. Under this
+rule the only qualifying candidate at `a140e74` is `normalize_indexes` (`deprecated_in="3.0"`);
+`get_url_for_impersonation` is **excluded** (still called at `base.py:2306`, checked by
+`lib.py:145`, and covered by `tests/unit_tests/db_engine_specs/test_base.py`).
 
 ---
 
 ## §5 Lanes (first two are the required demo lanes)
 
-- **LANE 1 — CodeQL security alerts** (via `GET /repos/{owner}/{repo}/code-scanning/alerts`);
-  trigger anchor: `.github/workflows/codeql-analysis.yml` runs daily 04:00 UTC.
-- **LANE 2 — skipped/flaky-test backlog** (e.g. `tests/integration_tests/model_tests.py`,
-  `sqllab_tests.py`); re-enable and verify.
-- **LANE 3 — EOL-passed `@deprecated` removals** (e.g. `get_url_for_impersonation`,
-  `normalize_indexes` in `superset/db_engine_specs/base.py`); verify via targeted
-  `tests/unit_tests/db_engine_specs/`.
+- **LANE 1 — CodeQL security alerts.** `alert_source = api | sarif_file` *(B-03)*. In `api`
+  mode the lane reads `GET /repos/{owner}/{repo}/code-scanning/alerts`; in `sarif_file` mode it
+  reads a committed SARIF/alert fixture (`fixtures/codeql_alerts.json`, captured live from the
+  fork, or a SARIF produced by the CodeQL CLI) so the lane is exercisable without code-scanning
+  access. Trigger anchor: CodeQL is **scheduled** (upstream `codeql-analysis.yml` cron
+  `0 4 * * *`; default setup on the fork runs weekly), and analysis is gated behind a
+  python/frontend change detector — so the lane uses `alert.updated_at` as the freshness
+  signal, never the cron. *(m-02)*
+- **LANE 2 — skipped/flaky-test backlog** (`tests/integration_tests/sqllab_tests.py` and the
+  wider `tests/` tree); re-enable and verify. **Enumerator scope** *(M-01)*: match
+  `@pytest.mark.skip`, `@unittest.skip`, and `@pytest.mark.skipif` only; explicitly **exclude**
+  `@unittest.skipUnless` and availability-guarded `skipif` — those are correct-by-design
+  environment guards, not debt. `tests/integration_tests/model_tests.py` is **not** a source:
+  all 11 of its skips are `skipUnless(is_module_installed(...))` guards.
+- **LANE 3 — EOL-passed `@deprecated` removals**; scan scope `superset/**/*.py` *(n-01)*, EOL
+  and caller/override gating per §4.2, verified via targeted
+  `tests/unit_tests/db_engine_specs/`. Qualifying demo candidate: `normalize_indexes`.
 - **Tier-2 (documented, lower priority)** — third-party modernization warnings suppressed in
   `superset/mcp_service/server.py` and `superset/db_engine_specs/redshift.py` — high blast
   radius / low verifiability.
@@ -133,9 +213,15 @@ score = business_impact × verifiability × automatability × signal_quality / r
 
 - Every dispatched fix produces a technical PR (engineer / AI-reviewer audience) AND a
   companion high-level issue (EM/PM audience), cross-linked (`Closes #<issue>` in the PR so
-  merging auto-closes the manager-facing issue). Create the issue first to get its number, or
-  patch cross-links after both exist.
+  merging auto-closes the manager-facing issue).
+- **Ordering is mandated, not optional** *(m-09)*: (1) create the issue, (2) create the PR with
+  `Closes #<n>`, (3) patch the issue body with the PR link. The state after (1) but before (2)
+  is the canonical resume case covered by the idempotency spec in §14.1.
 - Medium tier (no PR): the issue is the standalone artifact.
+- **Degraded path** *(B-02)*: if `has_issues == false` on the target, dispatch aborts before any
+  write unless `issue_sink = pr_comment`, in which case the manager-facing artifact is rendered
+  as a dedicated PR comment plus `reports/issues/<candidate_id>.md`, the run is tagged
+  `artifact_degraded`, and those candidates do **not** count toward §19 evidence.
 - PR body carries a scaled `### IMPLEMENTATION PLAN` section (candidate-level, planner-authored),
   distinct from the manager issue and run report.
 
@@ -145,16 +231,37 @@ score = business_impact × verifiability × automatability × signal_quality / r
 
 - Use SUPERSET's OWN conventions for BOTH issues and PRs (no invented high-level schema); keep
   the EM/PM register by writing non-technical prose WITHIN the conventional shapes.
-- **PR** — conform to `.github/PULL_REQUEST_TEMPLATE.md` (SUMMARY, TESTING INSTRUCTIONS,
-  ADDITIONAL INFORMATION, CHECKLIST), plus the added `### IMPLEMENTATION PLAN`, a `Tests`
-  section, and (config-gated) `### AUTOMATION METADATA`. PR title must match the
-  Conventional-Commits regex enforced by `pr-lint.yml`.
+- **PR** *(M-03)* — conform to `.github/PULL_REQUEST_TEMPLATE.md`, whose real heading set is
+  exactly four sections, in this order:
+  `### SUMMARY`, `### BEFORE/AFTER SCREENSHOTS OR ANIMATED GIF`, `### TESTING INSTRUCTIONS`,
+  `### ADDITIONAL INFORMATION` (followed by its verbatim `- [ ]` checkbox block — there is **no**
+  `CHECKLIST` heading). BEFORE/AFTER is kept and marked `n/a` for backend-only fixes.
+  **Insertion points:** `### IMPLEMENTATION PLAN` and `### TESTS` immediately after
+  `### SUMMARY`; config-gated `### AUTOMATION METADATA` appended last.
+  The template is vendored at `templates/superset/PULL_REQUEST_TEMPLATE.md` with a drift test
+  diffing it against the target repo's live file.
+- **PR title** *(m-01)* — must match the regex enforced by the `lint-check` job via the local
+  composite action `./.github/actions/pr-lint-action`, pinned verbatim in
+  `templates/superset/pr_title_regex.txt` (drift-tested against `.github/workflows/pr-lint.yml`):
+
+  ```
+  ^(build|chore|ci|docs|feat|fix|perf|refactor|style|test|other)(\(.+\))?(\!)?:\s.+
+  ```
+
+  Note it permits `other` and does **not** permit `revert`, and requires whitespace after the
+  colon.
 - **Issue templates mapped PER LANE:**
   - flaky-test / defect lanes → `bug-report.yml` shape.
-  - public-API deprecation removals → `sip.md` shape.
+  - public-API deprecation removals → `sip.md` shape. Its YAML front-matter is **stripped**
+    before rendering, `assignees` (`apache/superset-committers`) is never propagated, and the
+    title becomes `[SIP] <generated>`. SIP-shaped issues on a fork are demonstrative only — the
+    real SIP process needs committer numbering and a list vote. *(m-03)*
   - SECURITY lane (CodeQL) → CANNOT use `bug-report.yml` (it explicitly bans GitHub issues for
-    security problems). Use `security_issue_mode = generic_tracking`: a generic
-    remediation-tracking issue with NO vulnerability/exploit detail.
+    security problems), and the target repo ships **no** generic/tracking form *(M-05)*. REPO A
+    therefore ships `templates/issues/security_tracking.md` with a locked, detail-free section
+    list: `### SUMMARY (no exploit detail)` / `### SCOPE (files or modules only)` /
+    `### REMEDIATION STATUS` / `### VERIFICATION` / `### REFERENCES (rule ID only)`. This is
+    `security_issue_mode = generic_tracking`.
 - Enforce section presence + order via snapshot/format tests so formats stay consistent across
   all generated issues and PRs.
 
@@ -186,14 +293,46 @@ Three independent, distinct sessions per candidate:
    disagreement summary: failing test, mapped criterion, pre-fix signature, fix rationale). NO
    third adjudicating agent — straight to human.
 
-**Test-inclusion policy** — a red→green test is REQUIRED for behavioral lanes (CodeQL,
-deprecation) and self-satisfied for the skipped-test lane (re-enablement IS the test). A
-genuinely-broken (not merely flaky) skipped test whose re-enablement requires editing the test →
-`needs-human-review`.
+### §9.1 The red baseline is a falsifiable comparison *(M-08)*
+
+Per acceptance criterion the planner emits
+`expected_failure = {nodeid, exception_type, message_pattern (regex), assert_location (optional)}`.
+The baseline is **valid iff** running `nodeid` at the pre-fix commit exits `FAILED` (not
+`SKIPPED`, not a collection `ERROR`) **and** the captured exception type equals
+`exception_type` **and** `message_pattern` matches the failure text. Any other outcome is
+`invalid_red_baseline` → re-author once, then escalate. All four expected fields and their
+observed counterparts are logged so the §11 expected-reason-match KPI is computable.
+
+### §9.2 Branch, concurrency and commit mechanics *(M-09)*
+
+- The **orchestrator** creates `devin/remediation/<candidate_id>` from the target base and pins
+  `base_sha`; it — not the sessions — opens the PR, and only after JOIN.
+- The **reviewer** runs its red baseline in its own checkout at `base_sha` and pushes
+  test-path-only commits first.
+- The **implementer** commits non-test paths only (with the LANE 2 carve-out below) and rebases
+  onto the reviewer's commit at JOIN.
+- Every commit uses `git commit --signoff`. Push races resolve by rebase-retry (max 3), then
+  `needs-human-review`.
+
+### §9.3 Test-inclusion policy and the implementer's permitted diff *(B-04)*
+
+The implementer restriction is **scope-based, not path-based**:
+
+> The implementer may not author or modify assertions or test oracles. For the re-enablement
+> lane its permitted diff is exactly the removal or narrowing of skip markers
+> (`@pytest.mark.skip` / `skipif`) plus non-test production code. Any hunk touching an
+> assertion, a fixture body, or test logic → `needs-human-review`.
+
+This is enforced by a **diff classifier** in T10, not a filename check. A red→green test is
+REQUIRED for behavioral lanes (CodeQL, deprecation). LANE 2 is **not** "self-satisfied": the
+un-skipped test is run at the pre-fix commit and MUST fail (not skip, not pass) — that failure
+is its baseline. If it **passes** pre-fix the candidate is tagged `stale_skip`, a distinct valid
+terminal outcome exempt from red→green (the remediation is simply deleting a dead skip marker).
 
 **Structural invariants (NOT configurable)** — reviewer≠implementer separation, red-baseline
-requirement, no-auto-merge-without-green-CI, no third adjudicating agent, criterion-mapped
-tests. This runtime flow has NO plan-review step.
+requirement (per §9.1/§9.3), no-auto-merge-without-green-CI, no third adjudicating agent,
+criterion-mapped tests, **and "an unresolved `major` never auto-merges"** *(M-06)*. This runtime
+flow has NO plan-review step.
 
 **Additional safeguards against reviewer-as-sole-test-author risk** — each reviewer test maps to
 a planner acceptance criterion (unmapped → escalate); a fix+test that breaks an existing suite
@@ -203,17 +342,49 @@ test blocks auto-merge regardless of the reviewer's own test being green.
 
 ## §10 CI gate stack (Superset sign-off gates the generated PRs must pass)
 
-Beyond unit tests, auto-merge eligibility requires the full stack green (verify via
-`pre-commit run --all-files` and CI):
+Auto-merge eligibility requires the full stack green. The gates split into two sets, and the
+plan previously conflated them *(M-04)*.
 
-- Formatting: `ruff format`.
-- Lint: `ruff check`, plus `pylint` with Superset's custom plugins.
-- Typing: `mypy`.
-- Frontend (if touched): `tsc` / eslint per `superset-frontend`.
-- License headers: `license-check`.
-- PR title: Conventional-Commits via `pr-lint.yml`.
-- DCO sign-off (`git commit --signoff`).
-- Respect `.github/CODEOWNERS`.
+**Runs as a pre-commit hook** (verifiable locally via `pre-commit run --files <changed>`):
+
+| Hook | Note |
+|---|---|
+| `ruff-format` | formatting |
+| `ruff` | lint |
+| `mypy` | typing (main) |
+| `pylint` (Superset plugins) | lints only `superset/` files changed since merge-base `origin/$TARGET_BRANCH` — needs `origin/master` fetched; **never** lints `tests/` |
+| `db-engine-spec-metadata` | relevant to LANE 3 |
+| frontend hooks | only when `superset-frontend/**` is touched |
+| `zizmor` | runs `--no-exit-codes` → advisory only |
+
+**Runs only in CI** (cannot be reproduced by pre-commit):
+
+`pre-commit (current)`, `license_check` (an Apache-RAT / `setup-java` workflow invoking
+`./scripts/check_license.sh` — **not** a pre-commit hook), `lint-check` (the PR-title action),
+`unit-tests-required`, `test-postgres-required`, `test-sqlite`, `test-mysql`,
+`test-postgres-hive`, `test-postgres-presto`, `frontend-build`, `cypress-matrix-required`,
+`playwright-tests-required`, `dependency-review`, `enforce-single-migration-head`.
+
+That 13-context required set lives in upstream `.asf.yaml` and is applied by ASF infra to
+`apache/superset` only — a fork inherits the workflows but not the branch protection.
+
+**DCO** — there is no DCO workflow in the repository; DCO is ASF-infra-enforced upstream. The
+pipeline still signs every commit (`git commit --signoff`) and asserts the trailer itself.
+
+**CODEOWNERS** *(m-05)* — consulted only to annotate the PR body with paths that would require
+owner review upstream. No review requests are sent on the fork (the listed ASF committers are
+not collaborators, and `require_code_owner_reviews` is an upstream `.asf.yaml` setting). Note
+`CODEOWNERS` has no entry covering `superset/db_engine_specs/` or `tests/` anyway.
+
+### §10.1 `ci_evidence_mode` *(B-01)*
+
+| Mode | Gate satisfied by | Auto-merge |
+|---|---|---|
+| `github` | the CI contexts above reporting success on the PR head | permitted, subject to §14 |
+| `local` | `pre-commit run --files <changed>` plus the targeted pytest paths executed in-session, with command output attached to the PR body | **hard-disabled** (`auto_merge_enabled` forced `false`, not merely defaulted) |
+
+The mode is resolved by the §3 0d precondition check (no registered workflows → `local`) and
+recorded in the Layer 1 event log; §19's REPO B criterion names which mode satisfied it.
 
 ---
 
@@ -228,8 +399,10 @@ Answers "how would an engineering leader know this is working?"
 - **Layer 2 — per-run summary report** — candidates seen, gated out (with reason), scored,
   dispatched by tier, deferred (budget overflow), resulting PR + issue links.
 - **Layer 3 — rolling KPI rollup** persisted to `reports/kpis.md` (default local sink; Google
-  Sheet optional via `kpi_sink`; precedent: `.github/workflows/tech-debt.yml` pushes lint-stats
-  to a Sheet). KPIs: task-state counts (active/completed), PR merge rate (merged-clean vs edited
+  Sheet optional via `kpi_sink`; precedent *(m-04)*: a Google Sheet sink already exists in this
+  repo's tooling — `.github/workflows/tech-debt.yml` runs a secret-gated (`GSHEET_KEY`),
+  `continue-on-error` frontend lint-stats upload on pushes to `master`/release branches. That is
+  a precedent for the *sink*, not for KPI content or cadence). KPIs: task-state counts (active/completed), PR merge rate (merged-clean vs edited
   vs rejected), verification pass rate, backlog burn-down (vs Phase 0c baseline), test-inclusion
   rate, criterion-coverage rate, expected-reason match rate on red baselines,
   `disagreement_unresolved` rate, sessions-per-candidate by role, implementer-test-edit
@@ -247,6 +420,30 @@ sessions with scoped prompts (file paths, alert/test/deprecation context, fix + 
 instructions, emit BOTH artifacts using the templates). Poll status; record state transitions +
 timing into the Layer 1 event log; collect PR + issue URLs.
 
+### §12.1 Role prompt contracts — `structured_output_schema` per role *(M-10)*
+
+Phase 0a confirmed `structured_output_schema` is accepted by `POST /v1/sessions`. Each role gets
+a schema so criterion mapping and the §11 criterion-coverage KPI are machine-checkable:
+
+```
+PLANNER     -> { criteria: [ { id: "AC-1", statement, expected_failure {…§9.1}, verify_command } ],
+                 files_in_scope[], out_of_scope[] }
+IMPLEMENTER -> { files_changed[], criteria_addressed[], commands_run[] }
+REVIEWER    -> { tests: [ { path, nodeid, criterion_id } ],
+                 red_baseline { … }, green_result { … },
+                 findings: [ { severity, criterion_id, note } ] }
+```
+
+A reviewer test whose `criterion_id` is absent from the planner output is **rejected** (the §9
+unmapped-test escalation).
+
+### §12.2 Polling and cost contract
+
+`GET /v1/sessions/{id}` until a terminal `status_enum`; `session_timeout_s` per role; per-role
+`max_acu_limit`; every creation passes `idempotent: true` and
+`tags: ["devin-remediation", candidate_id, role]`. Exceeding the per-run session/cost ceiling
+(§14) aborts the run rather than degrading silently.
+
 ---
 
 ## §13 Config knobs (tunable; locked values = shipped DEFAULTS, not hardcoded)
@@ -254,24 +451,39 @@ timing into the Layer 1 event log; collect PR + issue URLs.
 All live on one config surface (env vars / config file), changeable without editing logic. The
 README ships a config reference table with default, allowed values, and safety classification.
 
-| Knob | Default |
-|---|---|
-| `iteration_cap` | `5` |
-| `coverage_bar` | `0.80` (test coverage on REPO A's pure-logic modules) |
-| `budget_N` | `10` |
-| `merge_rate_floor` | `0.50` |
-| `session_failure_ceiling` | `0.30` |
-| `kpi_sink` | `local` (`local` \| `gsheet`) |
-| `major_only_requires_human` | `true` |
-| `security_issue_mode` | `generic_tracking` |
-| `mode` | `simulate` \| `live` |
+| Knob | Default | Allowed values | Safety |
+|---|---|---|---|
+| `mode` | `simulate` | `simulate`, `live` | **safety-relevant** — `live` must be supplied explicitly via CLI/env; unset, empty, or unrecognized values resolve to `simulate` and are logged *(M-13)* |
+| `iteration_cap` | `5` | `1..10` | — |
+| `coverage_bar` | `0.80` | `0.0..1.0` | — |
+| `budget_N` | `10` | `1..BUDGET_HARD_MAX` | **safety-relevant** — clamped at `BUDGET_HARD_MAX` *(M-12)* |
+| `score_cap` | `200` | `> 0` | — |
+| `tier_high_min` | `60` | `> tier_medium_min` | — |
+| `tier_medium_min` | `20` | `> 0` | — |
+| `eol_major_lag` | `2` | `>= 1` | — |
+| `merge_rate_floor` | `0.50` | `0.0..1.0` | — |
+| `session_failure_ceiling` | `0.30` | `0.0..1.0` | — |
+| `kpi_sink` | `local` | `local`, `gsheet` | may **not** be `gsheet` while `mode = simulate` |
+| `major_only_requires_human` | `true` | `true`, `false` | **routing-only** — see below |
+| `security_issue_mode` | `generic_tracking` | `generic_tracking` | — |
+| `alert_source` | `api` | `api`, `sarif_file` | — |
+| `ci_evidence_mode` | resolved by §3 0d | `github`, `local` | `local` forces `auto_merge_enabled = false` |
+| `issue_sink` | `issues` | `issues`, `pr_comment` | `pr_comment` tags the run `artifact_degraded` |
 
-Also configurable: target `owner/repo`, GitHub token, Devin API key, factor rubrics, artifact
-templates.
+Also configurable: target `owner/repo`, GitHub token, Devin API key, per-lane factor rubrics
+(`config/rubrics.yaml`), artifact templates.
 
-- **Safety-relevant knobs** (marked in README): `major_only_requires_human`, `budget_N` —
-  loosening weakens guardrails; change deliberately.
+**Non-knobs (module constants, not config surface):**
+
+- `BUDGET_HARD_MAX = 25` *(M-12)* — values above it are clamped, the clamp is logged as
+  `guardrail_clamped`, and running above it requires an explicit `--i-know-what-im-doing` flag.
+- `major_only_requires_human` is **routing-only** *(M-06)*: `false` still blocks auto-merge and
+  merely omits the `needs-human-review` label. The block itself is a §9 structural invariant.
 - Structural invariants (§9) are NOT knobs.
+
+**`coverage_bar` subject** *(m-07)* — the "pure-logic modules" are exactly
+`src/pipeline/gate.py`, `score.py`, `dispatch.py`, `dedupe.py`, `templates/render.py`,
+`observability/kpis.py`, encoded in `pyproject.toml`'s coverage config so CI enforces the bar.
 
 ---
 
@@ -279,8 +491,8 @@ templates.
 
 - SIMULATE mode makes NO writes (no PRs/issues/merges); only `live` writes.
 - No secrets in the Docker image; credentials injected at runtime.
-- Idempotency/dedupe: re-runs must not open duplicate PRs/issues for the same candidate (stable
-  idempotency key ties artifacts + sessions).
+- Idempotency/dedupe: re-runs must not open duplicate PRs/issues for the same candidate — see
+  §14.1.
 - Budget cap (`budget_N`) enforced; repo allowlist; GitHub API rate-limit backoff + an explicit
   per-run session/cost ceiling so a runaway run can't burn the API budget.
 - No auto-merge without the full CI gate stack green.
@@ -291,17 +503,63 @@ templates.
 - Reviewer ≠ implementer (runtime and build-time); collision = configuration error. No
   third/adjudicating agent for `disagreement_unresolved` — always human-escalated.
 - No security-lane candidate may open a public issue containing vulnerability detail.
-- No issue/PR opened unless its body validates against the selected Superset-conformant template
+- No issue/PR opened unless its body validates against the selected template — one of the target
+  repo's forms (`bug-report.yml`, `sip.md`) or REPO A's `security_tracking.md` *(M-05)* —
   (section presence + order) and, for PRs, the title matches the Conventional-Commits regex.
+- **Label preflight** *(m-10)*: `needs-human-review` does not exist on the target. Dispatch
+  ensures it once (`GET` then `POST /repos/{o}/{r}/labels`); if creation is denied it falls back
+  to a PR comment plus a `reports/` record rather than failing the API call.
+
+### §14.1 Idempotency, state store, and resume *(M-07)*
+
+```
+candidate_id = sha256(lane | repo | stable_locator)
+```
+
+| Lane | `stable_locator` |
+|---|---|
+| 1 — CodeQL | `rule_id + file_path + normalized_symbol` — **never** `alert.number` (unstable across re-scans) |
+| 2 — skipped test | the pytest nodeid |
+| 3 — deprecation | `module:qualname` |
+
+`state/candidates.jsonl` (append-only, last-write-wins by `candidate_id`) is the **dedupe and
+resume source of truth** — distinct from the Layer 1 observability log. States:
+
+```
+enumerated → gated → scored → dispatching → issue_created → pr_created → converged → terminal
+```
+
+Before any write the pipeline re-reads state **and** searches the target repo for the marker
+`<!-- devin-remediation-id: <candidate_id> -->`, which is embedded in every generated body.
+This covers the §18 failure modes: a mid-run crash resumes from the last recorded state; a
+stuck/timed-out session is retried under the same `candidate_id`; "issue created but PR failed"
+replays without creating a second issue.
 
 ---
 
 ## §15 REPO A layout
 
-- `docs/IMPLEMENTATION_PLAN.md` (this document — version-controlled source of truth; referenced
-  from README; what the build-time plan-review step reviews against).
-- pipeline modules (lanes, gate, score, dispatch, session client, observability), `templates/`,
-  `tests/`, `reports/`, `Dockerfile`, `docker-compose.yml`, `README.md`, `RESULTS.md`.
+Concrete tree, so T0 and the coverage configuration agree *(n-02)*:
+
+```
+docs/IMPLEMENTATION_PLAN.md      # this document — source of truth, referenced from README
+docs/PHASE0_DISCOVERY.md
+src/pipeline/
+  lanes/            codeql.py, skipped_tests.py, deprecations.py
+  gate.py  score.py  dispatch.py  dedupe.py  session_client.py  config.py  schemas.py
+  github_client.py
+  templates/render.py
+  observability/    events.py, report.py, kpis.py
+templates/
+  superset/PULL_REQUEST_TEMPLATE.md, pr_title_regex.txt
+  issues/bug_report.md, sip.md, security_tracking.md
+config/rubrics.yaml
+fixtures/         baseline.json, codeql_alerts.json
+state/            candidates.jsonl        (runtime dedupe/resume store)
+reports/          run-<run_id>.md, kpis.md, issues/
+tests/            unit/, integration/
+Dockerfile  docker-compose.yml  README.md  RESULTS.md
+```
 
 ---
 
@@ -345,12 +603,41 @@ code-review loop converges with green CI.
   `needs-human-review`, never auto-merge.
 - a fix+test that breaks an existing (mocked) suite test → blocks auto-merge even if reviewer's
   own test is green.
-- a non-converging loop hits `needs-human-review` after 5 iterations (not 3).
+- a non-converging loop escalates to `needs-human-review` at exactly `iteration_cap`,
+  parameterized over `cap ∈ {3, 5}`, plus a separate assertion that the shipped default is `5`
+  *(m-06)*.
 - KPI rollup raises merge-rate alert when < 0.50 and session-failure alert when > 0.30.
 - security-lane issue never exposes vulnerability detail; issues/PRs validate against locked
   templates.
 - pure-logic module coverage ≥ `coverage_bar = 0.80`.
 - a non-default knob (e.g. `budget_N` changed) takes effect in SIMULATE without code edits.
+- `budget_N` above `BUDGET_HARD_MAX` is clamped and logged as `guardrail_clamped` *(M-12)*.
+- with `major_only_requires_human = false`, a PR with an unresolved `major` is **still** not
+  auto-merge eligible *(M-06)*.
+- `mode` unset / empty / unrecognized resolves to `simulate` *(M-13)*.
+- a `skipUnless` fixture yields **zero** LANE 2 candidates *(M-01)*.
+- a deprecation with an internal caller or an override-surface reference fails `automatability`
+  *(M-02)*; `normalize_indexes` passes and `get_url_for_impersonation` does not.
+- an implementer diff touching an assertion is rejected while a skip-marker-only diff is
+  accepted; a LANE 2 test passing pre-fix yields `stale_skip` *(B-04)*.
+- tier mapping at the threshold boundaries (`59/60`, `19/20`) and the `score_cap` clamp *(B-05)*.
+
+**Added to close §19 gaps** *(M-11)*
+
+- `test_crosslink_roundtrip` — issue number injected, `Closes #n` present, both artifacts carry
+  the `candidate_id` marker.
+- `test_resume_after_issue_created_pr_failed` — replay creates no second issue.
+- `test_rate_limit_backoff` (429 + reset header → bounded sleep, one retry) and
+  `test_session_ceiling_aborts_run`.
+- `test_burndown_vs_baseline` against `fixtures/baseline.json`.
+- `test_role_collision_raises_config_error` (build-time and runtime).
+- `test_pr_title_matches_pr_lint_regex`, parameterized across lanes, using the regex loaded from
+  `templates/superset/pr_title_regex.txt`.
+- `test_generated_pr_contribution_compliance` (credential-free) — RAT header presence,
+  ruff/mypy clean on generated files, `Signed-off-by` trailer present.
+- `test_dispatch_preflight_aborts_when_issues_disabled` *(B-02)* and
+  `test_local_ci_mode_forces_auto_merge_off` *(B-01)*.
+- `test_invalid_red_baseline_signature_mismatch` against the §9.1 four-field contract *(M-08)*.
 
 **Integration / smoke**
 
@@ -362,15 +649,17 @@ code-review loop converges with green CI.
 
 ## §18 Assumptions, dependencies, non-goals
 
-- **Assumptions / dependencies** — Devin API availability + key; GitHub token with the §3 scopes;
-  the fork has CodeQL enabled and a skipped-test backlog; Python toolchain
-  (ruff/pylint/mypy/pytest) matching Superset's pinned versions.
+- **Assumptions / dependencies** — Devin API availability + key; GitHub token with the §3 scopes.
+  *(B-03)* The fork's capability state is **not assumed**: it is checked by §3 0d and was
+  recorded in §3 0e (Issues, Actions, and CodeQL were all off and had to be enabled during
+  Phase 0; CodeQL now yields 11 live alerts). Python toolchain (ruff/pylint/mypy/pytest)
+  matching Superset's pinned versions.
 - **Non-goals** (prevent scope creep) — no frontend lint-debt lane; no auto-merge of high-risk;
   no real-time dashboard (batch KPI rollup only); no adjudicating third agent; runtime flow has
   no plan-review step.
-- **Failure & recovery** — define resume/cleanup for mid-run crash, stuck/timed-out session,
-  partially-created artifacts (issue created but PR failed) — tied together by the idempotency
-  key.
+- **Failure & recovery** — specified in §14.1: the append-only `state/candidates.jsonl` store
+  plus the embedded `candidate_id` marker cover mid-run crash, stuck/timed-out session, and
+  partially-created artifacts (issue created but PR failed).
 
 ---
 
@@ -391,11 +680,54 @@ code-review loop converges with green CI.
   README.
 - **REPO B (Superset fork)** — ≥1 real, verified remediation per first lane (a CodeQL-alert fix
   and a re-enabled skipped/flaky test) as cross-linked PR + convention-compliant companion issue
-  with the full CI gate stack green; `RESULTS.md` lists selected issues, gate/score rationale,
-  and links.
+  with the CI gate stack green **under the recorded `ci_evidence_mode`** (§10.1), which
+  `RESULTS.md` must name; `RESULTS.md` lists selected issues, gate/score rationale, and links.
+
+---
+
+## §20 Revision log
+
+### Revision 2 — T-1 plan review round 1
+
+Reviewer verdict `changes_required`: 5 blocking, 15 major, 10 minor, 2 nit. Disposition:
+
+| Finding | Disposition |
+|---|---|
+| B-01 CI stack unsatisfiable | **Accepted + environment fixed.** Actions enabled on the fork (49 workflows registered); `ci_evidence_mode` added (§10.1) with `local` forcing auto-merge off. Phase 0 0d makes it a blocking precondition. |
+| B-02 Issues disabled | **Accepted + environment fixed.** `has_issues` set true; 0d preflight + `issue_sink = pr_comment` degraded path (§7). |
+| B-03 LANE 1 has no data | **Accepted + environment fixed.** CodeQL default setup configured; 11 live alerts captured to `fixtures/codeql_alerts.json`. `alert_source = api \| sarif_file` added (§5); §18 assumption replaced by recorded fact. |
+| B-04 LANE 2 fix *is* a test edit | **Accepted.** Implementer restriction restated as scope-based with a diff classifier; `stale_skip` outcome added (§9.3). |
+| B-05 no tier thresholds | **Accepted.** `score_cap = 200`, `tier_high_min = 60`, `tier_medium_min = 20`, worked example (§4). |
+| M-01 `model_tests.py` | **Accepted.** Dropped; enumerator scope pinned (§5). |
+| M-02 EOL underivable | **Accepted.** `eol_major_lag` rule + caller/override gate; demo candidate narrowed to `normalize_indexes` (§4.2). |
+| M-03 PR sections wrong | **Accepted.** Real four-heading set + insertion points + drift test (§8). |
+| M-04 CI stack misstated | **Accepted.** Split into pre-commit vs CI-only tables; DCO and license-check corrected (§10). |
+| M-05 no security template | **Accepted.** `templates/issues/security_tracking.md` with locked detail-free sections (§8). |
+| M-06 `major` knob defeats guardrail | **Accepted.** Restated as routing-only; the block is a §9 invariant. |
+| M-07 idempotency unspecified | **Accepted.** `candidate_id` derivation, `state/candidates.jsonl`, state machine, body marker (§14.1). |
+| M-08 red baseline unfalsifiable | **Accepted.** Four-field `expected_failure` contract (§9.1). |
+| M-09 concurrency mechanics | **Accepted.** Branch ownership, push order, rebase-retry, signoff (§9.2). |
+| M-10 role schemas | **Accepted.** Per-role `structured_output_schema` (§12.1). |
+| M-11 untested §19 criteria | **Accepted.** Eight tests added (§17). |
+| M-12 `budget_N` unbounded | **Accepted.** `BUDGET_HARD_MAX = 25` module constant + clamp test. |
+| M-13 `mode` has no default | **Accepted.** Default `simulate`; unrecognized resolves to `simulate`. |
+| M-14 "open questions EMPTY" false | **Accepted.** Resolved inline (rubrics §4.1, thresholds §4, failure/recovery §14.1, coverage subject §13); open questions below now lists only what genuinely remains. |
+| M-15 gate/score double-count | **Accepted.** Gate = existence (`>= 2`), factor = quality (`2..5`) (§4.1). |
+| m-01 … m-10, n-01, n-02 | **All accepted**, inline at the cited sections. |
+
+No finding was rejected.
 
 ---
 
 ## Open questions / decisions needing a human
 
-EMPTY — all decisions are locked.
+1. **Fork CI cost/viability.** Superset's full required-check set (Cypress, Playwright, the
+   Postgres/MySQL/Hive/Presto matrices) is heavy for a fork. If `github` mode proves
+   impractical, §19's REPO B criterion is satisfied under `ci_evidence_mode = local` with
+   auto-merge hard-disabled — the human owner decides which mode the evidence run uses.
+2. **Auto-merge on the fork.** `allow_auto_merge` was enabled during Phase 0, but the fork has
+   no branch protection, so "auto-merge" would merge on any green result. Recommend leaving
+   `auto_merge_enabled = false` for the evidence run and demonstrating eligibility as a
+   computed, logged decision instead of an actual merge.
+3. **LANE 3 demo candidate.** Under §4.2 only `normalize_indexes` qualifies, which narrows the
+   lane to a single live candidate. Confirm that is acceptable, or raise `eol_major_lag`.
