@@ -4,10 +4,10 @@
 > plan-review step (T-1, §2) reviews against, and what every later change must be
 > reconciled with. Referenced from the README.
 >
-> **Revision 5** — incorporates T-1 review rounds 1–4: round 1 (5 blocking / 15 major /
-> 10 minor / 2 nit), round 2 (7 major / 8 minor / 2 nit), round 3 (2 major / 4 minor / 2 nit)
-> and round 4 (1 major / 2 minor / 3 nit). See §20 for the revision log and the
-> finding-by-finding disposition of every round.
+> **Revision 6** — incorporates T-1 review rounds 1–5: round 1 (5 blocking / 15 major /
+> 10 minor / 2 nit), round 2 (7 major / 8 minor / 2 nit), round 3 (2 major / 4 minor / 2 nit),
+> round 4 (1 major / 2 minor / 3 nit) and round 5 (1 major / 4 minor / 2 nit). See §20 for the
+> revision log and the finding-by-finding disposition of every round.
 
 Produce the deliverables for an event-driven Devin remediation pipeline that finds, ranks, and
 remediates issues in Apache Superset, opening cross-linked PRs + issues with observability.
@@ -104,12 +104,14 @@ Captured at `HEAD = a140e74`, snapshot committed to `fixtures/baseline.json`:
   `fixtures/codeql_alerts.json` — LANE 1 therefore has live data. Rule mix:
   `py/stack-trace-exposure` (×2), `py/overly-large-range` (×4), `py/url-redirection` (×2),
   `js/xss`, `js/xss-through-exception`, `js/clear-text-storage-of-sensitive-data`.
-- **35** unconditional skip decorator instances under `tests/` *(R4-n-03 — instances, not
-  distinct nodes; see the §5 enumerator limits)*, **as produced by the §5 LANE 2 enumerator**
+- **35** unconditional skip decorator instances under `tests/` *(R4-n-03, R5-n-02 — the
+  enumerator counts instances; at this HEAD the 35 included rows are 35 distinct nodeids while
+  the 33 exclusions include multi-decorator nodes — see the §5 enumerator limits)*, **as produced
+  by the §5 LANE 2 enumerator**
   *(R2-M-04, corrected by R3-M-02)*, plus **33** conditional sites recorded separately in
   `baseline.excluded_conditional_skips`, split by reason *(R3-m-03)*: **30**
-  `conditional_environment_guard` (every `skipif`/`skipUnless` in the tree is an availability or
-  backend guard) and **3** `expected_failure_xfail` (an expected failure is still collected, so
+  `conditional_environment_guard` (every `skipif`/`skipUnless` in the tree is an availability,
+  backend, feature-flag or opt-in-suite guard *(R5-n-01)*) and **3** `expected_failure_xfail` (an expected failure is still collected, so
   it is not disabled coverage — see §5). The 35th included site is the alias-imported
   `@skip("Flaky")` at `tests/integration_tests/databases/commands_tests.py:118`, which a
   dotted-name-only matcher missed.
@@ -237,8 +239,10 @@ question 3.
   (`tests/integration_tests/databases/commands_tests.py:118`). Excluded, and counted separately
   under a two-value reason enum so the exclusion is auditable *(R3-m-03)*:
   `conditional_environment_guard` for `skipif` / `skipUnless` (every one of the target's sites is
-  an availability or backend guard — `ocient_is_installed()`, hive/boto3/thrift/pyhive/pydruid
-  availability, marshmallow-version, perf-suite — i.e. correct by design, not debt) and `expected_failure_xfail`
+  an availability, backend, feature-flag or opt-in-suite guard — `ocient_is_installed()`,
+  hive/boto3/thrift/pyhive/pydruid availability, marshmallow-version,
+  `is_feature_enabled("THUMBNAILS")`, the `SUPERSET_PERF_VALIDATION` opt-in suite — i.e. correct
+  by design, not debt) *(R5-n-01)* and `expected_failure_xfail`
   for `xfail` (an expected failure that is still collected and reported, not disabled coverage).
   The enumerator and `scripts/build_baseline.py` share this definition. Because a shared
   definition makes a count-equality assertion tautological, the §17 guard is **fixture-based**
@@ -254,13 +258,20 @@ question 3.
     assignments and imperative in-body `pytest.skip()` / `self.skipTest()` calls are **out of
     scope** — in the target every such site is environment-conditional, so no backlog candidate
     is lost, but they appear in neither the included nor the excluded set.
-  - Import-binding resolution covers **absolute** imports only. An indirect mark alias reached
-    through a relative import (`from .conftest import only_postgresql`, where `conftest` binds
-    `only_postgresql = pytest.mark.skipif(…)`) resolves to a bare local name and is likewise out
-    of scope. Its six usages are `skipif`-derived and therefore correctly non-candidates, but
-    they are **not** among the 30 recorded `conditional_environment_guard` rows.
-  - **35** and **33** count *decorator instances*, not distinct test nodes: a node carrying two
-    conditional decorators contributes two rows (e.g. `model_tests.py:62` and `:103`).
+  - **Indirect mark aliases** — a name bound at module level to a `pytest.mark.*` object and
+    re-exported (`only_postgresql = pytest.mark.skipif(…)` in `conftest.py`, used as
+    `@only_postgresql`) — are out of scope **regardless of import style** *(R5-m-03)*: five of the
+    six usages arrive by absolute import and *are* rewritten by binding resolution, but the
+    rewritten target names a mark object, not a skip decorator, so it matches nothing; the sixth
+    (`from .conftest import …`) is relative and stays unresolved. All six are `skipif`-derived and
+    therefore correctly non-candidates, but they are **not** among the 30 recorded
+    `conditional_environment_guard` rows.
+  - The enumerator counts *decorator instances*, not distinct test nodes: a node carrying two
+    conditional decorators contributes two rows. At this HEAD that only affects the **33**
+    exclusions (e.g. `model_tests.py` lines 62, 103 and 279 each contribute two); the **35**
+    included rows happen to be 35 distinct nodeids *(R5-n-02)*.
+  - Each included record carries the fully qualified nodeid used as its §14.1 locator, including
+    the enclosing class *(R5-M-01)*.
 - **LANE 3 — EOL-passed `@deprecated` removals**; scan scope `superset/**/*.py` *(n-01)*, EOL
   and caller/override gating per §4.2, verified via targeted
   `tests/unit_tests/db_engine_specs/`. Enumeration is AST-based (the decorator may sit several
@@ -649,7 +660,7 @@ candidate_id = sha256(lane | repo | stable_locator)
 | Lane | `stable_locator` |
 |---|---|
 | 1 — CodeQL | `rule_id + file_path + normalized_symbol + position_digest` — **never** `alert.number` (unstable across re-scans) |
-| 2 — skipped test | the pytest nodeid |
+| 2 — skipped test | the **fully qualified, collectable** pytest nodeid *(R5-M-01)* — `path::Class::method` for a class-nested test, `path::Class` for a class-level skip, `path::function` only for a module-level test. A nodeid that omits the enclosing class does not collect (`no tests ran`), which §9.1 would then read as a collection error and classify `invalid_red_baseline`; 28 of the 35 live LANE 2 candidates are class-nested, so this is the common case, not an edge case. `scripts/build_baseline.py` carries class scope and `fixtures/baseline.json` records it as `class_scope`. |
 | 3 — deprecation | `module:qualname` |
 
 **LANE 1 needs a positional discriminator** *(R2-M-01)*. Rule + path + symbol collides on real
@@ -682,15 +693,29 @@ it alone would suppress three of the four co-located `py/overly-large-range` ale
 drift hits. The match is therefore two-condition and lossy-by-default-off:
 
 1. **Unambiguity** — the weak key must have multiplicity **1** on both sides: exactly one alert
-   in the current scan and exactly one prior state row carry it. Any multiplicity > 1 disables
-   the drift path for that key entirely; every alert under it is treated as distinct and
-   dispatched on its `position_digest`.
+   in the current scan and exactly one **active** state row carry it. "Active" means rows that do
+   **not** carry `superseded_by` *(R5-m-01)* — otherwise the append-only store would reach
+   multiplicity 2 after the first successful link and permanently disable its own drift net. Any
+   multiplicity > 1 disables the drift path for that key; every alert under it is treated as
+   distinct and dispatched on its `position_digest`.
 2. **Content anchor** — even when unambiguous, the candidates must agree on
    `region_digest = sha256(<the alert's source region text, whitespace-normalized>)[:12]`, or
    failing that on the offset of the alert region relative to the enclosing symbol's start line.
-   A pure line shift preserves both; a genuinely different alert does not.
+   A pure line shift preserves both; a genuinely different alert does not. Both
+   `region_digest` and `symbol_relative_offset`, plus the `base_sha` they were computed at, are
+   **written into the state row at dispatch** *(R5-m-02)*: the comparison reads persisted values
+   and never re-reads source at a prior commit.
 
-Neither condition can be relaxed by config. §17 asserts both directions: the four co-located
+Neither condition can be relaxed by config.
+
+**Residual cost, accepted deliberately** *(R5-m-04)*. Condition 1 means a co-located group can
+never drift-link: any edit above line 55 of `add_chart_to_existing_dashboard.py` re-dispatches all
+four `py/overly-large-range` alerts as new candidates, and the marker search cannot catch it
+because the marker is keyed on the changed `candidate_id`. That is the safe direction — duplicate
+artifacts are visible and closable, silent suppression of a real security alert is not — and it is
+bounded by `budget_N` and human review. A one-to-one pairing on `(region_digest, within-line
+column ordinal)` inside a multiplicity > 1 group is recorded as a possible later refinement, not
+shipped in v1. §17 asserts both directions: the four co-located
 fixture alerts are all dispatched (none suppressed as drift), and a single alert re-read after a
 pure line shift is linked rather than re-dispatched.
 
@@ -838,6 +863,11 @@ code-review loop converges with green CI.
   dispatched; none is suppressed as a drift match, because their weak key has multiplicity 4
   *(R4-M-01)*. Paired with `test_drift_match_requires_region_digest`, where an unambiguous weak
   key but a differing `region_digest` does **not** link.
+- `test_lane2_nodeids_are_collectable` — every enumerated LANE 2 nodeid resolves to exactly one
+  collected item (`pytest --collect-only <nodeid>`); at minimum every record with a non-null
+  `class_scope` contains the `::<Class>::` segment *(R5-M-01)*.
+- `test_drift_survives_repeated_shifts` — a second consecutive line shift of the same alert still
+  links, because state-side multiplicity counts **active** rows only *(R5-m-01)*.
 - `test_enumerator_scope_limits` — `pytestmark` assignments, imperative `pytest.skip()` bodies
   and relative-import mark aliases yield neither candidates nor exclusion rows, matching the §5
   documented scope *(R4-m-01, R4-m-02)*.
@@ -993,9 +1023,28 @@ findings confirmed resolved against the real tree (the reviewer re-ran
 | R4-M-01 the R3-m-04 drift net re-introduces the R2-M-01 collision | **Accepted.** Correct and serious: `(rule_id, path, normalized_symbol)` is the very key §14.1 documents as colliding, so three of the four co-located `py/overly-large-range` alerts would have been suppressed as false drift hits. The drift match is now two-condition — weak-key multiplicity must be 1 on both sides, **and** a `region_digest` (or symbol-relative offset) must agree — neither relaxable by config, plus a §17 test asserting all four co-located alerts are dispatched (§14.1, §17). |
 | R4-m-01 relative-import mark aliases resolve to bare names | **Accepted.** `from .conftest import only_postgresql` is out of the enumerator's absolute-import resolution, so its six usages are in neither set. They are `skipif`-derived and so correctly non-candidates; §5 now states the limit explicitly and no longer implies `only_postgresql` is among the 30 recorded guards. |
 | R4-m-02 `pytestmark` and imperative skips invisible | **Accepted.** §5 now names module/class-level `pytestmark` and in-body `pytest.skip()` / `skipTest()` as out of the decorator-based scope, with a §17 test. |
-| R4-n-01 header still says "Revision 3" | **Accepted.** Header now reads Revision 5 / rounds 1–4. |
+| R4-n-01 header still says "Revision 3" | **Accepted.** Header revision and round list corrected (and kept current each revision since). |
 | R4-n-02 §13 row and §19 silent on the mode upgrade | **Accepted.** §13 row cites the §10.1 one-way re-resolution; §19 states each candidate is labelled with the mode in force at its own gate evaluation. |
 | R4-n-03 35/33 are decorator instances | **Accepted.** Stated as decorator instances in §3 0e, §5 and the discovery doc. |
+
+No finding was rejected.
+
+### Revision 6 — T-1 plan review round 5
+
+Reviewer verdict `changes_required`: 0 blocking, 1 major, 4 minor, 2 nit. All six round-4
+findings confirmed resolved against the real tree, including an independent re-derivation of the
+four co-located alerts' columns and a reproduction of `fixtures/baseline.json`. The major is a
+pre-existing defect in the LANE 2 locator that four prior rounds missed. Disposition:
+
+| Finding | Disposition |
+|---|---|
+| R5-M-01 LANE 2 nodeids omit the enclosing class | **Accepted.** Verified: 28 of the 35 candidates are class-nested methods, and `path::method` does not collect — §9.1 would have classified 28 of 35 as `invalid_red_baseline`. `collect_skipped_tests` now carries class scope, `fixtures/baseline.json` is regenerated with fully qualified nodeids plus a `class_scope` field (totals unchanged at 35/33), §14.1 states the locator must be collectable, and §17 adds a collectability assertion. |
+| R5-m-01 append-only state defeats the multiplicity-1 condition | **Accepted.** Multiplicity is now computed over **active** rows (no `superseded_by`), with a §17 case for a second consecutive shift. |
+| R5-m-02 `region_digest` never persisted | **Accepted.** `region_digest`, `symbol_relative_offset` and the `base_sha` they were computed at are written into the state row at dispatch; the anchor comparison reads persisted values only. |
+| R5-m-03 mark-alias gap misattributed to relative imports | **Accepted.** Restated: indirect mark aliases are out of scope regardless of import style because the resolved target is a mark object, not a skip decorator; relative imports merely add a second reason. |
+| R5-m-04 co-located groups can never drift-link | **Accepted as a documented tradeoff.** The residual cost (duplicate re-dispatch after an edit above the group) is now stated explicitly, with the rationale that duplication is the safe failure direction and bounded by `budget_N` + review; one-to-one pairing within a group is recorded as a later refinement. |
+| R5-n-01 "availability or backend guard" overreaches | **Accepted.** Widened to availability / backend / feature-flag / opt-in-suite, with the thumbnails flag and the perf-suite env var named. |
+| R5-n-02 the 35 are distinct nodes | **Accepted.** The instance-vs-node caveat is scoped to the 33 exclusions; the 35 are noted as 35 distinct nodeids at this HEAD. |
 
 No finding was rejected.
 

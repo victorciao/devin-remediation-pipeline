@@ -71,9 +71,12 @@ is taken from `alert.updated_at` regardless (plan §5).
 The baseline was regenerated after these fixes (`scripts/build_baseline.py <repo> fixtures
 fixtures/codeql_alerts.json`), so `fixtures/baseline.json` records
 `baseline_valid_lanes: [codeql, skipped_tests, deprecations]`, `current_release: 6.1.0`, **35**
-LANE 2 candidate decorator instances (instances, not distinct test nodes; the enumerator is
-decorator-based, so `pytestmark` assignments, imperative in-body skips and relative-import mark
-aliases are outside its scope — see plan §5). Absolute-import bindings *are* resolved, so the
+LANE 2 candidate decorator instances (the enumerator counts decorator instances; at this HEAD the
+35 included rows are 35 distinct nodeids, while the 33 exclusions include multi-decorator nodes.
+It is decorator-based, so `pytestmark` assignments, imperative in-body skips and indirect
+`pytest.mark.*` aliases are outside its scope — see plan §5). Absolute-import bindings *are* resolved, so the
 alias-imported `@skip("Flaky")` at `tests/integration_tests/databases/commands_tests.py:118`
-counts. It also records 33 excluded conditional instances split by reason — 30 `conditional_environment_guard` and
+counts. Each candidate carries the fully qualified, collectable pytest nodeid
+(`path::Class::method` where the test is class-nested — 28 of the 35 are) plus its `class_scope`.
+It also records 33 excluded conditional instances split by reason — 30 `conditional_environment_guard` and
 3 `expected_failure_xfail` — and 2 EOL-passed deprecations.

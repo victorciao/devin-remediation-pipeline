@@ -16,6 +16,7 @@ import json
 import re
 import subprocess
 import sys
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -110,6 +111,21 @@ def _exclusion_reason(name: str) -> str | None:
     return None
 
 
+Definition = ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
+
+
+def _iter_definitions(
+    body: list[ast.stmt], scope: tuple[str, ...] = ()
+) -> Iterator[tuple[Definition, tuple[str, ...]]]:
+    """Yield each definition with the class scope enclosing it, outermost first."""
+    for node in body:
+        if isinstance(node, ast.ClassDef):
+            yield node, scope
+            yield from _iter_definitions(node.body, (*scope, node.name))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield node, scope
+
+
 def collect_skipped_tests(repo: Path) -> tuple[list[Record], list[Record]]:
     """Enumerate LANE 2 candidates and the conditional sites deliberately excluded."""
     included: list[Record] = []
@@ -120,11 +136,7 @@ def collect_skipped_tests(repo: Path) -> tuple[list[Record], list[Record]]:
         except (SyntaxError, UnicodeDecodeError):
             continue
         bindings = _import_bindings(tree)
-        for node in ast.walk(tree):
-            if not isinstance(
-                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-            ):
-                continue
+        for node, scope in _iter_definitions(tree.body):
             for dec in node.decorator_list:
                 written = _decorator_name(dec)
                 name = _resolve(written, bindings)
@@ -137,8 +149,11 @@ def collect_skipped_tests(repo: Path) -> tuple[list[Record], list[Record]]:
                     "reason": _decorator_reason(dec),
                     "kind": "class" if isinstance(node, ast.ClassDef) else "function",
                 }
+                record["class_scope"] = "::".join(scope) or None
                 if _is_unconditional_skip(name):
-                    record["nodeid"] = f"{record['path']}::{node.name}"
+                    record["nodeid"] = "::".join(
+                        (str(record["path"]), *scope, node.name)
+                    )
                     included.append(record)
                 elif (reason := _exclusion_reason(name)) is not None:
                     record["excluded_reason"] = reason

@@ -1,5 +1,5 @@
 {
-  "captured_at": "2026-08-28T18:16:11.670484+00:00",
+  "captured_at": "2026-08-28T18:29:39.294326+00:00",
   "repo": "victorciao/superset",
   "head_sha": "a140e74f5f54b2ada25e7558d884812facd3375d",
   "default_branch": "master",
@@ -616,7 +616,8 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "This test will be changed to use the api/v1/data",
       "kind": "function",
-      "nodeid": "tests/integration_tests/charts/commands_tests.py::test_query_context_update_command"
+      "class_scope": "TestChartsUpdateCommand",
+      "nodeid": "tests/integration_tests/charts/commands_tests.py::TestChartsUpdateCommand::test_query_context_update_command"
     },
     {
       "path": "tests/integration_tests/charts/commands_tests.py",
@@ -626,7 +627,8 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "This test will be changed to use the api/v1/data",
       "kind": "function",
-      "nodeid": "tests/integration_tests/charts/commands_tests.py::test_warm_up_cache"
+      "class_scope": "TestChartWarmUpCacheCommand",
+      "nodeid": "tests/integration_tests/charts/commands_tests.py::TestChartWarmUpCacheCommand::test_warm_up_cache"
     },
     {
       "path": "tests/integration_tests/charts/data/api_tests.py",
@@ -636,7 +638,30 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test class to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
       "kind": "class",
+      "class_scope": null,
       "nodeid": "tests/integration_tests/charts/data/api_tests.py::TestPostChartDataApi"
+    },
+    {
+      "path": "tests/integration_tests/charts/data/api_tests.py",
+      "line": 541,
+      "symbol": "test_chart_data_dttm_filter",
+      "decorator": "unittest.skip",
+      "resolved_decorator": "unittest.skip",
+      "reason": "Failing due to timezone difference",
+      "kind": "function",
+      "class_scope": "TestPostChartDataApi",
+      "nodeid": "tests/integration_tests/charts/data/api_tests.py::TestPostChartDataApi::test_chart_data_dttm_filter"
+    },
+    {
+      "path": "tests/integration_tests/charts/data/api_tests.py",
+      "line": 763,
+      "symbol": "test_chart_data_async",
+      "decorator": "unittest.skip",
+      "resolved_decorator": "unittest.skip",
+      "reason": "Extremely flaky test on MySQL",
+      "kind": "function",
+      "class_scope": "TestPostChartDataApi",
+      "nodeid": "tests/integration_tests/charts/data/api_tests.py::TestPostChartDataApi::test_chart_data_async"
     },
     {
       "path": "tests/integration_tests/charts/data/api_tests.py",
@@ -646,6 +671,7 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test class to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
       "kind": "class",
+      "class_scope": null,
       "nodeid": "tests/integration_tests/charts/data/api_tests.py::TestGetChartDataApi"
     },
     {
@@ -656,6 +682,7 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
       "kind": "function",
+      "class_scope": null,
       "nodeid": "tests/integration_tests/charts/data/api_tests.py::test_chart_data_subquery_not_allowed"
     },
     {
@@ -666,27 +693,8 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
       "kind": "function",
+      "class_scope": null,
       "nodeid": "tests/integration_tests/charts/data/api_tests.py::test_chart_data_subquery_allowed"
-    },
-    {
-      "path": "tests/integration_tests/charts/data/api_tests.py",
-      "line": 541,
-      "symbol": "test_chart_data_dttm_filter",
-      "decorator": "unittest.skip",
-      "resolved_decorator": "unittest.skip",
-      "reason": "Failing due to timezone difference",
-      "kind": "function",
-      "nodeid": "tests/integration_tests/charts/data/api_tests.py::test_chart_data_dttm_filter"
-    },
-    {
-      "path": "tests/integration_tests/charts/data/api_tests.py",
-      "line": 763,
-      "symbol": "test_chart_data_async",
-      "decorator": "unittest.skip",
-      "resolved_decorator": "unittest.skip",
-      "reason": "Extremely flaky test on MySQL",
-      "kind": "function",
-      "nodeid": "tests/integration_tests/charts/data/api_tests.py::test_chart_data_async"
     },
     {
       "path": "tests/integration_tests/core_tests.py",
@@ -696,7 +704,8 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "TODO This test was wrong - 'Error message' was in the language pack",
       "kind": "function",
-      "nodeid": "tests/integration_tests/core_tests.py::test_explore_injected_exceptions"
+      "class_scope": "TestCore",
+      "nodeid": "tests/integration_tests/core_tests.py::TestCore::test_explore_injected_exceptions"
     },
     {
       "path": "tests/integration_tests/core_tests.py",
@@ -706,7 +715,8 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "TODO This test was wrong - 'Error message' was in the language pack",
       "kind": "function",
-      "nodeid": "tests/integration_tests/core_tests.py::test_dashboard_injected_exceptions"
+      "class_scope": "TestCore",
+      "nodeid": "tests/integration_tests/core_tests.py::TestCore::test_dashboard_injected_exceptions"
     },
     {
       "path": "tests/integration_tests/dashboards/commands_tests.py",
@@ -716,7 +726,8 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "missing covid fixture",
       "kind": "function",
-      "nodeid": "tests/integration_tests/dashboards/commands_tests.py::test_export_dashboard_command_dataset_references"
+      "class_scope": "TestExportDashboardsCommand",
+      "nodeid": "tests/integration_tests/dashboards/commands_tests.py::TestExportDashboardsCommand::test_export_dashboard_command_dataset_references"
     },
     {
       "path": "tests/integration_tests/databases/api_tests.py",
@@ -726,7 +737,8 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "buggy",
       "kind": "function",
-      "nodeid": "tests/integration_tests/databases/api_tests.py::test_create_database_with_ssh_tunnel_no_port_no_default"
+      "class_scope": "TestDatabaseApi",
+      "nodeid": "tests/integration_tests/databases/api_tests.py::TestDatabaseApi::test_create_database_with_ssh_tunnel_no_port_no_default"
     },
     {
       "path": "tests/integration_tests/databases/commands_tests.py",
@@ -736,7 +748,8 @@
       "resolved_decorator": "unittest.skip",
       "reason": "Flaky",
       "kind": "function",
-      "nodeid": "tests/integration_tests/databases/commands_tests.py::test_export_database_command"
+      "class_scope": "TestExportDatabasesCommand",
+      "nodeid": "tests/integration_tests/databases/commands_tests.py::TestExportDatabasesCommand::test_export_database_command"
     },
     {
       "path": "tests/integration_tests/datasets/api_tests.py",
@@ -746,7 +759,8 @@
       "resolved_decorator": "unittest.skip",
       "reason": "test is failing stochastically",
       "kind": "function",
-      "nodeid": "tests/integration_tests/datasets/api_tests.py::test_create_dataset_same_name_different_schema"
+      "class_scope": "TestDatasetApi",
+      "nodeid": "tests/integration_tests/datasets/api_tests.py::TestDatasetApi::test_create_dataset_same_name_different_schema"
     },
     {
       "path": "tests/integration_tests/datasets/api_tests.py",
@@ -756,7 +770,8 @@
       "resolved_decorator": "unittest.skip",
       "reason": "test is failing stochastically",
       "kind": "function",
-      "nodeid": "tests/integration_tests/datasets/api_tests.py::test_export_dataset"
+      "class_scope": "TestDatasetApi",
+      "nodeid": "tests/integration_tests/datasets/api_tests.py::TestDatasetApi::test_export_dataset"
     },
     {
       "path": "tests/integration_tests/datasets/api_tests.py",
@@ -766,7 +781,8 @@
       "resolved_decorator": "unittest.skip",
       "reason": "Number of related objects depend on DB",
       "kind": "function",
-      "nodeid": "tests/integration_tests/datasets/api_tests.py::test_get_dataset_related_objects"
+      "class_scope": "TestDatasetApi",
+      "nodeid": "tests/integration_tests/datasets/api_tests.py::TestDatasetApi::test_get_dataset_related_objects"
     },
     {
       "path": "tests/integration_tests/datasource/test_validate_expression_api.py",
@@ -776,6 +792,7 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test class to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
       "kind": "class",
+      "class_scope": null,
       "nodeid": "tests/integration_tests/datasource/test_validate_expression_api.py::TestDatasourceValidateExpressionApi"
     },
     {
@@ -786,7 +803,8 @@
       "resolved_decorator": "unittest.skip",
       "reason": "Schema needs to be updated",
       "kind": "function",
-      "nodeid": "tests/integration_tests/import_export_tests.py::test_export_1_dashboard"
+      "class_scope": "TestImportExport",
+      "nodeid": "tests/integration_tests/import_export_tests.py::TestImportExport::test_export_1_dashboard"
     },
     {
       "path": "tests/integration_tests/import_export_tests.py",
@@ -796,7 +814,8 @@
       "resolved_decorator": "unittest.skip",
       "reason": "Schema needs to be updated",
       "kind": "function",
-      "nodeid": "tests/integration_tests/import_export_tests.py::test_export_2_dashboards"
+      "class_scope": "TestImportExport",
+      "nodeid": "tests/integration_tests/import_export_tests.py::TestImportExport::test_export_2_dashboards"
     },
     {
       "path": "tests/integration_tests/import_export_tests.py",
@@ -806,7 +825,8 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": null,
       "kind": "function",
-      "nodeid": "tests/integration_tests/import_export_tests.py::test_import_override_dashboard_slice_reset_ownership"
+      "class_scope": "TestImportExport",
+      "nodeid": "tests/integration_tests/import_export_tests.py::TestImportExport::test_import_override_dashboard_slice_reset_ownership"
     },
     {
       "path": "tests/integration_tests/query_context_tests.py",
@@ -816,6 +836,7 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test class to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
       "kind": "class",
+      "class_scope": null,
       "nodeid": "tests/integration_tests/query_context_tests.py::TestQueryContext"
     },
     {
@@ -826,7 +847,8 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
       "kind": "function",
-      "nodeid": "tests/integration_tests/sqllab_tests.py::test_sql_json"
+      "class_scope": "TestSqlLab",
+      "nodeid": "tests/integration_tests/sqllab_tests.py::TestSqlLab::test_sql_json"
     },
     {
       "path": "tests/integration_tests/sqllab_tests.py",
@@ -836,7 +858,8 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
       "kind": "function",
-      "nodeid": "tests/integration_tests/sqllab_tests.py::test_sql_json_dml_disallowed"
+      "class_scope": "TestSqlLab",
+      "nodeid": "tests/integration_tests/sqllab_tests.py::TestSqlLab::test_sql_json_dml_disallowed"
     },
     {
       "path": "tests/integration_tests/sqllab_tests.py",
@@ -846,7 +869,8 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
       "kind": "function",
-      "nodeid": "tests/integration_tests/sqllab_tests.py::test_sql_json_cta_dynamic_db"
+      "class_scope": "TestSqlLab",
+      "nodeid": "tests/integration_tests/sqllab_tests.py::TestSqlLab::test_sql_json_cta_dynamic_db"
     },
     {
       "path": "tests/integration_tests/sqllab_tests.py",
@@ -856,7 +880,8 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
       "kind": "function",
-      "nodeid": "tests/integration_tests/sqllab_tests.py::test_multi_sql"
+      "class_scope": "TestSqlLab",
+      "nodeid": "tests/integration_tests/sqllab_tests.py::TestSqlLab::test_multi_sql"
     },
     {
       "path": "tests/integration_tests/sqllab_tests.py",
@@ -866,7 +891,8 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
       "kind": "function",
-      "nodeid": "tests/integration_tests/sqllab_tests.py::test_explain"
+      "class_scope": "TestSqlLab",
+      "nodeid": "tests/integration_tests/sqllab_tests.py::TestSqlLab::test_explain"
     },
     {
       "path": "tests/integration_tests/sqllab_tests.py",
@@ -876,7 +902,8 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
       "kind": "function",
-      "nodeid": "tests/integration_tests/sqllab_tests.py::test_sql_json_has_access"
+      "class_scope": "TestSqlLab",
+      "nodeid": "tests/integration_tests/sqllab_tests.py::TestSqlLab::test_sql_json_has_access"
     },
     {
       "path": "tests/integration_tests/sqllab_tests.py",
@@ -886,7 +913,8 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
       "kind": "function",
-      "nodeid": "tests/integration_tests/sqllab_tests.py::test_sql_limit"
+      "class_scope": "TestSqlLab",
+      "nodeid": "tests/integration_tests/sqllab_tests.py::TestSqlLab::test_sql_limit"
     },
     {
       "path": "tests/integration_tests/sqllab_tests.py",
@@ -896,7 +924,8 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
       "kind": "function",
-      "nodeid": "tests/integration_tests/sqllab_tests.py::test_sql_json_parameter_error"
+      "class_scope": "TestSqlLab",
+      "nodeid": "tests/integration_tests/sqllab_tests.py::TestSqlLab::test_sql_json_parameter_error"
     },
     {
       "path": "tests/integration_tests/sqllab_tests.py",
@@ -906,7 +935,8 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
       "kind": "function",
-      "nodeid": "tests/integration_tests/sqllab_tests.py::test_sql_json_parameter_authorized"
+      "class_scope": "TestSqlLab",
+      "nodeid": "tests/integration_tests/sqllab_tests.py::TestSqlLab::test_sql_json_parameter_authorized"
     },
     {
       "path": "tests/integration_tests/sqllab_tests.py",
@@ -916,7 +946,8 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
       "kind": "function",
-      "nodeid": "tests/integration_tests/sqllab_tests.py::test_sql_json_parameter_forbidden"
+      "class_scope": "TestSqlLab",
+      "nodeid": "tests/integration_tests/sqllab_tests.py::TestSqlLab::test_sql_json_parameter_forbidden"
     },
     {
       "path": "tests/integration_tests/sqllab_tests.py",
@@ -926,7 +957,8 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
       "kind": "function",
-      "nodeid": "tests/integration_tests/sqllab_tests.py::test_sql_json_soft_timeout"
+      "class_scope": "TestSqlLab",
+      "nodeid": "tests/integration_tests/sqllab_tests.py::TestSqlLab::test_sql_json_soft_timeout"
     },
     {
       "path": "tests/integration_tests/themes/api_tests.py",
@@ -936,7 +968,8 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "DELETE endpoint not properly registered due to route method exclusion",
       "kind": "function",
-      "nodeid": "tests/integration_tests/themes/api_tests.py::test_delete_theme"
+      "class_scope": "TestThemeApi",
+      "nodeid": "tests/integration_tests/themes/api_tests.py::TestThemeApi::test_delete_theme"
     },
     {
       "path": "tests/integration_tests/themes/api_tests.py",
@@ -946,7 +979,8 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "DELETE endpoint not properly registered due to route method exclusion",
       "kind": "function",
-      "nodeid": "tests/integration_tests/themes/api_tests.py::test_delete_theme_not_found"
+      "class_scope": "TestThemeApi",
+      "nodeid": "tests/integration_tests/themes/api_tests.py::TestThemeApi::test_delete_theme_not_found"
     },
     {
       "path": "tests/unit_tests/databases/api_test.py",
@@ -956,6 +990,7 @@
       "resolved_decorator": "pytest.mark.skip",
       "reason": "Works locally but fails on CI",
       "kind": "function",
+      "class_scope": null,
       "nodeid": "tests/unit_tests/databases/api_test.py::test_update_with_password_mask"
     }
   ],
@@ -968,6 +1003,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "thrift not installed",
       "kind": "function",
+      "class_scope": null,
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -978,6 +1014,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "boto3 not installed",
       "kind": "function",
+      "class_scope": null,
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -988,6 +1025,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "boto3 not installed",
       "kind": "function",
+      "class_scope": null,
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -998,6 +1036,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "boto3 not installed",
       "kind": "function",
+      "class_scope": null,
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1008,6 +1047,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "boto3 not installed",
       "kind": "function",
+      "class_scope": null,
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1018,6 +1058,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "thrift not installed",
       "kind": "function",
+      "class_scope": null,
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1028,6 +1069,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "thrift not installed",
       "kind": "function",
+      "class_scope": null,
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1038,6 +1080,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "thrift not installed",
       "kind": "function",
+      "class_scope": null,
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1048,6 +1091,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "mysqlclient not installed",
       "kind": "function",
+      "class_scope": "TestMySQLEngineSpecsDbEngineSpec",
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1058,6 +1102,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "pyhive not installed",
       "kind": "function",
+      "class_scope": "TestPrestoDbEngineSpec",
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1068,6 +1113,7 @@
       "resolved_decorator": "pytest.mark.skipif",
       "reason": "manual fixed-cardinality timing protocol",
       "kind": "function",
+      "class_scope": "TestPurgeQueryCount",
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1078,6 +1124,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "requests not installed",
       "kind": "function",
+      "class_scope": "TestDatabaseModel",
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1088,6 +1135,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "pyhive not installed",
       "kind": "function",
+      "class_scope": "TestDatabaseModel",
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1098,6 +1146,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "thrift not installed",
       "kind": "function",
+      "class_scope": "TestDatabaseModel",
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1108,6 +1157,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "pyhive not installed",
       "kind": "function",
+      "class_scope": "TestDatabaseModel",
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1118,6 +1168,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "mysqlclient not installed",
       "kind": "function",
+      "class_scope": "TestDatabaseModel",
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1128,6 +1179,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "mysqlclient not installed",
       "kind": "function",
+      "class_scope": "TestDatabaseModel",
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1138,6 +1190,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "pyhive not installed",
       "kind": "function",
+      "class_scope": "TestDatabaseModel",
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1148,6 +1201,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "mysqlclient not installed",
       "kind": "function",
+      "class_scope": "TestDatabaseModel",
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1158,6 +1212,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "pyhive not installed",
       "kind": "function",
+      "class_scope": "TestDatabaseModel",
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1168,6 +1223,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "thrift not installed",
       "kind": "function",
+      "class_scope": "TestDatabaseModel",
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1178,6 +1234,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "pyhive not installed",
       "kind": "function",
+      "class_scope": "TestDatabaseModel",
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1188,6 +1245,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "pydruid not installed",
       "kind": "function",
+      "class_scope": "TestRolePermission",
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1198,6 +1256,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "pydruid not installed",
       "kind": "function",
+      "class_scope": "TestRolePermission",
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1208,6 +1267,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "Thumbnails feature",
       "kind": "function",
+      "class_scope": "TestThumbnailsSeleniumLive",
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1218,6 +1278,7 @@
       "resolved_decorator": "unittest.skipUnless",
       "reason": "Thumbnails feature",
       "kind": "function",
+      "class_scope": "TestThumbnails",
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1228,6 +1289,7 @@
       "resolved_decorator": "pytest.mark.skipif",
       "reason": null,
       "kind": "class",
+      "class_scope": null,
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1238,6 +1300,7 @@
       "resolved_decorator": "pytest.mark.xfail",
       "reason": "POC not implemented: ratio totals are summed cell-wise, not recomputed as SUM(num)/SUM(den) at the total grouping level (#25747).",
       "kind": "function",
+      "class_scope": null,
       "excluded_reason": "expected_failure_xfail"
     },
     {
@@ -1248,6 +1311,7 @@
       "resolved_decorator": "pytest.mark.xfail",
       "reason": "POC not implemented: COUNT_DISTINCT subtotals are summed across groups, double-counting overlapping members (#36165).",
       "kind": "function",
+      "class_scope": null,
       "excluded_reason": "expected_failure_xfail"
     },
     {
@@ -1258,6 +1322,7 @@
       "resolved_decorator": "pytest.mark.skipif",
       "reason": "requires ocient dependencies",
       "kind": "function",
+      "class_scope": null,
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1268,6 +1333,7 @@
       "resolved_decorator": "pytest.mark.skipif",
       "reason": "requires ocient dependencies",
       "kind": "function",
+      "class_scope": null,
       "excluded_reason": "conditional_environment_guard"
     },
     {
@@ -1278,6 +1344,7 @@
       "resolved_decorator": "pytest.mark.xfail",
       "reason": "#38189 is not fully fixed: a `;`-terminated statement still hits the comment-relocation branch and corrupts the hint block. Only the no-semicolon form from the original repro was fixed.",
       "kind": "function",
+      "class_scope": null,
       "excluded_reason": "expected_failure_xfail"
     },
     {
@@ -1288,6 +1355,7 @@
       "resolved_decorator": "pytest.mark.skipif",
       "reason": "FAB _init_fields KeyError only occurs on marshmallow >= 4",
       "kind": "function",
+      "class_scope": null,
       "excluded_reason": "conditional_environment_guard"
     }
   ],
