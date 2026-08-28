@@ -4,8 +4,9 @@
 > plan-review step (T-1, §2) reviews against, and what every later change must be
 > reconciled with. Referenced from the README.
 >
-> **Revision 2** — incorporates the T-1 plan review (5 blocking / 15 major / 10 minor / 2 nit).
-> See §20 for the revision log and the finding-by-finding disposition.
+> **Revision 3** — incorporates T-1 review round 1 (5 blocking / 15 major / 10 minor / 2 nit)
+> and round 2 (7 major / 8 minor / 2 nit). See §20 for the revision log and the
+> finding-by-finding disposition of both rounds.
 
 Produce the deliverables for an event-driven Devin remediation pipeline that finds, ranks, and
 remediates issues in Apache Superset, opening cross-linked PRs + issues with observability.
@@ -86,9 +87,9 @@ A lane or dispatch path whose precondition is unmet is disabled for the run and 
 | Precondition | Check | If unmet |
 |---|---|---|
 | Issues enabled | `GET /repos/{o}/{r}` → `has_issues == true` | dispatch preflight aborts **before any write**; degraded path `issue_sink = pr_comment` (§7) |
-| Actions enabled + workflows registered | `GET /actions/workflows` → `total_count > 0` | `ci_evidence_mode` falls back to `local` (§10); auto-merge hard-disabled |
-| Code scanning available | `GET /code-scanning/alerts` → 200 | LANE 1 falls back to `alert_source = sarif_file` (§5); no live LANE 1 evidence |
-| Token capability | `repo` (or fine-grained Contents/Issues/PR/Actions/Code-scanning write) | hard stop |
+| Actions **can run**, not merely registered *(R2-M-06)* | `GET /actions/workflows` → `total_count > 0` **and** `GET /actions/runs?event=pull_request` (or `workflow_dispatch`) → ≥1 `completed` run | `ci_evidence_mode` falls back to `local` (§10); auto-merge hard-disabled |
+| Code scanning available | `GET /code-scanning/alerts`; outcome split by status *(R2-m-03)* — `200` → available; `403` → `token_capability_missing` (hard stop, same row as below); `404` / empty analysis → `capability_unavailable` | LANE 1 falls back to `alert_source = sarif_file` (§5); no live LANE 1 evidence |
+| Token capability | `repo` (or fine-grained Contents/Issues/PR/Actions/Code-scanning write). The probe records the **token identity** (`GET /user` login + `x-oauth-scopes`) in the event log so a permissions failure is never misread as an absent analysis *(R2-m-03)* | hard stop |
 
 ### 0e — Recorded Phase 0 outcome for `victorciao/superset`
 
@@ -102,9 +103,24 @@ Captured at `HEAD = a140e74`, snapshot committed to `fixtures/baseline.json`:
   `fixtures/codeql_alerts.json` — LANE 1 therefore has live data. Rule mix:
   `py/stack-trace-exposure` (×2), `py/overly-large-range` (×4), `py/url-redirection` (×2),
   `js/xss`, `js/xss-through-exception`, `js/clear-text-storage-of-sensitive-data`.
-- **37** unconditional skip sites under `tests/` (the LANE 2 backlog; `skipUnless`
-  availability guards excluded — see M-01) and **4** `@deprecated(deprecated_in=...)` sites,
-  none carrying `removed_in` (see M-02).
+- **34** unconditional skip sites under `tests/`, **as produced by the §5 LANE 2 enumerator**
+  *(R2-M-04)*, plus **33** conditional sites recorded separately in
+  `baseline.excluded_conditional_skips` with `excluded_reason: conditional_environment_guard`
+  (every `skipif`/`skipUnless` in the tree is an availability or backend guard, and `xfail` is
+  an expected-failure signal, not disabled coverage — see §5).
+- **4** `@deprecated(deprecated_in=...)` sites, none carrying `removed_in`, of which **2** are
+  EOL-passed under §4.2 (`normalize_indexes` at `3.0`,
+  `DatabaseRestApi.table_extra_metadata_deprecated` at `4.0`).
+- **Baseline validity** *(R2-M-03)* — the snapshot is regenerated **after** the capability fixes
+  and records `baseline_valid_lanes: [codeql, skipped_tests, deprecations]` plus
+  `current_release`, `current_major`, `eol_threshold_major` and `version_source`. Burn-down for
+  any lane absent from `baseline_valid_lanes` is reported `n/a`, never as a fall from zero (§11).
+- **CodeQL default setup**, read with the owner token *(R2-n-02)*: `state: configured`,
+  `query_suite: default`, `schedule: weekly`, languages `javascript`, `javascript-typescript`,
+  `python`, `typescript` — recorded in `docs/PHASE0_DISCOVERY.md`.
+- **Actions runs: 1** (`CodeQL Setup`, event `dynamic`). No `pull_request` or
+  `workflow_dispatch` run has ever completed, so the strengthened 0d row above resolves
+  `ci_evidence_mode = local` for the evidence run *(R2-M-06)*.
 
 ---
 
@@ -155,19 +171,37 @@ each row mapping an observable property to a value. Defaults:
 | 2 — skipped test | breadth of the covered surface | skip `reason` specificity (a `TODO:` with a cause = 4; bare skip = 2) | test-only diff ⇒ 1–2 |
 | 3 — deprecation | public-API exposure | age in majors past `deprecated_in` | caller/override count (see M-02 gate) |
 
-### §4.2 EOL definition for LANE 3 *(M-02)*
+### §4.2 EOL definition for LANE 3 *(M-02, R2-M-02)*
 
 No `@deprecated` site in the target repo carries `removed_in`, so EOL must be derived:
 
 > **EOL** = `removed_in` present and `<=` current version, **or** (no `removed_in`)
 > `major(deprecated_in) <= current_major - eol_major_lag`, with `eol_major_lag = 2`.
 
+**Version source** *(R2-M-02)* — the target declares no usable version at rest:
+`pyproject.toml` uses `dynamic = ["version"]` and `superset-frontend/package.json` says
+`0.0.0-dev`, which would make `current_major = 0` and the rule select nothing. `current_major`
+is therefore read from the highest concrete release offered by the `superset-version` dropdown
+in `.github/ISSUE_TEMPLATE/bug-report.yml` — the only in-repo enumeration of released versions,
+maintained per release. At `a140e74` that is **6.1.0 → `current_major = 6`**, so the EOL
+threshold is `major <= 4`. The source path is a config value (`version_source`), the resolved
+value is recorded in `fixtures/baseline.json`, and a §17 test asserts a drift failure (rather
+than a silent empty lane) if the dropdown stops yielding a concrete release.
+
 Additional hard gate `no_internal_callers_and_no_override_surface`: a symbol still called inside
 `superset/`, or named as an override point by `superset/db_engine_specs/lib.py` or
-`superset/db_engine_specs/README.md`, fails `automatability` and is human-routed. Under this
-rule the only qualifying candidate at `a140e74` is `normalize_indexes` (`deprecated_in="3.0"`);
-`get_url_for_impersonation` is **excluded** (still called at `base.py:2306`, checked by
-`lib.py:145`, and covered by `tests/unit_tests/db_engine_specs/test_base.py`).
+`superset/db_engine_specs/README.md`, fails `automatability` and is human-routed. Applying both
+rules at `a140e74`:
+
+| Site | `deprecated_in` | EOL (`<= 4`) | Caller/override gate | Outcome |
+|---|---|---|---|---|
+| `superset.db_engine_specs.base:BaseEngineSpec.normalize_indexes` | `3.0` | pass | pass | **qualifying demo candidate** |
+| `superset.databases.api:DatabaseRestApi.table_extra_metadata_deprecated` | `4.0` | pass | **fail** — a routed public REST endpoint (removal is an API break needing a SIP) | human-routed, `public_api_surface` |
+| `…base:BaseEngineSpec.get_url_for_impersonation` | `6.0.0` | fail | fail (called at `base.py:2306`, checked by `lib.py:145`) | dropped |
+| `…base:BaseEngineSpec.update_impersonation_config` | `6.0.0` | fail | — | dropped |
+
+So the lane has two EOL-passed sites and one automatable candidate; this closes former open
+question 3.
 
 ---
 
@@ -178,18 +212,31 @@ rule the only qualifying candidate at `a140e74` is `normalize_indexes` (`depreca
   reads a committed SARIF/alert fixture (`fixtures/codeql_alerts.json`, captured live from the
   fork, or a SARIF produced by the CodeQL CLI) so the lane is exercisable without code-scanning
   access. Trigger anchor: CodeQL is **scheduled** (upstream `codeql-analysis.yml` cron
-  `0 4 * * *`; default setup on the fork runs weekly), and analysis is gated behind a
+  `0 4 * * *`; the fork's default setup reports `schedule: weekly` — verified with the owner
+  token, *(R2-n-02)*), and analysis is gated behind a
   python/frontend change detector — so the lane uses `alert.updated_at` as the freshness
   signal, never the cron. *(m-02)*
+  **Scope** *(R2-m-04)*: this iteration verifies Python only. A LANE 1 candidate whose alert
+  path is outside `superset/**/*.py` fails `verifiability_exists` with reason
+  `out_of_scope_frontend` — that gates out the three JS/TS alerts
+  (`js/xss`, `js/xss-through-exception`, `js/clear-text-storage-of-sensitive-data`) consistently
+  with the §18 non-goal, rather than leaving them undefined.
 - **LANE 2 — skipped/flaky-test backlog** (`tests/integration_tests/sqllab_tests.py` and the
-  wider `tests/` tree); re-enable and verify. **Enumerator scope** *(M-01)*: match
-  `@pytest.mark.skip`, `@unittest.skip`, and `@pytest.mark.skipif` only; explicitly **exclude**
-  `@unittest.skipUnless` and availability-guarded `skipif` — those are correct-by-design
-  environment guards, not debt. `tests/integration_tests/model_tests.py` is **not** a source:
-  all 11 of its skips are `skipUnless(is_module_installed(...))` guards.
+  wider `tests/` tree); re-enable and verify. **Enumerator scope** *(M-01, R2-M-04)*: match
+  `@pytest.mark.skip` and `@unittest.skip` — unconditional skips **only**. Excluded, and counted
+  separately so the exclusion is auditable: `skipif` / `skipUnless` (every one of the target's
+  sites is an availability or backend guard — `ocient_is_installed()`, `only_postgresql`,
+  marshmallow-version, perf-suite — i.e. correct by design, not debt) and `xfail` (an expected
+  failure that is still collected and reported, not disabled coverage). The enumerator and
+  `scripts/build_baseline.py` share this definition, and a §17 test asserts
+  `enumerator_count == baseline.totals.skipped_tests` so the two can never drift.
+  `tests/integration_tests/model_tests.py` is **not** a source: all 11 of its skips are
+  `skipUnless(is_module_installed(...))` guards.
 - **LANE 3 — EOL-passed `@deprecated` removals**; scan scope `superset/**/*.py` *(n-01)*, EOL
   and caller/override gating per §4.2, verified via targeted
-  `tests/unit_tests/db_engine_specs/`. Qualifying demo candidate: `normalize_indexes`.
+  `tests/unit_tests/db_engine_specs/`. Enumeration is AST-based (the decorator may sit several
+  decorators above the `def`), producing `module:qualname` locators. Qualifying demo candidate:
+  `normalize_indexes`.
 - **Tier-2 (documented, lower priority)** — third-party modernization warnings suppressed in
   `superset/mcp_service/server.py` and `superset/db_engine_specs/redshift.py` — high blast
   radius / low verifiability.
@@ -221,7 +268,11 @@ rule the only qualifying candidate at `a140e74` is `normalize_indexes` (`depreca
 - **Degraded path** *(B-02)*: if `has_issues == false` on the target, dispatch aborts before any
   write unless `issue_sink = pr_comment`, in which case the manager-facing artifact is rendered
   as a dedicated PR comment plus `reports/issues/<candidate_id>.md`, the run is tagged
-  `artifact_degraded`, and those candidates do **not** count toward §19 evidence.
+  `artifact_degraded`, and those candidates do **not** count toward §19 evidence. This path
+  necessarily inverts the ordering above (there is no issue number to reference), so it has its
+  own state transition `dispatching → pr_created → comment_created` *(R2-m-06)* and the §14
+  template-validation rule applies to the rendered **comment body** exactly as it does to an
+  issue body.
 - PR body carries a scaled `### IMPLEMENTATION PLAN` section (candidate-level, planner-authored),
   distinct from the manager issue and run report.
 
@@ -261,7 +312,7 @@ rule the only qualifying candidate at `a140e74` is `normalize_indexes` (`depreca
     therefore ships `templates/issues/security_tracking.md` with a locked, detail-free section
     list: `### SUMMARY (no exploit detail)` / `### SCOPE (files or modules only)` /
     `### REMEDIATION STATUS` / `### VERIFICATION` / `### REFERENCES (rule ID only)`. This is
-    `security_issue_mode = generic_tracking`.
+    the `SECURITY_ISSUE_MODE = generic_tracking` constant (§13, not a knob).
 - Enforce section presence + order via snapshot/format tests so formats stay consistent across
   all generated issues and PRs.
 
@@ -308,9 +359,14 @@ observed counterparts are logged so the §11 expected-reason-match KPI is comput
 - The **orchestrator** creates `devin/remediation/<candidate_id>` from the target base and pins
   `base_sha`; it — not the sessions — opens the PR, and only after JOIN.
 - The **reviewer** runs its red baseline in its own checkout at `base_sha` and pushes
-  test-path-only commits first.
-- The **implementer** commits non-test paths only (with the LANE 2 carve-out below) and rebases
-  onto the reviewer's commit at JOIN.
+  test-path-only commits first. **For LANE 2 the reviewer also owns the skip-marker change**
+  *(R2-M-07)*: it applies the removal or narrowing as a scratch working-tree patch on
+  `base_sha`, classifies the result (`FAILED` → valid baseline; `PASSED` → `stale_skip`;
+  `SKIPPED` → `invalid_red_baseline`), and only then commits that test-path change. This is the
+  only way the classification is observable — at `base_sha` the marker is by definition still
+  present, so no other role can run the un-skipped test.
+- The **implementer** commits non-test paths only and rebases onto the reviewer's commit at
+  JOIN. It has **no** LANE 2 carve-out.
 - Every commit uses `git commit --signoff`. Push races resolve by rebase-retry (max 3), then
   `needs-human-review`.
 
@@ -318,16 +374,18 @@ observed counterparts are logged so the §11 expected-reason-match KPI is comput
 
 The implementer restriction is **scope-based, not path-based**:
 
-> The implementer may not author or modify assertions or test oracles. For the re-enablement
-> lane its permitted diff is exactly the removal or narrowing of skip markers
-> (`@pytest.mark.skip` / `skipif`) plus non-test production code. Any hunk touching an
-> assertion, a fixture body, or test logic → `needs-human-review`.
+> The implementer may not author or modify assertions or test oracles, **nor skip markers**
+> *(R2-M-07)*. Its permitted diff is non-test production code only. Any hunk touching an
+> assertion, a fixture body, test logic, or a `@pytest.mark.skip` / `skipif` decorator →
+> `needs-human-review`.
 
-This is enforced by a **diff classifier** in T10, not a filename check. A red→green test is
-REQUIRED for behavioral lanes (CodeQL, deprecation). LANE 2 is **not** "self-satisfied": the
-un-skipped test is run at the pre-fix commit and MUST fail (not skip, not pass) — that failure
-is its baseline. If it **passes** pre-fix the candidate is tagged `stale_skip`, a distinct valid
-terminal outcome exempt from red→green (the remediation is simply deleting a dead skip marker).
+This is enforced by a **diff classifier** in T10, not a filename check; skip-marker hunks are
+rejected for the implementer and accepted for the reviewer, keeping the marker single-owner. A
+red→green test is REQUIRED for behavioral lanes (CodeQL, deprecation). LANE 2 is **not**
+"self-satisfied": per §9.2 the reviewer runs the un-skipped test at `base_sha` and it MUST fail
+(not skip, not pass) — that failure is its baseline. If it **passes** there the candidate is
+tagged `stale_skip`, a distinct valid terminal outcome exempt from red→green (the remediation
+is simply deleting a dead skip marker) that ships as a reviewer-only diff.
 
 **Structural invariants (NOT configurable)** — reviewer≠implementer separation, red-baseline
 requirement (per §9.1/§9.3), no-auto-merge-without-green-CI, no third adjudicating agent,
@@ -353,20 +411,24 @@ plan previously conflated them *(M-04)*.
 | `ruff` | lint |
 | `mypy` | typing (main) |
 | `pylint` (Superset plugins) | lints only `superset/` files changed since merge-base `origin/$TARGET_BRANCH` — needs `origin/master` fetched; **never** lints `tests/` |
-| `db-engine-spec-metadata` | relevant to LANE 3 |
+| `db-engine-spec-metadata` | fires for concrete engine-spec modules only — it excludes `base.py`/`lib.py`, so the current LANE 3 candidate is out of its scope *(R2-m-02)* |
 | frontend hooks | only when `superset-frontend/**` is touched |
 | `zizmor` | runs `--no-exit-codes` → advisory only |
 
-**Runs only in CI** (cannot be reproduced by pre-commit):
+**Runs only in CI** (cannot be reproduced by pre-commit). The **13 contexts required by
+upstream `.asf.yaml`** *(R2-m-01)* are exactly:
 
-`pre-commit (current)`, `license_check` (an Apache-RAT / `setup-java` workflow invoking
-`./scripts/check_license.sh` — **not** a pre-commit hook), `lint-check` (the PR-title action),
-`unit-tests-required`, `test-postgres-required`, `test-sqlite`, `test-mysql`,
-`test-postgres-hive`, `test-postgres-presto`, `frontend-build`, `cypress-matrix-required`,
+`lint-check` (the PR-title action), `pre-commit (current)`, `unit-tests-required`,
+`test-postgres-required`, `test-sqlite`, `test-mysql`, `test-postgres-hive`,
+`test-postgres-presto`, `frontend-build`, `cypress-matrix-required`,
 `playwright-tests-required`, `dependency-review`, `enforce-single-migration-head`.
 
-That 13-context required set lives in upstream `.asf.yaml` and is applied by ASF infra to
-`apache/superset` only — a fork inherits the workflows but not the branch protection.
+Other CI-only workflows the pipeline also runs, but which are **not** `.asf.yaml`-required:
+`license_check` (an Apache-RAT / `setup-java` workflow invoking `./scripts/check_license.sh` —
+not a pre-commit hook either).
+
+That required set is applied by ASF infra to `apache/superset` only — a fork inherits the
+workflows but not the branch protection.
 
 **DCO** — there is no DCO workflow in the repository; DCO is ASF-infra-enforced upstream. The
 pipeline still signs every commit (`git commit --signoff`) and asserts the trailer itself.
@@ -383,8 +445,16 @@ not collaborators, and `require_code_owner_reviews` is an upstream `.asf.yaml` s
 | `github` | the CI contexts above reporting success on the PR head | permitted, subject to §14 |
 | `local` | `pre-commit run --files <changed>` plus the targeted pytest paths executed in-session, with command output attached to the PR body | **hard-disabled** (`auto_merge_enabled` forced `false`, not merely defaulted) |
 
-The mode is resolved by the §3 0d precondition check (no registered workflows → `local`) and
-recorded in the Layer 1 event log; §19's REPO B criterion names which mode satisfied it.
+The mode is resolved by the §3 0d precondition check and recorded in the Layer 1 event log;
+§19's REPO B criterion names which mode satisfied it. On `victorciao/superset` the strengthened
+0d check resolves **`local`** (1 lifetime Actions run, event `dynamic`; no `pull_request` run
+has ever completed).
+
+**`ci_wait_timeout_s`** *(R2-M-06)* — `github` mode waits at most `ci_wait_timeout_s`
+(default `5400`) for the required contexts to report on the PR head. On expiry the candidate is
+recorded `ci_evidence_unavailable`, its evidence is downgraded to `local`, and it is **never**
+auto-merge eligible. Without this bound a fork whose workflows never trigger blocks the
+orchestrator indefinitely.
 
 ---
 
@@ -407,6 +477,9 @@ Answers "how would an engineering leader know this is working?"
   rate, criterion-coverage rate, expected-reason match rate on red baselines,
   `disagreement_unresolved` rate, sessions-per-candidate by role, implementer-test-edit
   violation rate (~0 expected).
+- **Burn-down validity** *(R2-M-03)* — burn-down is computed only for lanes listed in
+  `baseline.baseline_valid_lanes`; a lane whose baseline was captured while it was
+  `capability_unavailable` reports `n/a` with that reason, never a spurious increase from zero.
 - **ALERTING** (visually distinct in the rollup): merge rate < `merge_rate_floor = 0.50` → flag;
   session-failure rate > `session_failure_ceiling = 0.30` → flag.
 - Merge-rate / burn-down are lagging and only meaningful after several runs.
@@ -441,8 +514,17 @@ unmapped-test escalation).
 
 `GET /v1/sessions/{id}` until a terminal `status_enum`; `session_timeout_s` per role; per-role
 `max_acu_limit`; every creation passes `idempotent: true` and
-`tags: ["devin-remediation", candidate_id, role]`. Exceeding the per-run session/cost ceiling
-(§14) aborts the run rather than degrading silently.
+`tags: ["devin-remediation", candidate_id, role, "attempt:<n>"]`. Exceeding the per-run
+session/cost ceiling (§14) aborts the run rather than degrading silently.
+
+**Idempotent creation must not swallow retries** *(R2-M-05)*. `idempotent: true` returns the
+pre-existing session for an identical request, which would defeat the two retry paths the plan
+requires — the §14.1 retry of a stuck/timed-out session under the same `candidate_id`, and the
+§9.1 re-author after `invalid_red_baseline`. Every creation therefore carries an **attempt
+ordinal** in both the prompt preamble and the `attempt:<n>` tag, making each retry a distinct
+request. The orchestrator asserts `is_new_session == true` for any attempt `> 1`; a dedupe hit
+there is a fatal orchestration error, not a silent no-op. `is_new_session` is recorded in the
+Layer 1 event log.
 
 ---
 
@@ -463,12 +545,14 @@ README ships a config reference table with default, allowed values, and safety c
 | `eol_major_lag` | `2` | `>= 1` | — |
 | `merge_rate_floor` | `0.50` | `0.0..1.0` | — |
 | `session_failure_ceiling` | `0.30` | `0.0..1.0` | — |
-| `kpi_sink` | `local` | `local`, `gsheet` | may **not** be `gsheet` while `mode = simulate` |
+| `kpi_sink` | `local` | `local`, `gsheet` | `gsheet` while `mode = simulate` is a **config validation error at startup** (non-zero exit, no partial run) *(R2-m-07)* |
 | `major_only_requires_human` | `true` | `true`, `false` | **routing-only** — see below |
-| `security_issue_mode` | `generic_tracking` | `generic_tracking` | — |
 | `alert_source` | `api` | `api`, `sarif_file` | — |
 | `ci_evidence_mode` | resolved by §3 0d | `github`, `local` | `local` forces `auto_merge_enabled = false` |
+| `ci_wait_timeout_s` | `5400` | `> 0` | on expiry → `ci_evidence_unavailable`, evidence downgraded to `local`, never auto-merge *(R2-M-06)* |
+| `auto_merge_enabled` | `false` | `true`, `false` | **safety-relevant** *(R2-m-05)* — forced `false` whenever `ci_evidence_mode = local`, and never sufficient on its own (§6 tier, §9 invariants and §10 gates all still apply) |
 | `issue_sink` | `issues` | `issues`, `pr_comment` | `pr_comment` tags the run `artifact_degraded` |
+| `version_source` | `.github/ISSUE_TEMPLATE/bug-report.yml` | repo-relative path | drift-tested; yielding no concrete release is a startup error, not an empty lane *(R2-M-02)* |
 
 Also configurable: target `owner/repo`, GitHub token, Devin API key, per-lane factor rubrics
 (`config/rubrics.yaml`), artifact templates.
@@ -479,6 +563,8 @@ Also configurable: target `owner/repo`, GitHub token, Devin API key, per-lane fa
   `guardrail_clamped`, and running above it requires an explicit `--i-know-what-im-doing` flag.
 - `major_only_requires_human` is **routing-only** *(M-06)*: `false` still blocks auto-merge and
   merely omits the `needs-human-review` label. The block itself is a §9 structural invariant.
+- `SECURITY_ISSUE_MODE = generic_tracking` *(R2-n-01)* — it had exactly one allowed value, so it
+  is a constant, not a knob. Security-lane issues are always detail-free (§8, §14).
 - Structural invariants (§9) are NOT knobs.
 
 **`coverage_bar` subject** *(m-07)* — the "pure-logic modules" are exactly
@@ -518,15 +604,30 @@ candidate_id = sha256(lane | repo | stable_locator)
 
 | Lane | `stable_locator` |
 |---|---|
-| 1 — CodeQL | `rule_id + file_path + normalized_symbol` — **never** `alert.number` (unstable across re-scans) |
+| 1 — CodeQL | `rule_id + file_path + normalized_symbol + position_digest` — **never** `alert.number` (unstable across re-scans) |
 | 2 — skipped test | the pytest nodeid |
 | 3 — deprecation | `module:qualname` |
+
+**LANE 1 needs a positional discriminator** *(R2-M-01)*. Rule + path + symbol collides on real
+data: four of the eleven live alerts are `py/overly-large-range` on the same line of
+`superset/mcp_service/dashboard/tool/add_chart_to_existing_dashboard.py:55`, differing only by
+column (6, 9, 12, 15). Under last-write-wins that silently collapses four candidates into one
+and understates the burn-down denominator. So:
+
+```
+position_digest = sha256("{start_line}:{start_column}-{end_line}:{end_column}")[:12]
+```
+
+taken from `most_recent_instance.location`. It is stable across re-scans of unchanged code
+(unlike `alert.number`) while still separating co-located alerts. A §17 test asserts the four
+fixture alerts yield four distinct `candidate_id`s.
 
 `state/candidates.jsonl` (append-only, last-write-wins by `candidate_id`) is the **dedupe and
 resume source of truth** — distinct from the Layer 1 observability log. States:
 
 ```
 enumerated → gated → scored → dispatching → issue_created → pr_created → converged → terminal
+                                          └→ pr_created → comment_created → …   (issue_sink = pr_comment)
 ```
 
 Before any write the pipeline re-reads state **and** searches the target repo for the marker
@@ -622,6 +723,29 @@ code-review loop converges with green CI.
   accepted; a LANE 2 test passing pre-fix yields `stale_skip` *(B-04)*.
 - tier mapping at the threshold boundaries (`59/60`, `19/20`) and the `score_cap` clamp *(B-05)*.
 
+**Added to close T-1 review round 2**
+
+- `test_codeql_locator_separates_colocated_alerts` — the four `py/overly-large-range` fixture
+  alerts on `add_chart_to_existing_dashboard.py:55` yield four distinct `candidate_id`s
+  *(R2-M-01)*.
+- `test_current_major_from_version_source` — resolves `6.1.0 → 6` from the bug-report form, and
+  a form with no concrete release raises a startup config error rather than silently emptying
+  LANE 3 *(R2-M-02)*.
+- `test_burndown_reports_na_for_invalid_baseline_lane` *(R2-M-03)*.
+- `test_enumerator_count_matches_baseline_totals` and `test_xfail_and_skipif_yield_no_candidates`
+  *(R2-M-04)*.
+- `test_retry_asserts_new_session` — attempt `> 1` returning `is_new_session == false` is a fatal
+  orchestration error *(R2-M-05)*.
+- `test_ci_wait_timeout_downgrades_evidence` — expiry → `ci_evidence_unavailable`, evidence
+  `local`, not auto-merge eligible *(R2-M-06)*.
+- `test_implementer_skip_marker_hunk_rejected` and
+  `test_reviewer_owns_lane2_baseline_classification` (failed / passed / skipped → valid /
+  `stale_skip` / `invalid_red_baseline`) *(R2-M-07)*.
+- `test_frontend_alerts_gated_out` — the three JS/TS fixture alerts fail `verifiability_exists`
+  with reason `out_of_scope_frontend` *(R2-m-04)*.
+- `test_gsheet_sink_rejected_in_simulate` *(R2-m-07)*.
+- `test_pr_comment_sink_state_transition_and_validation` *(R2-m-06)*.
+
 **Added to close §19 gaps** *(M-11)*
 
 - `test_crosslink_roundtrip` — issue number injected, `Closes #n` present, both artifacts carry
@@ -672,8 +796,12 @@ code-review loop converges with green CI.
   reviewer test concurrent + red baseline recorded + red→green join; loop converges or cap →
   `needs-human-review` after 5 iterations; `major`-only → human; >10 → 10 dispatched + deferred;
   alerts on seeded bad metrics; KPI rollup at `reports/kpis.md`.
-- **CONTRIBUTION COMPLIANCE** — a sample generated PR passes `pr-lint.yml`, `license-check`,
-  `pre-commit` (ruff/pylint/mypy), license headers, DCO.
+- **CONTRIBUTION COMPLIANCE** — qualified by `ci_evidence_mode` *(R2-m-08)*: under `github`, the
+  reported contexts (`lint-check`, `license_check`, `pre-commit (current)`) are the evidence;
+  under `local`, the credential-free proxies are — `test_generated_pr_contribution_compliance`
+  (RAT header, ruff/mypy clean, `Signed-off-by` trailer) and
+  `test_pr_title_matches_pr_lint_regex`, plus attached `pre-commit run --files` output. The
+  criterion may not be claimed against contexts that never reported.
 - **CONFIG** — every knob settable via the config surface without code edits; README config
   table lists default, allowed values, safety classification, and the non-configurable
   invariants; `docs/IMPLEMENTATION_PLAN.md` is under version control and referenced from the
@@ -717,17 +845,37 @@ Reviewer verdict `changes_required`: 5 blocking, 15 major, 10 minor, 2 nit. Disp
 
 No finding was rejected.
 
+### Revision 3 — T-1 plan review round 2
+
+Reviewer verdict `changes_required`: 0 blocking, 7 major, 8 minor, 2 nit (round-1 blockers all
+confirmed closed, 26 of 32 findings resolved outright, none regressed). Disposition:
+
+| Finding | Disposition |
+|---|---|
+| R2-M-01 LANE 1 locator collides | **Accepted.** `position_digest` added to the locator (§14.1) + separation test. The collision was real: 4 co-located `py/overly-large-range` alerts. |
+| R2-M-02 EOL rule has no version source | **Accepted.** `version_source` knob reading the bug-report form's release dropdown → `6.1.0 / major 6 / threshold 4` (§4.2); qualifying-candidate table added; drift is a startup error. |
+| R2-M-03 baseline predates CodeQL enablement | **Accepted.** Baseline regenerated post-enablement with the 11 alerts, `baseline_valid_lanes`, and an `n/a` burn-down rule (§3 0e, §11). |
+| R2-M-04 "37 skips" ≠ enumerator output | **Accepted.** `xfail` and all conditional skips dropped from LANE 2 scope; count is now **34** included / 33 excluded-and-recorded, with an equality test (§3 0e, §5). |
+| R2-M-05 `idempotent: true` blocks retries | **Accepted.** Attempt ordinal in prompt + tags; `is_new_session == true` asserted for attempts > 1 and logged (§12.2). |
+| R2-M-06 Actions precondition too weak, no CI timeout | **Accepted.** 0d now requires a completed `pull_request`/`workflow_dispatch` run (the fork has none → `local`); `ci_wait_timeout_s = 5400` with an explicit downgrade path (§3 0d, §10.1). |
+| R2-M-07 LANE 2 skip marker has two owners | **Accepted.** Skip-marker ownership moved wholly to the reviewer, which classifies at `base_sha`; implementer carve-out deleted and the classifier now rejects implementer skip hunks (§9.2, §9.3). |
+| R2-m-01 … R2-m-08, R2-n-01, R2-n-02 | **All accepted**, inline at the cited sections (13-context list corrected, `db-engine-spec-metadata` scope, probe-status split, frontend alerts gated, `auto_merge_enabled` + `ci_wait_timeout_s` + `version_source` knob rows, `pr_comment` transition, `gsheet` startup error, mode-qualified compliance criterion, `security_issue_mode` demoted to a constant, CodeQL `schedule: weekly` verified with the owner token). |
+
+No finding was rejected. All three former open questions are closed: OQ1/OQ2 by the 0d probe
+resolving `ci_evidence_mode = local` and `auto_merge_enabled = false` (§10.1, §13), OQ3 by the
+§4.2 candidate table.
+
 ---
 
 ## Open questions / decisions needing a human
 
-1. **Fork CI cost/viability.** Superset's full required-check set (Cypress, Playwright, the
-   Postgres/MySQL/Hive/Presto matrices) is heavy for a fork. If `github` mode proves
-   impractical, §19's REPO B criterion is satisfied under `ci_evidence_mode = local` with
-   auto-merge hard-disabled — the human owner decides which mode the evidence run uses.
-2. **Auto-merge on the fork.** `allow_auto_merge` was enabled during Phase 0, but the fork has
-   no branch protection, so "auto-merge" would merge on any green result. Recommend leaving
-   `auto_merge_enabled = false` for the evidence run and demonstrating eligibility as a
-   computed, logged decision instead of an actual merge.
-3. **LANE 3 demo candidate.** Under §4.2 only `normalize_indexes` qualifies, which narrows the
-   lane to a single live candidate. Confirm that is acceptable, or raise `eol_major_lag`.
+None outstanding. The evidence run's operating point, decided by the plan rather than left open:
+
+- `ci_evidence_mode = local` — the fork has never completed a `pull_request` workflow run, so
+  §19's REPO B criterion is satisfied by local evidence (`pre-commit run --files` + targeted
+  pytest, attached to the PR) and named as such in `RESULTS.md`.
+- `auto_merge_enabled = false` — forced by the line above, and independently advisable: the fork
+  has no branch protection, so an "auto-merge" would merge on any green result. Eligibility is
+  demonstrated as a computed, logged decision, not an actual merge.
+- LANE 3 ships one automatable candidate (`normalize_indexes`); the second EOL-passed site is
+  human-routed as public API surface.

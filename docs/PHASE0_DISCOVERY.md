@@ -51,3 +51,24 @@ Lane 2 (skipped tests) and Lane 3 (EOL deprecations) are demonstrable against li
 4. **A Devin API key** (`apk_user_*` / `apk_*`, or a `cog_*` service key + org id) for §12 session orchestration.
 
 Without 1–4 the pipeline is fully buildable and SIMULATE-demonstrable, but §19's REPO B evidence criterion cannot be satisfied.
+
+## Post-remediation capability state (owner PAT, after items 1–4 were supplied)
+
+All four blockers above were cleared during Phase 0. Read back with the owner token:
+
+| Probe | Result |
+|---|---|
+| `GET /repos/victorciao/superset` | `has_issues: true` |
+| `GET /actions/workflows` | `total_count: 49`, `allowed_actions: all` |
+| `GET /actions/runs` | `total_count: 1` — `CodeQL Setup`, event `dynamic`, `success`. **No `pull_request` or `workflow_dispatch` run has ever completed**, so plan §3 0d resolves `ci_evidence_mode = local` |
+| `GET /code-scanning/default-setup` | `state: configured`, `query_suite: default`, `schedule: weekly`, languages `javascript`, `javascript-typescript`, `python`, `typescript` |
+| `GET /code-scanning/alerts` | `200`, **11 open alerts** → `fixtures/codeql_alerts.json` |
+
+The `schedule: weekly` value is the authoritative cadence for the fork's CodeQL runs; the
+upstream `codeql-analysis.yml` cron (`0 4 * * *`) does not govern default setup. Alert freshness
+is taken from `alert.updated_at` regardless (plan §5).
+
+The baseline was regenerated after these fixes (`scripts/build_baseline.py <repo> fixtures
+fixtures/codeql_alerts.json`), so `fixtures/baseline.json` records
+`baseline_valid_lanes: [codeql, skipped_tests, deprecations]`, `current_release: 6.1.0`, 34
+LANE 2 candidates, 33 excluded conditional skips, and 2 EOL-passed deprecations.

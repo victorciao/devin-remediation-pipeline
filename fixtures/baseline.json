@@ -1,13 +1,611 @@
 {
-  "captured_at": "2026-08-28T17:44:28.400560+00:00",
+  "captured_at": "2026-08-28T18:05:16.060814+00:00",
   "repo": "victorciao/superset",
   "head_sha": "a140e74f5f54b2ada25e7558d884812facd3375d",
   "default_branch": "master",
-  "declared_version": "0.0.0-dev",
+  "current_release": "6.1.0",
+  "current_major": 6,
+  "eol_major_lag": 2,
+  "eol_threshold_major": 4,
+  "version_source": ".github/ISSUE_TEMPLATE/bug-report.yml",
   "codeql_alerts": {
-    "open": [],
-    "accessible": false,
-    "note": "GET /repos/victorciao/superset/code-scanning/alerts -> 403 (installation token lacks security_events); the fork has 0 Actions runs, so codeql-analysis.yml has never executed here."
+    "open": [
+      {
+        "number": 11,
+        "created_at": "2026-08-28T17:49:41Z",
+        "updated_at": "2026-08-28T17:49:41Z",
+        "url": "https://api.github.com/repos/victorciao/superset/code-scanning/alerts/11",
+        "html_url": "https://github.com/victorciao/superset/security/code-scanning/11",
+        "state": "open",
+        "fixed_at": null,
+        "dismissed_by": null,
+        "dismissed_at": null,
+        "dismissed_reason": null,
+        "dismissed_comment": null,
+        "rule": {
+          "id": "js/xss-through-exception",
+          "severity": "warning",
+          "description": "Exception text reinterpreted as HTML",
+          "name": "js/xss-through-exception",
+          "tags": [
+            "external/cwe/cwe-079",
+            "external/cwe/cwe-116",
+            "security"
+          ],
+          "full_description": "Reinterpreting text from an exception as HTML can lead to a cross-site scripting vulnerability.",
+          "help": "# Exception text reinterpreted as HTML\nDirectly writing error messages to a webpage without sanitization allows for a cross-site scripting vulnerability if parts of the error message can be influenced by a user.\n\n\n## Recommendation\nTo guard against cross-site scripting, consider using contextual output encoding/escaping before writing user input to the page, or one of the other solutions that are mentioned in the references.\n\n\n## Example\nThe following example shows an exception being written directly to the document, and this exception can potentially be influenced by the page URL, leaving the website vulnerable to cross-site scripting.\n\n\n```javascript\nfunction setLanguageOptions() {\n    var href = document.location.href,\n        deflt = href.substring(href.indexOf(\"default=\")+8);\n    \n    try {\n        var parsed = unknownParseFunction(deflt); \n    } catch(e) {\n        document.write(\"Had an error: \" + e + \".\");\n    }\n}\n\n```\n\n## Example\nThis second example shows an input being validated using the JSON schema validator `ajv`, and in case of an error, the error message is sent directly back in the response.\n\n\n```javascript\nimport express from 'express';\nimport Ajv from 'ajv';\n\nlet app = express();\nlet ajv = new Ajv();\n\najv.addSchema({type: 'object', additionalProperties: {type: 'number'}}, 'pollData');\n\napp.post('/polldata', (req, res) => {\n    if (!ajv.validate('pollData', req.body)) {\n        res.send(ajv.errorsText());\n    }\n});\n\n```\nThis is unsafe, because the error message can contain parts of the input. For example, the input `{'<img src=x onerror=alert(1)>': 'foo'}` will generate the error `data/<img src=x onerror=alert(1)> should be number`, causing reflected XSS.\n\n\n## References\n* OWASP: [DOM based XSS Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/DOM_based_XSS_Prevention_Cheat_Sheet.html).\n* OWASP: [XSS (Cross Site Scripting) Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html).\n* OWASP [DOM Based XSS](https://www.owasp.org/index.php/DOM_Based_XSS).\n* OWASP [Types of Cross-Site Scripting](https://www.owasp.org/index.php/Types_of_Cross-Site_Scripting).\n* Wikipedia: [Cross-site scripting](http://en.wikipedia.org/wiki/Cross-site_scripting).\n* Common Weakness Enumeration: [CWE-79](https://cwe.mitre.org/data/definitions/79.html).\n* Common Weakness Enumeration: [CWE-116](https://cwe.mitre.org/data/definitions/116.html).\n",
+          "security_severity_level": "medium"
+        },
+        "tool": {
+          "name": "CodeQL",
+          "guid": null,
+          "version": "2.26.4"
+        },
+        "most_recent_instance": {
+          "ref": "refs/heads/master",
+          "analysis_key": "dynamic/github-code-scanning/codeql:analyze",
+          "environment": "{\"build-mode\":\"none\",\"category\":\"/language:javascript-typescript\",\"language\":\"javascript-typescript\",\"runner\":\"[\\\"ubuntu-latest\\\"]\"}",
+          "category": "/language:javascript-typescript",
+          "state": "open",
+          "commit_sha": "a140e74f5f54b2ada25e7558d884812facd3375d",
+          "message": {
+            "text": "Exception text is reinterpreted as HTML without escaping meta-characters.\nException text is reinterpreted as HTML without escaping meta-characters."
+          },
+          "location": {
+            "path": "superset-frontend/packages/superset-ui-core/src/utils/html.tsx",
+            "start_line": 198,
+            "end_line": 198,
+            "start_column": 38,
+            "end_column": 48
+          },
+          "classifications": []
+        },
+        "instances_url": "https://api.github.com/repos/victorciao/superset/code-scanning/alerts/11/instances",
+        "dismissal_approved_by": null,
+        "assignees": []
+      },
+      {
+        "number": 10,
+        "created_at": "2026-08-28T17:49:41Z",
+        "updated_at": "2026-08-28T17:49:41Z",
+        "url": "https://api.github.com/repos/victorciao/superset/code-scanning/alerts/10",
+        "html_url": "https://github.com/victorciao/superset/security/code-scanning/10",
+        "state": "open",
+        "fixed_at": null,
+        "dismissed_by": null,
+        "dismissed_at": null,
+        "dismissed_reason": null,
+        "dismissed_comment": null,
+        "rule": {
+          "id": "js/xss",
+          "severity": "error",
+          "description": "Client-side cross-site scripting",
+          "name": "js/xss",
+          "tags": [
+            "external/cwe/cwe-079",
+            "external/cwe/cwe-116",
+            "security"
+          ],
+          "full_description": "Writing user input directly to the DOM allows for a cross-site scripting vulnerability.",
+          "help": "# Client-side cross-site scripting\nDirectly writing user input (for example, a URL query parameter) to a webpage without properly sanitizing the input first, allows for a cross-site scripting vulnerability.\n\nThis kind of vulnerability is also called *DOM-based* cross-site scripting, to distinguish it from other types of cross-site scripting.\n\n\n## Recommendation\nTo guard against cross-site scripting, consider using contextual output encoding/escaping before writing user input to the page, or one of the other solutions that are mentioned in the references.\n\n\n## Example\nThe following example shows part of the page URL being written directly to the document, leaving the website vulnerable to cross-site scripting.\n\n\n```javascript\nfunction setLanguageOptions() {\n    var href = document.location.href,\n        deflt = href.substring(href.indexOf(\"default=\")+8);\n    document.write(\"<OPTION value=1>\"+deflt+\"</OPTION>\");\n    document.write(\"<OPTION value=2>English</OPTION>\");\n}\n\n```\n\n## References\n* OWASP: [DOM based XSS Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/DOM_based_XSS_Prevention_Cheat_Sheet.html).\n* OWASP: [XSS (Cross Site Scripting) Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html).\n* OWASP [DOM Based XSS](https://www.owasp.org/index.php/DOM_Based_XSS).\n* OWASP [Types of Cross-Site Scripting](https://www.owasp.org/index.php/Types_of_Cross-Site_Scripting).\n* Wikipedia: [Cross-site scripting](http://en.wikipedia.org/wiki/Cross-site_scripting).\n* Common Weakness Enumeration: [CWE-79](https://cwe.mitre.org/data/definitions/79.html).\n* Common Weakness Enumeration: [CWE-116](https://cwe.mitre.org/data/definitions/116.html).\n",
+          "security_severity_level": "high"
+        },
+        "tool": {
+          "name": "CodeQL",
+          "guid": null,
+          "version": "2.26.4"
+        },
+        "most_recent_instance": {
+          "ref": "refs/heads/master",
+          "analysis_key": "dynamic/github-code-scanning/codeql:analyze",
+          "environment": "{\"build-mode\":\"none\",\"category\":\"/language:javascript-typescript\",\"language\":\"javascript-typescript\",\"runner\":\"[\\\"ubuntu-latest\\\"]\"}",
+          "category": "/language:javascript-typescript",
+          "state": "open",
+          "commit_sha": "a140e74f5f54b2ada25e7558d884812facd3375d",
+          "message": {
+            "text": "Cross-site scripting vulnerability due to user-provided value."
+          },
+          "location": {
+            "path": "superset-websocket/utils/client-ws-app/public/javascripts/app.js",
+            "start_line": 62,
+            "end_line": 62,
+            "start_column": 56,
+            "end_column": 67
+          },
+          "classifications": []
+        },
+        "instances_url": "https://api.github.com/repos/victorciao/superset/code-scanning/alerts/10/instances",
+        "dismissal_approved_by": null,
+        "assignees": []
+      },
+      {
+        "number": 9,
+        "created_at": "2026-08-28T17:49:41Z",
+        "updated_at": "2026-08-28T17:49:41Z",
+        "url": "https://api.github.com/repos/victorciao/superset/code-scanning/alerts/9",
+        "html_url": "https://github.com/victorciao/superset/security/code-scanning/9",
+        "state": "open",
+        "fixed_at": null,
+        "dismissed_by": null,
+        "dismissed_at": null,
+        "dismissed_reason": null,
+        "dismissed_comment": null,
+        "rule": {
+          "id": "js/clear-text-storage-of-sensitive-data",
+          "severity": "error",
+          "description": "Clear text storage of sensitive information",
+          "name": "js/clear-text-storage-of-sensitive-data",
+          "tags": [
+            "external/cwe/cwe-312",
+            "external/cwe/cwe-315",
+            "external/cwe/cwe-359",
+            "security"
+          ],
+          "full_description": "Sensitive information stored without encryption or hashing can expose it to an attacker.",
+          "help": "# Clear text storage of sensitive information\nSensitive information that is stored unencrypted is accessible to an attacker who gains access to the storage. This is particularly important for cookies, which are stored on the machine of the end-user.\n\n\n## Recommendation\nEnsure that sensitive information is always encrypted before being stored. If possible, avoid placing sensitive information in cookies altogether. Instead, prefer storing, in the cookie, a key that can be used to look up the sensitive information.\n\nIn general, decrypt sensitive information only at the point where it is necessary for it to be used in cleartext.\n\nBe aware that external processes often store the `standard out` and `standard error` streams of the application, causing logged sensitive information to be stored as well.\n\n\n## Example\nThe following example code stores user credentials (in this case, their password) in a cookie in plain text:\n\n\n```javascript\nvar express = require('express');\n\nvar app = express();\napp.get('/remember-password', function (req, res) {\n  let pw = req.param(\"current_password\");\n  // BAD: Setting a cookie value with cleartext sensitive data.\n  res.cookie(\"password\", pw);\n});\n\n```\nInstead, the credentials should be encrypted, for instance by using the Node.js `crypto` module:\n\n\n```javascript\nvar express = require('express');\nvar crypto = require('crypto'),\n    password = getPassword();\n\nfunction encrypt(text){\n  var cipher = crypto.createCipher('aes-256-ctr', password);\n  return cipher.update(text, 'utf8', 'hex') + cipher.final('hex');\n}\n\nvar app = express();\napp.get('/remember-password', function (req, res) {\n  let pw = req.param(\"current_password\");\n  // GOOD: Encoding the value before setting it.\n  res.cookie(\"password\", encrypt(pw));\n});\n\n```\n\n## References\n* M. Dowd, J. McDonald and J. Schuhm, *The Art of Software Security Assessment*, 1st Edition, Chapter 2 - 'Common Vulnerabilities of Encryption', p. 43. Addison Wesley, 2006.\n* M. Howard and D. LeBlanc, *Writing Secure Code*, 2nd Edition, Chapter 9 - 'Protecting Secret Data', p. 299. Microsoft, 2002.\n* Common Weakness Enumeration: [CWE-312](https://cwe.mitre.org/data/definitions/312.html).\n* Common Weakness Enumeration: [CWE-315](https://cwe.mitre.org/data/definitions/315.html).\n* Common Weakness Enumeration: [CWE-359](https://cwe.mitre.org/data/definitions/359.html).\n",
+          "security_severity_level": "high"
+        },
+        "tool": {
+          "name": "CodeQL",
+          "guid": null,
+          "version": "2.26.4"
+        },
+        "most_recent_instance": {
+          "ref": "refs/heads/master",
+          "analysis_key": "dynamic/github-code-scanning/codeql:analyze",
+          "environment": "{\"build-mode\":\"none\",\"category\":\"/language:javascript-typescript\",\"language\":\"javascript-typescript\",\"runner\":\"[\\\"ubuntu-latest\\\"]\"}",
+          "category": "/language:javascript-typescript",
+          "state": "open",
+          "commit_sha": "a140e74f5f54b2ada25e7558d884812facd3375d",
+          "message": {
+            "text": "This stores sensitive data returned by a call to getTrustedUrls as clear text.\nThis stores sensitive data returned by an access to trusted as clear text."
+          },
+          "location": {
+            "path": "superset-frontend/src/pages/RedirectWarning/utils.ts",
+            "start_line": 93,
+            "end_line": 93,
+            "start_column": 44,
+            "end_column": 67
+          },
+          "classifications": []
+        },
+        "instances_url": "https://api.github.com/repos/victorciao/superset/code-scanning/alerts/9/instances",
+        "dismissal_approved_by": null,
+        "assignees": []
+      },
+      {
+        "number": 8,
+        "created_at": "2026-08-28T17:49:00Z",
+        "updated_at": "2026-08-28T17:49:01Z",
+        "url": "https://api.github.com/repos/victorciao/superset/code-scanning/alerts/8",
+        "html_url": "https://github.com/victorciao/superset/security/code-scanning/8",
+        "state": "open",
+        "fixed_at": null,
+        "dismissed_by": null,
+        "dismissed_at": null,
+        "dismissed_reason": null,
+        "dismissed_comment": null,
+        "rule": {
+          "id": "py/url-redirection",
+          "severity": "error",
+          "description": "URL redirection from remote source",
+          "name": "py/url-redirection",
+          "tags": [
+            "external/cwe/cwe-601",
+            "security"
+          ],
+          "full_description": "URL redirection based on unvalidated user input may cause redirection to malicious web sites.",
+          "help": "# URL redirection from remote source\nDirectly incorporating user input into a URL redirect request without validating the input can facilitate phishing attacks. In these attacks, unsuspecting users can be redirected to a malicious site that looks very similar to the real site they intend to visit, but which is controlled by the attacker.\n\n\n## Recommendation\nTo guard against untrusted URL redirection, it is advisable to avoid putting user input directly into a redirect URL. Instead, maintain a list of authorized redirects on the server; then choose from that list based on the user input provided.\n\nIf this is not possible, then the user input should be validated in some other way, for example, by verifying that the target URL does not include an explicit host name.\n\n\n## Example\nThe following example shows an HTTP request parameter being used directly in a URL redirect without validating the input, which facilitates phishing attacks:\n\n\n```python\nfrom flask import Flask, request, redirect\n\napp = Flask(__name__)\n\n@app.route('/')\ndef hello():\n    target = request.args.get('target', '')\n    return redirect(target, code=302)\n\n```\nIf you know the set of valid redirect targets, you can maintain a list of them on the server and check that the user input is in that list:\n\n\n```python\nfrom flask import Flask, request, redirect\n\nVALID_REDIRECT = \"http://cwe.mitre.org/data/definitions/601.html\"\n\napp = Flask(__name__)\n\n@app.route('/')\ndef hello():\n    target = request.args.get('target', '')\n    if target == VALID_REDIRECT:\n        return redirect(target, code=302)\n    else:\n        # ignore the target and redirect to the home page\n        return redirect('/', code=302)\n\n```\nOften this is not possible, so an alternative is to check that the target URL does not specify an explicit host name. For example, you can use the `urlparse` function from the Python standard library to parse the URL and check that the `netloc` attribute is empty.\n\nNote, however, that some cases are not handled as we desire out-of-the-box by `urlparse`, so we need to adjust two things, as shown in the example below:\n\n* Many browsers accept backslash characters (`\\`) as equivalent to forward slash characters (`/`) in URLs, but the `urlparse` function does not.\n* Mistyped URLs such as `https:/example.com` or `https:///example.com` are parsed as having an empty `netloc` attribute, while browsers will still redirect to the correct site.\n\n```python\nfrom flask import Flask, request, redirect\nfrom urllib.parse import urlparse\n\napp = Flask(__name__)\n\n@app.route('/')\ndef hello():\n    target = request.args.get('target', '')\n    target = target.replace('\\\\', '')\n    if not urlparse(target).netloc and not urlparse(target).scheme:\n        # relative path, safe to redirect\n        return redirect(target, code=302)\n    # ignore the target and redirect to the home page\n    return redirect('/', code=302)\n\n```\nFor Django application, you can use the function `url_has_allowed_host_and_scheme` to check that a URL is safe to redirect to, as shown in the following example:\n\n\n```python\nfrom django.http import HttpResponseRedirect\nfrom django.shortcuts import redirect\nfrom django.utils.http import url_has_allowed_host_and_scheme\nfrom django.views import View\n\nclass RedirectView(View):\n    def get(self, request, *args, **kwargs):\n        target = request.GET.get('target', '')\n        if url_has_allowed_host_and_scheme(target, allowed_hosts=None):\n            return HttpResponseRedirect(target)\n        else:\n            # ignore the target and redirect to the home page\n            return redirect('/')\n```\nNote that `url_has_allowed_host_and_scheme` handles backslashes correctly, so no additional processing is required.\n\n\n## References\n* OWASP: [ XSS Unvalidated Redirects and Forwards Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Unvalidated_Redirects_and_Forwards_Cheat_Sheet.html).\n* Python standard library: [ urllib.parse](https://docs.python.org/3/library/urllib.parse.html).\n* Common Weakness Enumeration: [CWE-601](https://cwe.mitre.org/data/definitions/601.html).\n",
+          "security_severity_level": "medium"
+        },
+        "tool": {
+          "name": "CodeQL",
+          "guid": null,
+          "version": "2.26.4"
+        },
+        "most_recent_instance": {
+          "ref": "refs/heads/master",
+          "analysis_key": "dynamic/github-code-scanning/codeql:analyze",
+          "environment": "{\"build-mode\":\"none\",\"category\":\"/language:python\",\"language\":\"python\",\"runner\":\"[\\\"ubuntu-latest\\\"]\"}",
+          "category": "/language:python",
+          "state": "open",
+          "commit_sha": "a140e74f5f54b2ada25e7558d884812facd3375d",
+          "message": {
+            "text": "Untrusted URL redirection depends on a user-provided value."
+          },
+          "location": {
+            "path": "superset/views/redirect.py",
+            "start_line": 73,
+            "end_line": 73,
+            "start_column": 29,
+            "end_column": 39
+          },
+          "classifications": []
+        },
+        "instances_url": "https://api.github.com/repos/victorciao/superset/code-scanning/alerts/8/instances",
+        "dismissal_approved_by": null,
+        "assignees": []
+      },
+      {
+        "number": 7,
+        "created_at": "2026-08-28T17:49:00Z",
+        "updated_at": "2026-08-28T17:49:01Z",
+        "url": "https://api.github.com/repos/victorciao/superset/code-scanning/alerts/7",
+        "html_url": "https://github.com/victorciao/superset/security/code-scanning/7",
+        "state": "open",
+        "fixed_at": null,
+        "dismissed_by": null,
+        "dismissed_at": null,
+        "dismissed_reason": null,
+        "dismissed_comment": null,
+        "rule": {
+          "id": "py/url-redirection",
+          "severity": "error",
+          "description": "URL redirection from remote source",
+          "name": "py/url-redirection",
+          "tags": [
+            "external/cwe/cwe-601",
+            "security"
+          ],
+          "full_description": "URL redirection based on unvalidated user input may cause redirection to malicious web sites.",
+          "help": "# URL redirection from remote source\nDirectly incorporating user input into a URL redirect request without validating the input can facilitate phishing attacks. In these attacks, unsuspecting users can be redirected to a malicious site that looks very similar to the real site they intend to visit, but which is controlled by the attacker.\n\n\n## Recommendation\nTo guard against untrusted URL redirection, it is advisable to avoid putting user input directly into a redirect URL. Instead, maintain a list of authorized redirects on the server; then choose from that list based on the user input provided.\n\nIf this is not possible, then the user input should be validated in some other way, for example, by verifying that the target URL does not include an explicit host name.\n\n\n## Example\nThe following example shows an HTTP request parameter being used directly in a URL redirect without validating the input, which facilitates phishing attacks:\n\n\n```python\nfrom flask import Flask, request, redirect\n\napp = Flask(__name__)\n\n@app.route('/')\ndef hello():\n    target = request.args.get('target', '')\n    return redirect(target, code=302)\n\n```\nIf you know the set of valid redirect targets, you can maintain a list of them on the server and check that the user input is in that list:\n\n\n```python\nfrom flask import Flask, request, redirect\n\nVALID_REDIRECT = \"http://cwe.mitre.org/data/definitions/601.html\"\n\napp = Flask(__name__)\n\n@app.route('/')\ndef hello():\n    target = request.args.get('target', '')\n    if target == VALID_REDIRECT:\n        return redirect(target, code=302)\n    else:\n        # ignore the target and redirect to the home page\n        return redirect('/', code=302)\n\n```\nOften this is not possible, so an alternative is to check that the target URL does not specify an explicit host name. For example, you can use the `urlparse` function from the Python standard library to parse the URL and check that the `netloc` attribute is empty.\n\nNote, however, that some cases are not handled as we desire out-of-the-box by `urlparse`, so we need to adjust two things, as shown in the example below:\n\n* Many browsers accept backslash characters (`\\`) as equivalent to forward slash characters (`/`) in URLs, but the `urlparse` function does not.\n* Mistyped URLs such as `https:/example.com` or `https:///example.com` are parsed as having an empty `netloc` attribute, while browsers will still redirect to the correct site.\n\n```python\nfrom flask import Flask, request, redirect\nfrom urllib.parse import urlparse\n\napp = Flask(__name__)\n\n@app.route('/')\ndef hello():\n    target = request.args.get('target', '')\n    target = target.replace('\\\\', '')\n    if not urlparse(target).netloc and not urlparse(target).scheme:\n        # relative path, safe to redirect\n        return redirect(target, code=302)\n    # ignore the target and redirect to the home page\n    return redirect('/', code=302)\n\n```\nFor Django application, you can use the function `url_has_allowed_host_and_scheme` to check that a URL is safe to redirect to, as shown in the following example:\n\n\n```python\nfrom django.http import HttpResponseRedirect\nfrom django.shortcuts import redirect\nfrom django.utils.http import url_has_allowed_host_and_scheme\nfrom django.views import View\n\nclass RedirectView(View):\n    def get(self, request, *args, **kwargs):\n        target = request.GET.get('target', '')\n        if url_has_allowed_host_and_scheme(target, allowed_hosts=None):\n            return HttpResponseRedirect(target)\n        else:\n            # ignore the target and redirect to the home page\n            return redirect('/')\n```\nNote that `url_has_allowed_host_and_scheme` handles backslashes correctly, so no additional processing is required.\n\n\n## References\n* OWASP: [ XSS Unvalidated Redirects and Forwards Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Unvalidated_Redirects_and_Forwards_Cheat_Sheet.html).\n* Python standard library: [ urllib.parse](https://docs.python.org/3/library/urllib.parse.html).\n* Common Weakness Enumeration: [CWE-601](https://cwe.mitre.org/data/definitions/601.html).\n",
+          "security_severity_level": "medium"
+        },
+        "tool": {
+          "name": "CodeQL",
+          "guid": null,
+          "version": "2.26.4"
+        },
+        "most_recent_instance": {
+          "ref": "refs/heads/master",
+          "analysis_key": "dynamic/github-code-scanning/codeql:analyze",
+          "environment": "{\"build-mode\":\"none\",\"category\":\"/language:python\",\"language\":\"python\",\"runner\":\"[\\\"ubuntu-latest\\\"]\"}",
+          "category": "/language:python",
+          "state": "open",
+          "commit_sha": "a140e74f5f54b2ada25e7558d884812facd3375d",
+          "message": {
+            "text": "Untrusted URL redirection depends on a user-provided value."
+          },
+          "location": {
+            "path": "superset/views/core.py",
+            "start_line": 654,
+            "end_line": 654,
+            "start_column": 25,
+            "end_column": 28
+          },
+          "classifications": []
+        },
+        "instances_url": "https://api.github.com/repos/victorciao/superset/code-scanning/alerts/7/instances",
+        "dismissal_approved_by": null,
+        "assignees": []
+      },
+      {
+        "number": 6,
+        "created_at": "2026-08-28T17:49:00Z",
+        "updated_at": "2026-08-28T17:49:01Z",
+        "url": "https://api.github.com/repos/victorciao/superset/code-scanning/alerts/6",
+        "html_url": "https://github.com/victorciao/superset/security/code-scanning/6",
+        "state": "open",
+        "fixed_at": null,
+        "dismissed_by": null,
+        "dismissed_at": null,
+        "dismissed_reason": null,
+        "dismissed_comment": null,
+        "rule": {
+          "id": "py/overly-large-range",
+          "severity": "warning",
+          "description": "Overly permissive regular expression range",
+          "name": "py/overly-large-range",
+          "tags": [
+            "correctness",
+            "external/cwe/cwe-020",
+            "security"
+          ],
+          "full_description": "Overly permissive regular expression ranges match a wider range of characters than intended. This may allow an attacker to bypass a filter or sanitizer.",
+          "help": "# Overly permissive regular expression range\nIt's easy to write a regular expression range that matches a wider range of characters than you intended. For example, `/[a-zA-z]/` matches all lowercase and all uppercase letters, as you would expect, but it also matches the characters: `` [ \\ ] ^ _ ` ``.\n\nAnother common problem is failing to escape the dash character in a regular expression. An unescaped dash is interpreted as part of a range. For example, in the character class `[a-zA-Z0-9%=.,-_]` the last character range matches the 55 characters between `,` and `_` (both included), which overlaps with the range `[0-9]` and is clearly not intended by the writer.\n\n\n## Recommendation\nAvoid any confusion about which characters are included in the range by writing unambiguous regular expressions. Always check that character ranges match only the expected characters.\n\n\n## Example\nThe following example code is intended to check whether a string is a valid 6 digit hex color.\n\n```python\n\nimport re\ndef is_valid_hex_color(color):\n    return re.match(r'^#[0-9a-fA-f]{6}$', color) is not None\n\n```\nHowever, the `A-f` range is overly large and matches every uppercase character. It would parse a \"color\" like `#XXYYZZ` as valid.\n\nThe fix is to use an uppercase `A-F` range instead.\n\n```python\n\nimport re\ndef is_valid_hex_color(color):\n    return re.match(r'^#[0-9a-fA-F]{6}$', color) is not None\n\n```\n\n## References\n* GitHub Advisory Database: [CVE-2021-42740: Improper Neutralization of Special Elements used in a Command in Shell-quote](https://github.com/advisories/GHSA-g4rg-993r-mgx7)\n* wh0.github.io: [Exploiting CVE-2021-42740](https://wh0.github.io/2021/10/28/shell-quote-rce-exploiting.html)\n* Yosuke Ota: [no-obscure-range](https://ota-meshi.github.io/eslint-plugin-regexp/rules/no-obscure-range.html)\n* Paul Boyd: [The regex \\[,-.\\]](https://pboyd.io/posts/comma-dash-dot/)\n* Common Weakness Enumeration: [CWE-20](https://cwe.mitre.org/data/definitions/20.html).\n",
+          "security_severity_level": "medium"
+        },
+        "tool": {
+          "name": "CodeQL",
+          "guid": null,
+          "version": "2.26.4"
+        },
+        "most_recent_instance": {
+          "ref": "refs/heads/master",
+          "analysis_key": "dynamic/github-code-scanning/codeql:analyze",
+          "environment": "{\"build-mode\":\"none\",\"category\":\"/language:python\",\"language\":\"python\",\"runner\":\"[\\\"ubuntu-latest\\\"]\"}",
+          "category": "/language:python",
+          "state": "open",
+          "commit_sha": "a140e74f5f54b2ada25e7558d884812facd3375d",
+          "message": {
+            "text": "Suspicious character range that overlaps with \\ufffd-\\ufffd in the same character class."
+          },
+          "location": {
+            "path": "superset/mcp_service/dashboard/tool/add_chart_to_existing_dashboard.py",
+            "start_line": 55,
+            "end_line": 55,
+            "start_column": 15,
+            "end_column": 19
+          },
+          "classifications": []
+        },
+        "instances_url": "https://api.github.com/repos/victorciao/superset/code-scanning/alerts/6/instances",
+        "dismissal_approved_by": null,
+        "assignees": []
+      },
+      {
+        "number": 5,
+        "created_at": "2026-08-28T17:49:00Z",
+        "updated_at": "2026-08-28T17:49:01Z",
+        "url": "https://api.github.com/repos/victorciao/superset/code-scanning/alerts/5",
+        "html_url": "https://github.com/victorciao/superset/security/code-scanning/5",
+        "state": "open",
+        "fixed_at": null,
+        "dismissed_by": null,
+        "dismissed_at": null,
+        "dismissed_reason": null,
+        "dismissed_comment": null,
+        "rule": {
+          "id": "py/overly-large-range",
+          "severity": "warning",
+          "description": "Overly permissive regular expression range",
+          "name": "py/overly-large-range",
+          "tags": [
+            "correctness",
+            "external/cwe/cwe-020",
+            "security"
+          ],
+          "full_description": "Overly permissive regular expression ranges match a wider range of characters than intended. This may allow an attacker to bypass a filter or sanitizer.",
+          "help": "# Overly permissive regular expression range\nIt's easy to write a regular expression range that matches a wider range of characters than you intended. For example, `/[a-zA-z]/` matches all lowercase and all uppercase letters, as you would expect, but it also matches the characters: `` [ \\ ] ^ _ ` ``.\n\nAnother common problem is failing to escape the dash character in a regular expression. An unescaped dash is interpreted as part of a range. For example, in the character class `[a-zA-Z0-9%=.,-_]` the last character range matches the 55 characters between `,` and `_` (both included), which overlaps with the range `[0-9]` and is clearly not intended by the writer.\n\n\n## Recommendation\nAvoid any confusion about which characters are included in the range by writing unambiguous regular expressions. Always check that character ranges match only the expected characters.\n\n\n## Example\nThe following example code is intended to check whether a string is a valid 6 digit hex color.\n\n```python\n\nimport re\ndef is_valid_hex_color(color):\n    return re.match(r'^#[0-9a-fA-f]{6}$', color) is not None\n\n```\nHowever, the `A-f` range is overly large and matches every uppercase character. It would parse a \"color\" like `#XXYYZZ` as valid.\n\nThe fix is to use an uppercase `A-F` range instead.\n\n```python\n\nimport re\ndef is_valid_hex_color(color):\n    return re.match(r'^#[0-9a-fA-F]{6}$', color) is not None\n\n```\n\n## References\n* GitHub Advisory Database: [CVE-2021-42740: Improper Neutralization of Special Elements used in a Command in Shell-quote](https://github.com/advisories/GHSA-g4rg-993r-mgx7)\n* wh0.github.io: [Exploiting CVE-2021-42740](https://wh0.github.io/2021/10/28/shell-quote-rce-exploiting.html)\n* Yosuke Ota: [no-obscure-range](https://ota-meshi.github.io/eslint-plugin-regexp/rules/no-obscure-range.html)\n* Paul Boyd: [The regex \\[,-.\\]](https://pboyd.io/posts/comma-dash-dot/)\n* Common Weakness Enumeration: [CWE-20](https://cwe.mitre.org/data/definitions/20.html).\n",
+          "security_severity_level": "medium"
+        },
+        "tool": {
+          "name": "CodeQL",
+          "guid": null,
+          "version": "2.26.4"
+        },
+        "most_recent_instance": {
+          "ref": "refs/heads/master",
+          "analysis_key": "dynamic/github-code-scanning/codeql:analyze",
+          "environment": "{\"build-mode\":\"none\",\"category\":\"/language:python\",\"language\":\"python\",\"runner\":\"[\\\"ubuntu-latest\\\"]\"}",
+          "category": "/language:python",
+          "state": "open",
+          "commit_sha": "a140e74f5f54b2ada25e7558d884812facd3375d",
+          "message": {
+            "text": "Suspicious character range that overlaps with \\ufffd-\\ufffd in the same character class."
+          },
+          "location": {
+            "path": "superset/mcp_service/dashboard/tool/add_chart_to_existing_dashboard.py",
+            "start_line": 55,
+            "end_line": 55,
+            "start_column": 12,
+            "end_column": 16
+          },
+          "classifications": []
+        },
+        "instances_url": "https://api.github.com/repos/victorciao/superset/code-scanning/alerts/5/instances",
+        "dismissal_approved_by": null,
+        "assignees": []
+      },
+      {
+        "number": 4,
+        "created_at": "2026-08-28T17:49:00Z",
+        "updated_at": "2026-08-28T17:49:01Z",
+        "url": "https://api.github.com/repos/victorciao/superset/code-scanning/alerts/4",
+        "html_url": "https://github.com/victorciao/superset/security/code-scanning/4",
+        "state": "open",
+        "fixed_at": null,
+        "dismissed_by": null,
+        "dismissed_at": null,
+        "dismissed_reason": null,
+        "dismissed_comment": null,
+        "rule": {
+          "id": "py/overly-large-range",
+          "severity": "warning",
+          "description": "Overly permissive regular expression range",
+          "name": "py/overly-large-range",
+          "tags": [
+            "correctness",
+            "external/cwe/cwe-020",
+            "security"
+          ],
+          "full_description": "Overly permissive regular expression ranges match a wider range of characters than intended. This may allow an attacker to bypass a filter or sanitizer.",
+          "help": "# Overly permissive regular expression range\nIt's easy to write a regular expression range that matches a wider range of characters than you intended. For example, `/[a-zA-z]/` matches all lowercase and all uppercase letters, as you would expect, but it also matches the characters: `` [ \\ ] ^ _ ` ``.\n\nAnother common problem is failing to escape the dash character in a regular expression. An unescaped dash is interpreted as part of a range. For example, in the character class `[a-zA-Z0-9%=.,-_]` the last character range matches the 55 characters between `,` and `_` (both included), which overlaps with the range `[0-9]` and is clearly not intended by the writer.\n\n\n## Recommendation\nAvoid any confusion about which characters are included in the range by writing unambiguous regular expressions. Always check that character ranges match only the expected characters.\n\n\n## Example\nThe following example code is intended to check whether a string is a valid 6 digit hex color.\n\n```python\n\nimport re\ndef is_valid_hex_color(color):\n    return re.match(r'^#[0-9a-fA-f]{6}$', color) is not None\n\n```\nHowever, the `A-f` range is overly large and matches every uppercase character. It would parse a \"color\" like `#XXYYZZ` as valid.\n\nThe fix is to use an uppercase `A-F` range instead.\n\n```python\n\nimport re\ndef is_valid_hex_color(color):\n    return re.match(r'^#[0-9a-fA-F]{6}$', color) is not None\n\n```\n\n## References\n* GitHub Advisory Database: [CVE-2021-42740: Improper Neutralization of Special Elements used in a Command in Shell-quote](https://github.com/advisories/GHSA-g4rg-993r-mgx7)\n* wh0.github.io: [Exploiting CVE-2021-42740](https://wh0.github.io/2021/10/28/shell-quote-rce-exploiting.html)\n* Yosuke Ota: [no-obscure-range](https://ota-meshi.github.io/eslint-plugin-regexp/rules/no-obscure-range.html)\n* Paul Boyd: [The regex \\[,-.\\]](https://pboyd.io/posts/comma-dash-dot/)\n* Common Weakness Enumeration: [CWE-20](https://cwe.mitre.org/data/definitions/20.html).\n",
+          "security_severity_level": "medium"
+        },
+        "tool": {
+          "name": "CodeQL",
+          "guid": null,
+          "version": "2.26.4"
+        },
+        "most_recent_instance": {
+          "ref": "refs/heads/master",
+          "analysis_key": "dynamic/github-code-scanning/codeql:analyze",
+          "environment": "{\"build-mode\":\"none\",\"category\":\"/language:python\",\"language\":\"python\",\"runner\":\"[\\\"ubuntu-latest\\\"]\"}",
+          "category": "/language:python",
+          "state": "open",
+          "commit_sha": "a140e74f5f54b2ada25e7558d884812facd3375d",
+          "message": {
+            "text": "Suspicious character range that overlaps with \\ufffd-\\ufffd in the same character class."
+          },
+          "location": {
+            "path": "superset/mcp_service/dashboard/tool/add_chart_to_existing_dashboard.py",
+            "start_line": 55,
+            "end_line": 55,
+            "start_column": 9,
+            "end_column": 13
+          },
+          "classifications": []
+        },
+        "instances_url": "https://api.github.com/repos/victorciao/superset/code-scanning/alerts/4/instances",
+        "dismissal_approved_by": null,
+        "assignees": []
+      },
+      {
+        "number": 3,
+        "created_at": "2026-08-28T17:49:00Z",
+        "updated_at": "2026-08-28T17:49:01Z",
+        "url": "https://api.github.com/repos/victorciao/superset/code-scanning/alerts/3",
+        "html_url": "https://github.com/victorciao/superset/security/code-scanning/3",
+        "state": "open",
+        "fixed_at": null,
+        "dismissed_by": null,
+        "dismissed_at": null,
+        "dismissed_reason": null,
+        "dismissed_comment": null,
+        "rule": {
+          "id": "py/overly-large-range",
+          "severity": "warning",
+          "description": "Overly permissive regular expression range",
+          "name": "py/overly-large-range",
+          "tags": [
+            "correctness",
+            "external/cwe/cwe-020",
+            "security"
+          ],
+          "full_description": "Overly permissive regular expression ranges match a wider range of characters than intended. This may allow an attacker to bypass a filter or sanitizer.",
+          "help": "# Overly permissive regular expression range\nIt's easy to write a regular expression range that matches a wider range of characters than you intended. For example, `/[a-zA-z]/` matches all lowercase and all uppercase letters, as you would expect, but it also matches the characters: `` [ \\ ] ^ _ ` ``.\n\nAnother common problem is failing to escape the dash character in a regular expression. An unescaped dash is interpreted as part of a range. For example, in the character class `[a-zA-Z0-9%=.,-_]` the last character range matches the 55 characters between `,` and `_` (both included), which overlaps with the range `[0-9]` and is clearly not intended by the writer.\n\n\n## Recommendation\nAvoid any confusion about which characters are included in the range by writing unambiguous regular expressions. Always check that character ranges match only the expected characters.\n\n\n## Example\nThe following example code is intended to check whether a string is a valid 6 digit hex color.\n\n```python\n\nimport re\ndef is_valid_hex_color(color):\n    return re.match(r'^#[0-9a-fA-f]{6}$', color) is not None\n\n```\nHowever, the `A-f` range is overly large and matches every uppercase character. It would parse a \"color\" like `#XXYYZZ` as valid.\n\nThe fix is to use an uppercase `A-F` range instead.\n\n```python\n\nimport re\ndef is_valid_hex_color(color):\n    return re.match(r'^#[0-9a-fA-F]{6}$', color) is not None\n\n```\n\n## References\n* GitHub Advisory Database: [CVE-2021-42740: Improper Neutralization of Special Elements used in a Command in Shell-quote](https://github.com/advisories/GHSA-g4rg-993r-mgx7)\n* wh0.github.io: [Exploiting CVE-2021-42740](https://wh0.github.io/2021/10/28/shell-quote-rce-exploiting.html)\n* Yosuke Ota: [no-obscure-range](https://ota-meshi.github.io/eslint-plugin-regexp/rules/no-obscure-range.html)\n* Paul Boyd: [The regex \\[,-.\\]](https://pboyd.io/posts/comma-dash-dot/)\n* Common Weakness Enumeration: [CWE-20](https://cwe.mitre.org/data/definitions/20.html).\n",
+          "security_severity_level": "medium"
+        },
+        "tool": {
+          "name": "CodeQL",
+          "guid": null,
+          "version": "2.26.4"
+        },
+        "most_recent_instance": {
+          "ref": "refs/heads/master",
+          "analysis_key": "dynamic/github-code-scanning/codeql:analyze",
+          "environment": "{\"build-mode\":\"none\",\"category\":\"/language:python\",\"language\":\"python\",\"runner\":\"[\\\"ubuntu-latest\\\"]\"}",
+          "category": "/language:python",
+          "state": "open",
+          "commit_sha": "a140e74f5f54b2ada25e7558d884812facd3375d",
+          "message": {
+            "text": "Suspicious character range that overlaps with \\ufffd-\\ufffd in the same character class."
+          },
+          "location": {
+            "path": "superset/mcp_service/dashboard/tool/add_chart_to_existing_dashboard.py",
+            "start_line": 55,
+            "end_line": 55,
+            "start_column": 6,
+            "end_column": 10
+          },
+          "classifications": []
+        },
+        "instances_url": "https://api.github.com/repos/victorciao/superset/code-scanning/alerts/3/instances",
+        "dismissal_approved_by": null,
+        "assignees": []
+      },
+      {
+        "number": 2,
+        "created_at": "2026-08-28T17:49:00Z",
+        "updated_at": "2026-08-28T17:49:01Z",
+        "url": "https://api.github.com/repos/victorciao/superset/code-scanning/alerts/2",
+        "html_url": "https://github.com/victorciao/superset/security/code-scanning/2",
+        "state": "open",
+        "fixed_at": null,
+        "dismissed_by": null,
+        "dismissed_at": null,
+        "dismissed_reason": null,
+        "dismissed_comment": null,
+        "rule": {
+          "id": "py/stack-trace-exposure",
+          "severity": "error",
+          "description": "Information exposure through an exception",
+          "name": "py/stack-trace-exposure",
+          "tags": [
+            "external/cwe/cwe-209",
+            "external/cwe/cwe-497",
+            "security"
+          ],
+          "full_description": "Leaking information about an exception, such as messages and stack traces, to an external user can expose implementation details that are useful to an attacker for developing a subsequent exploit.",
+          "help": "# Information exposure through an exception\nSoftware developers often add stack traces to error messages, as a debugging aid. Whenever that error message occurs for an end user, the developer can use the stack trace to help identify how to fix the problem. In particular, stack traces can tell the developer more about the sequence of events that led to a failure, as opposed to merely the final state of the software when the error occurred.\n\nUnfortunately, the same information can be useful to an attacker. The sequence of class names in a stack trace can reveal the structure of the application as well as any internal components it relies on. Furthermore, the error message at the top of a stack trace can include information such as server-side file names and SQL code that the application relies on, allowing an attacker to fine-tune a subsequent injection attack.\n\n\n## Recommendation\nSend the user a more generic error message that reveals less information. Either suppress the stack trace entirely, or log it only on the server.\n\n\n## Example\nIn the following example, an exception is handled in two different ways. In the first version, labeled BAD, the exception is sent back to the remote user by returning it from the function. As such, the user is able to see a detailed stack trace, which may contain sensitive information. In the second version, the error message is logged only on the server, and a generic error message is displayed to the user. That way, the developers can still access and use the error log, but remote users will not see the information.\n\n\n```python\nfrom flask import Flask\napp = Flask(__name__)\n\n\nimport traceback\n\ndef do_computation():\n    raise Exception(\"Secret info\")\n\n# BAD\n@app.route('/bad')\ndef server_bad():\n    try:\n        do_computation()\n    except Exception as e:\n        return traceback.format_exc()\n\n# GOOD\n@app.route('/good')\ndef server_good():\n    try:\n        do_computation()\n    except Exception as e:\n        log(traceback.format_exc())\n        return \"An internal error has occurred!\"\n\n```\n\n## References\n* OWASP: [Improper Error Handling](https://owasp.org/www-community/Improper_Error_Handling).\n* Common Weakness Enumeration: [CWE-209](https://cwe.mitre.org/data/definitions/209.html).\n* Common Weakness Enumeration: [CWE-497](https://cwe.mitre.org/data/definitions/497.html).\n",
+          "security_severity_level": "medium"
+        },
+        "tool": {
+          "name": "CodeQL",
+          "guid": null,
+          "version": "2.26.4"
+        },
+        "most_recent_instance": {
+          "ref": "refs/heads/master",
+          "analysis_key": "dynamic/github-code-scanning/codeql:analyze",
+          "environment": "{\"build-mode\":\"none\",\"category\":\"/language:python\",\"language\":\"python\",\"runner\":\"[\\\"ubuntu-latest\\\"]\"}",
+          "category": "/language:python",
+          "state": "open",
+          "commit_sha": "a140e74f5f54b2ada25e7558d884812facd3375d",
+          "message": {
+            "text": "Stack trace information flows to this location and may be exposed to an external user.\nStack trace information flows to this location and may be exposed to an external user.\nStack trace information flows to this location and may be exposed to an external user.\nStack trace information flows to this location and may be exposed to an external user.\nStack trace information flows to this location and may be exposed to an external user.\nStack trace information flows to this location and may be exposed to an external user.\nStack trace information flows to this location and may be exposed to an external user.\nStack trace information flows to this location and may be exposed to an external user.\nStack trace information flows to this location and may be exposed to an external user.\nStack trace information flows to this location and may be exposed to an external user.\nStack trace information flows to this location and may be exposed to an external user.\nStack trace information flows to this location and may be exposed to an external user.\nStack trace information flows to this location and may be exposed to an external user.\nStack trace information flows to this location and may be exposed to an external user.\nStack trace information flows to this location and may be exposed to an external user.\nStack trace information flows to this location and may be exposed to an external user."
+          },
+          "location": {
+            "path": "superset/views/error_handling.py",
+            "start_line": 93,
+            "end_line": 93,
+            "start_column": 9,
+            "end_column": 77
+          },
+          "classifications": []
+        },
+        "instances_url": "https://api.github.com/repos/victorciao/superset/code-scanning/alerts/2/instances",
+        "dismissal_approved_by": null,
+        "assignees": []
+      },
+      {
+        "number": 1,
+        "created_at": "2026-08-28T17:49:00Z",
+        "updated_at": "2026-08-28T17:49:01Z",
+        "url": "https://api.github.com/repos/victorciao/superset/code-scanning/alerts/1",
+        "html_url": "https://github.com/victorciao/superset/security/code-scanning/1",
+        "state": "open",
+        "fixed_at": null,
+        "dismissed_by": null,
+        "dismissed_at": null,
+        "dismissed_reason": null,
+        "dismissed_comment": null,
+        "rule": {
+          "id": "py/stack-trace-exposure",
+          "severity": "error",
+          "description": "Information exposure through an exception",
+          "name": "py/stack-trace-exposure",
+          "tags": [
+            "external/cwe/cwe-209",
+            "external/cwe/cwe-497",
+            "security"
+          ],
+          "full_description": "Leaking information about an exception, such as messages and stack traces, to an external user can expose implementation details that are useful to an attacker for developing a subsequent exploit.",
+          "help": "# Information exposure through an exception\nSoftware developers often add stack traces to error messages, as a debugging aid. Whenever that error message occurs for an end user, the developer can use the stack trace to help identify how to fix the problem. In particular, stack traces can tell the developer more about the sequence of events that led to a failure, as opposed to merely the final state of the software when the error occurred.\n\nUnfortunately, the same information can be useful to an attacker. The sequence of class names in a stack trace can reveal the structure of the application as well as any internal components it relies on. Furthermore, the error message at the top of a stack trace can include information such as server-side file names and SQL code that the application relies on, allowing an attacker to fine-tune a subsequent injection attack.\n\n\n## Recommendation\nSend the user a more generic error message that reveals less information. Either suppress the stack trace entirely, or log it only on the server.\n\n\n## Example\nIn the following example, an exception is handled in two different ways. In the first version, labeled BAD, the exception is sent back to the remote user by returning it from the function. As such, the user is able to see a detailed stack trace, which may contain sensitive information. In the second version, the error message is logged only on the server, and a generic error message is displayed to the user. That way, the developers can still access and use the error log, but remote users will not see the information.\n\n\n```python\nfrom flask import Flask\napp = Flask(__name__)\n\n\nimport traceback\n\ndef do_computation():\n    raise Exception(\"Secret info\")\n\n# BAD\n@app.route('/bad')\ndef server_bad():\n    try:\n        do_computation()\n    except Exception as e:\n        return traceback.format_exc()\n\n# GOOD\n@app.route('/good')\ndef server_good():\n    try:\n        do_computation()\n    except Exception as e:\n        log(traceback.format_exc())\n        return \"An internal error has occurred!\"\n\n```\n\n## References\n* OWASP: [Improper Error Handling](https://owasp.org/www-community/Improper_Error_Handling).\n* Common Weakness Enumeration: [CWE-209](https://cwe.mitre.org/data/definitions/209.html).\n* Common Weakness Enumeration: [CWE-497](https://cwe.mitre.org/data/definitions/497.html).\n",
+          "security_severity_level": "medium"
+        },
+        "tool": {
+          "name": "CodeQL",
+          "guid": null,
+          "version": "2.26.4"
+        },
+        "most_recent_instance": {
+          "ref": "refs/heads/master",
+          "analysis_key": "dynamic/github-code-scanning/codeql:analyze",
+          "environment": "{\"build-mode\":\"none\",\"category\":\"/language:python\",\"language\":\"python\",\"runner\":\"[\\\"ubuntu-latest\\\"]\"}",
+          "category": "/language:python",
+          "state": "open",
+          "commit_sha": "a140e74f5f54b2ada25e7558d884812facd3375d",
+          "message": {
+            "text": "Stack trace information flows to this location and may be exposed to an external user."
+          },
+          "location": {
+            "path": "superset/views/base.py",
+            "start_line": 155,
+            "end_line": 155,
+            "start_column": 9,
+            "end_column": 17
+          },
+          "classifications": []
+        },
+        "instances_url": "https://api.github.com/repos/victorciao/superset/code-scanning/alerts/1/instances",
+        "dismissal_approved_by": null,
+        "assignees": []
+      }
+    ],
+    "accessible": true,
+    "source": "codeql_alerts.json"
   },
   "skipped_tests": [
     {
@@ -16,7 +614,8 @@
       "symbol": "test_query_context_update_command",
       "decorator": "pytest.mark.skip",
       "reason": "This test will be changed to use the api/v1/data",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/charts/commands_tests.py::test_query_context_update_command"
     },
     {
       "path": "tests/integration_tests/charts/commands_tests.py",
@@ -24,7 +623,8 @@
       "symbol": "test_warm_up_cache",
       "decorator": "pytest.mark.skip",
       "reason": "This test will be changed to use the api/v1/data",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/charts/commands_tests.py::test_warm_up_cache"
     },
     {
       "path": "tests/integration_tests/charts/data/api_tests.py",
@@ -32,7 +632,8 @@
       "symbol": "TestPostChartDataApi",
       "decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test class to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
-      "kind": "class"
+      "kind": "class",
+      "nodeid": "tests/integration_tests/charts/data/api_tests.py::TestPostChartDataApi"
     },
     {
       "path": "tests/integration_tests/charts/data/api_tests.py",
@@ -40,7 +641,8 @@
       "symbol": "TestGetChartDataApi",
       "decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test class to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
-      "kind": "class"
+      "kind": "class",
+      "nodeid": "tests/integration_tests/charts/data/api_tests.py::TestGetChartDataApi"
     },
     {
       "path": "tests/integration_tests/charts/data/api_tests.py",
@@ -48,7 +650,8 @@
       "symbol": "test_chart_data_subquery_not_allowed",
       "decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/charts/data/api_tests.py::test_chart_data_subquery_not_allowed"
     },
     {
       "path": "tests/integration_tests/charts/data/api_tests.py",
@@ -56,7 +659,8 @@
       "symbol": "test_chart_data_subquery_allowed",
       "decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/charts/data/api_tests.py::test_chart_data_subquery_allowed"
     },
     {
       "path": "tests/integration_tests/charts/data/api_tests.py",
@@ -64,7 +668,8 @@
       "symbol": "test_chart_data_dttm_filter",
       "decorator": "unittest.skip",
       "reason": "Failing due to timezone difference",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/charts/data/api_tests.py::test_chart_data_dttm_filter"
     },
     {
       "path": "tests/integration_tests/charts/data/api_tests.py",
@@ -72,7 +677,8 @@
       "symbol": "test_chart_data_async",
       "decorator": "unittest.skip",
       "reason": "Extremely flaky test on MySQL",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/charts/data/api_tests.py::test_chart_data_async"
     },
     {
       "path": "tests/integration_tests/core_tests.py",
@@ -80,7 +686,8 @@
       "symbol": "test_explore_injected_exceptions",
       "decorator": "pytest.mark.skip",
       "reason": "TODO This test was wrong - 'Error message' was in the language pack",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/core_tests.py::test_explore_injected_exceptions"
     },
     {
       "path": "tests/integration_tests/core_tests.py",
@@ -88,7 +695,8 @@
       "symbol": "test_dashboard_injected_exceptions",
       "decorator": "pytest.mark.skip",
       "reason": "TODO This test was wrong - 'Error message' was in the language pack",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/core_tests.py::test_dashboard_injected_exceptions"
     },
     {
       "path": "tests/integration_tests/dashboards/commands_tests.py",
@@ -96,7 +704,8 @@
       "symbol": "test_export_dashboard_command_dataset_references",
       "decorator": "pytest.mark.skip",
       "reason": "missing covid fixture",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/dashboards/commands_tests.py::test_export_dashboard_command_dataset_references"
     },
     {
       "path": "tests/integration_tests/databases/api_tests.py",
@@ -104,7 +713,8 @@
       "symbol": "test_create_database_with_ssh_tunnel_no_port_no_default",
       "decorator": "pytest.mark.skip",
       "reason": "buggy",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/databases/api_tests.py::test_create_database_with_ssh_tunnel_no_port_no_default"
     },
     {
       "path": "tests/integration_tests/datasets/api_tests.py",
@@ -112,7 +722,8 @@
       "symbol": "test_create_dataset_same_name_different_schema",
       "decorator": "unittest.skip",
       "reason": "test is failing stochastically",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/datasets/api_tests.py::test_create_dataset_same_name_different_schema"
     },
     {
       "path": "tests/integration_tests/datasets/api_tests.py",
@@ -120,7 +731,8 @@
       "symbol": "test_export_dataset",
       "decorator": "unittest.skip",
       "reason": "test is failing stochastically",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/datasets/api_tests.py::test_export_dataset"
     },
     {
       "path": "tests/integration_tests/datasets/api_tests.py",
@@ -128,7 +740,8 @@
       "symbol": "test_get_dataset_related_objects",
       "decorator": "unittest.skip",
       "reason": "Number of related objects depend on DB",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/datasets/api_tests.py::test_get_dataset_related_objects"
     },
     {
       "path": "tests/integration_tests/datasource/test_validate_expression_api.py",
@@ -136,7 +749,8 @@
       "symbol": "TestDatasourceValidateExpressionApi",
       "decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test class to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
-      "kind": "class"
+      "kind": "class",
+      "nodeid": "tests/integration_tests/datasource/test_validate_expression_api.py::TestDatasourceValidateExpressionApi"
     },
     {
       "path": "tests/integration_tests/import_export_tests.py",
@@ -144,7 +758,8 @@
       "symbol": "test_export_1_dashboard",
       "decorator": "unittest.skip",
       "reason": "Schema needs to be updated",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/import_export_tests.py::test_export_1_dashboard"
     },
     {
       "path": "tests/integration_tests/import_export_tests.py",
@@ -152,7 +767,8 @@
       "symbol": "test_export_2_dashboards",
       "decorator": "unittest.skip",
       "reason": "Schema needs to be updated",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/import_export_tests.py::test_export_2_dashboards"
     },
     {
       "path": "tests/integration_tests/import_export_tests.py",
@@ -160,7 +776,8 @@
       "symbol": "test_import_override_dashboard_slice_reset_ownership",
       "decorator": "pytest.mark.skip",
       "reason": null,
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/import_export_tests.py::test_import_override_dashboard_slice_reset_ownership"
     },
     {
       "path": "tests/integration_tests/query_context_tests.py",
@@ -168,7 +785,8 @@
       "symbol": "TestQueryContext",
       "decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test class to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
-      "kind": "class"
+      "kind": "class",
+      "nodeid": "tests/integration_tests/query_context_tests.py::TestQueryContext"
     },
     {
       "path": "tests/integration_tests/sqllab_tests.py",
@@ -176,7 +794,8 @@
       "symbol": "test_sql_json",
       "decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/sqllab_tests.py::test_sql_json"
     },
     {
       "path": "tests/integration_tests/sqllab_tests.py",
@@ -184,7 +803,8 @@
       "symbol": "test_sql_json_dml_disallowed",
       "decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/sqllab_tests.py::test_sql_json_dml_disallowed"
     },
     {
       "path": "tests/integration_tests/sqllab_tests.py",
@@ -192,7 +812,8 @@
       "symbol": "test_sql_json_cta_dynamic_db",
       "decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/sqllab_tests.py::test_sql_json_cta_dynamic_db"
     },
     {
       "path": "tests/integration_tests/sqllab_tests.py",
@@ -200,7 +821,8 @@
       "symbol": "test_multi_sql",
       "decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/sqllab_tests.py::test_multi_sql"
     },
     {
       "path": "tests/integration_tests/sqllab_tests.py",
@@ -208,7 +830,8 @@
       "symbol": "test_explain",
       "decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/sqllab_tests.py::test_explain"
     },
     {
       "path": "tests/integration_tests/sqllab_tests.py",
@@ -216,7 +839,8 @@
       "symbol": "test_sql_json_has_access",
       "decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/sqllab_tests.py::test_sql_json_has_access"
     },
     {
       "path": "tests/integration_tests/sqllab_tests.py",
@@ -224,7 +848,8 @@
       "symbol": "test_sql_limit",
       "decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/sqllab_tests.py::test_sql_limit"
     },
     {
       "path": "tests/integration_tests/sqllab_tests.py",
@@ -232,7 +857,8 @@
       "symbol": "test_sql_json_parameter_error",
       "decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/sqllab_tests.py::test_sql_json_parameter_error"
     },
     {
       "path": "tests/integration_tests/sqllab_tests.py",
@@ -240,7 +866,8 @@
       "symbol": "test_sql_json_parameter_authorized",
       "decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/sqllab_tests.py::test_sql_json_parameter_authorized"
     },
     {
       "path": "tests/integration_tests/sqllab_tests.py",
@@ -248,7 +875,8 @@
       "symbol": "test_sql_json_parameter_forbidden",
       "decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/sqllab_tests.py::test_sql_json_parameter_forbidden"
     },
     {
       "path": "tests/integration_tests/sqllab_tests.py",
@@ -256,7 +884,8 @@
       "symbol": "test_sql_json_soft_timeout",
       "decorator": "pytest.mark.skip",
       "reason": "TODO: Fix test to work with DuckDB example data format. Birth names fixture conflicts with new example data structure.",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/sqllab_tests.py::test_sql_json_soft_timeout"
     },
     {
       "path": "tests/integration_tests/themes/api_tests.py",
@@ -264,7 +893,8 @@
       "symbol": "test_delete_theme",
       "decorator": "pytest.mark.skip",
       "reason": "DELETE endpoint not properly registered due to route method exclusion",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/themes/api_tests.py::test_delete_theme"
     },
     {
       "path": "tests/integration_tests/themes/api_tests.py",
@@ -272,23 +902,8 @@
       "symbol": "test_delete_theme_not_found",
       "decorator": "pytest.mark.skip",
       "reason": "DELETE endpoint not properly registered due to route method exclusion",
-      "kind": "function"
-    },
-    {
-      "path": "tests/unit_tests/charts/test_non_additive_totals.py",
-      "line": 80,
-      "symbol": "test_ratio_total_is_recomputed_not_summed",
-      "decorator": "pytest.mark.xfail",
-      "reason": "POC not implemented: ratio totals are summed cell-wise, not recomputed as SUM(num)/SUM(den) at the total grouping level (#25747).",
-      "kind": "function"
-    },
-    {
-      "path": "tests/unit_tests/charts/test_non_additive_totals.py",
-      "line": 110,
-      "symbol": "test_distinct_count_total_is_recomputed_not_summed",
-      "decorator": "pytest.mark.xfail",
-      "reason": "POC not implemented: COUNT_DISTINCT subtotals are summed across groups, double-counting overlapping members (#36165).",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/integration_tests/themes/api_tests.py::test_delete_theme_not_found"
     },
     {
       "path": "tests/unit_tests/databases/api_test.py",
@@ -296,7 +911,289 @@
       "symbol": "test_update_with_password_mask",
       "decorator": "pytest.mark.skip",
       "reason": "Works locally but fails on CI",
-      "kind": "function"
+      "kind": "function",
+      "nodeid": "tests/unit_tests/databases/api_test.py::test_update_with_password_mask"
+    }
+  ],
+  "excluded_conditional_skips": [
+    {
+      "path": "tests/integration_tests/db_engine_specs/hive_tests.py",
+      "line": 163,
+      "symbol": "test_df_to_sql_if_exists_fail_with_schema",
+      "decorator": "unittest.skipUnless",
+      "reason": "thrift not installed",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/db_engine_specs/hive_tests.py",
+      "line": 181,
+      "symbol": "test_df_to_sql_if_exists_replace",
+      "decorator": "unittest.skipUnless",
+      "reason": "boto3 not installed",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/db_engine_specs/hive_tests.py",
+      "line": 262,
+      "symbol": "test_upload_to_s3_no_bucket_path",
+      "decorator": "unittest.skipUnless",
+      "reason": "boto3 not installed",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/db_engine_specs/hive_tests.py",
+      "line": 275,
+      "symbol": "test_upload_to_s3_client_error",
+      "decorator": "unittest.skipUnless",
+      "reason": "boto3 not installed",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/db_engine_specs/hive_tests.py",
+      "line": 295,
+      "symbol": "test_upload_to_s3_success",
+      "decorator": "unittest.skipUnless",
+      "reason": "boto3 not installed",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/db_engine_specs/hive_tests.py",
+      "line": 310,
+      "symbol": "test_fetch_data_query_error",
+      "decorator": "unittest.skipUnless",
+      "reason": "thrift not installed",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/db_engine_specs/hive_tests.py",
+      "line": 325,
+      "symbol": "test_fetch_data_programming_error",
+      "decorator": "unittest.skipUnless",
+      "reason": "thrift not installed",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/db_engine_specs/hive_tests.py",
+      "line": 337,
+      "symbol": "test_fetch_data_success",
+      "decorator": "unittest.skipUnless",
+      "reason": "thrift not installed",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/db_engine_specs/mysql_tests.py",
+      "line": 31,
+      "symbol": "test_get_datatype_mysql",
+      "decorator": "unittest.skipUnless",
+      "reason": "mysqlclient not installed",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/db_engine_specs/presto_tests.py",
+      "line": 38,
+      "symbol": "test_get_datatype_presto",
+      "decorator": "skipUnless",
+      "reason": "pyhive not installed",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/deletion_retention/purge_performance_tests.py",
+      "line": 131,
+      "symbol": "test_representative_purge_median",
+      "decorator": "pytest.mark.skipif",
+      "reason": "manual fixed-cardinality timing protocol",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/model_tests.py",
+      "line": 62,
+      "symbol": "test_database_schema_presto",
+      "decorator": "unittest.skipUnless",
+      "reason": "requests not installed",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/model_tests.py",
+      "line": 62,
+      "symbol": "test_database_schema_presto",
+      "decorator": "unittest.skipUnless",
+      "reason": "pyhive not installed",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/model_tests.py",
+      "line": 103,
+      "symbol": "test_database_schema_hive",
+      "decorator": "unittest.skipUnless",
+      "reason": "thrift not installed",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/model_tests.py",
+      "line": 103,
+      "symbol": "test_database_schema_hive",
+      "decorator": "unittest.skipUnless",
+      "reason": "pyhive not installed",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/model_tests.py",
+      "line": 118,
+      "symbol": "test_database_schema_mysql",
+      "decorator": "unittest.skipUnless",
+      "reason": "mysqlclient not installed",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/model_tests.py",
+      "line": 133,
+      "symbol": "test_database_impersonate_user",
+      "decorator": "unittest.skipUnless",
+      "reason": "mysqlclient not installed",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/model_tests.py",
+      "line": 153,
+      "symbol": "test_impersonate_user_presto",
+      "decorator": "unittest.skipUnless",
+      "reason": "pyhive not installed",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/model_tests.py",
+      "line": 205,
+      "symbol": "test_adjust_engine_params_mysql",
+      "decorator": "unittest.skipUnless",
+      "reason": "mysqlclient not installed",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/model_tests.py",
+      "line": 279,
+      "symbol": "test_impersonate_user_hive",
+      "decorator": "unittest.skipUnless",
+      "reason": "pyhive not installed",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/model_tests.py",
+      "line": 279,
+      "symbol": "test_impersonate_user_hive",
+      "decorator": "unittest.skipUnless",
+      "reason": "thrift not installed",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/model_tests.py",
+      "line": 331,
+      "symbol": "test_select_star",
+      "decorator": "unittest.skipUnless",
+      "reason": "pyhive not installed",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/security_tests.py",
+      "line": 1495,
+      "symbol": "test_is_alpha_only",
+      "decorator": "unittest.skipUnless",
+      "reason": "pydruid not installed",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/security_tests.py",
+      "line": 1625,
+      "symbol": "test_alpha_permissions",
+      "decorator": "unittest.skipUnless",
+      "reason": "pydruid not installed",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/thumbnails_tests.py",
+      "line": 64,
+      "symbol": "test_get_async_dashboard_screenshot",
+      "decorator": "skipUnless",
+      "reason": "Thumbnails feature",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/thumbnails_tests.py",
+      "line": 206,
+      "symbol": "test_get_async_dashboard_created",
+      "decorator": "skipUnless",
+      "reason": "Thumbnails feature",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/integration_tests/versioning/perf_validation_tests.py",
+      "line": 88,
+      "symbol": "PerfValidationTests",
+      "decorator": "pytest.mark.skipif",
+      "reason": null,
+      "kind": "class",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/unit_tests/charts/test_non_additive_totals.py",
+      "line": 80,
+      "symbol": "test_ratio_total_is_recomputed_not_summed",
+      "decorator": "pytest.mark.xfail",
+      "reason": "POC not implemented: ratio totals are summed cell-wise, not recomputed as SUM(num)/SUM(den) at the total grouping level (#25747).",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/unit_tests/charts/test_non_additive_totals.py",
+      "line": 110,
+      "symbol": "test_distinct_count_total_is_recomputed_not_summed",
+      "decorator": "pytest.mark.xfail",
+      "reason": "POC not implemented: COUNT_DISTINCT subtotals are summed across groups, double-counting overlapping members (#36165).",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/unit_tests/db_engine_specs/test_ocient.py",
+      "line": 397,
+      "symbol": "test_gis_type_sanitization",
+      "decorator": "pytest.mark.skipif",
+      "reason": "requires ocient dependencies",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/unit_tests/db_engine_specs/test_ocient.py",
+      "line": 411,
+      "symbol": "test_point_list_to_wkt",
+      "decorator": "pytest.mark.skipif",
+      "reason": "requires ocient dependencies",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
     },
     {
       "path": "tests/unit_tests/sql/parse_tests.py",
@@ -304,38 +1201,67 @@
       "symbol": "test_sqlscript_format_preserves_optimizer_hint_block_with_semicolon",
       "decorator": "pytest.mark.xfail",
       "reason": "#38189 is not fully fixed: a `;`-terminated statement still hits the comment-relocation branch and corrupts the hint block. Only the no-semicolon form from the original repro was fixed.",
-      "kind": "function"
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
+    },
+    {
+      "path": "tests/unit_tests/test_marshmallow4_compat.py",
+      "line": 98,
+      "symbol": "test_fab_field_stubbing_is_single_pass",
+      "decorator": "pytest.mark.skipif",
+      "reason": "FAB _init_fields KeyError only occurs on marshmallow >= 4",
+      "kind": "function",
+      "excluded_reason": "conditional_environment_guard"
     }
   ],
   "deprecations": [
     {
       "path": "superset/databases/api.py",
       "line": 976,
-      "symbol": null,
-      "deprecated_in": "4.0"
+      "symbol": "table_extra_metadata_deprecated",
+      "qualname": "DatabaseRestApi.table_extra_metadata_deprecated",
+      "locator": "superset.databases.api:DatabaseRestApi.table_extra_metadata_deprecated",
+      "deprecated_in": "4.0",
+      "removed_in": null
     },
     {
       "path": "superset/db_engine_specs/base.py",
       "line": 1542,
       "symbol": "normalize_indexes",
-      "deprecated_in": "3.0"
+      "qualname": "BaseEngineSpec.normalize_indexes",
+      "locator": "superset.db_engine_specs.base:BaseEngineSpec.normalize_indexes",
+      "deprecated_in": "3.0",
+      "removed_in": null
     },
     {
       "path": "superset/db_engine_specs/base.py",
       "line": 2325,
       "symbol": "get_url_for_impersonation",
-      "deprecated_in": "6.0.0"
+      "qualname": "BaseEngineSpec.get_url_for_impersonation",
+      "locator": "superset.db_engine_specs.base:BaseEngineSpec.get_url_for_impersonation",
+      "deprecated_in": "6.0.0",
+      "removed_in": null
     },
     {
       "path": "superset/db_engine_specs/base.py",
       "line": 2347,
       "symbol": "update_impersonation_config",
-      "deprecated_in": "6.0.0"
+      "qualname": "BaseEngineSpec.update_impersonation_config",
+      "locator": "superset.db_engine_specs.base:BaseEngineSpec.update_impersonation_config",
+      "deprecated_in": "6.0.0",
+      "removed_in": null
     }
   ],
+  "baseline_valid_lanes": [
+    "codeql",
+    "skipped_tests",
+    "deprecations"
+  ],
   "totals": {
-    "skipped_tests": 37,
+    "skipped_tests": 34,
+    "excluded_conditional_skips": 33,
     "deprecations": 4,
-    "codeql_open_alerts": 0
+    "eol_passed_deprecations": 2,
+    "codeql_open_alerts": 11
   }
 }
