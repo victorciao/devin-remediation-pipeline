@@ -77,6 +77,10 @@ It is decorator-based, so `pytestmark` assignments, imperative in-body skips and
 `pytest.mark.*` aliases are outside its scope — see plan §5). Absolute-import bindings *are* resolved, so the
 alias-imported `@skip("Flaky")` at `tests/integration_tests/databases/commands_tests.py:118`
 counts. Each candidate carries the fully qualified, collectable pytest nodeid
-(`path::Class::method` where the test is class-nested — 28 of the 35 are) plus its `class_scope`.
+(`path::Class::method` where the test is class-nested — 28 of the 35 are) plus its `class_scope`,
+`enclosed_tests`, `parametrized`, `collects_single_item` and `enclosing_skip_nodeid`: 6 of the 35
+locators collect more than one item (4 class-level skips, 2 parametrized functions) and 2 sit
+inside another skipped class. Every record reports `line` as the definition line and
+`decorator_line` as the matched decorator's line, in both LANE 2 and LANE 3.
 It also records 33 excluded conditional instances split by reason — 30 `conditional_environment_guard` and
 3 `expected_failure_xfail` — and 2 EOL-passed deprecations.

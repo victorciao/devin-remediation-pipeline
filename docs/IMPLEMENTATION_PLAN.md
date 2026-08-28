@@ -4,9 +4,10 @@
 > plan-review step (T-1, §2) reviews against, and what every later change must be
 > reconciled with. Referenced from the README.
 >
-> **Revision 6** — incorporates T-1 review rounds 1–5: round 1 (5 blocking / 15 major /
+> **Revision 7** — incorporates T-1 review rounds 1–6: round 1 (5 blocking / 15 major /
 > 10 minor / 2 nit), round 2 (7 major / 8 minor / 2 nit), round 3 (2 major / 4 minor / 2 nit),
-> round 4 (1 major / 2 minor / 3 nit) and round 5 (1 major / 4 minor / 2 nit). See §20 for the
+> round 4 (1 major / 2 minor / 3 nit), round 5 (1 major / 4 minor / 2 nit) and round 6
+> (1 major / 2 minor / 2 nit). See §20 for the
 > revision log and the finding-by-finding disposition of every round.
 
 Produce the deliverables for an event-driven Devin remediation pipeline that finds, ranks, and
@@ -114,7 +115,15 @@ Captured at `HEAD = a140e74`, snapshot committed to `fixtures/baseline.json`:
   backend, feature-flag or opt-in-suite guard *(R5-n-01)*) and **3** `expected_failure_xfail` (an expected failure is still collected, so
   it is not disabled coverage — see §5). The 35th included site is the alias-imported
   `@skip("Flaky")` at `tests/integration_tests/databases/commands_tests.py:118`, which a
-  dotted-name-only matcher missed.
+  dotted-name-only matcher missed. Of the 35, **6** collect more than one item
+  (`collects_single_item = 0`: 4 class-level skips and 2 parametrized functions) and **2** are
+  nested inside another skipped class (`enclosing_skip_nodeid`) — see §9.1 and §9.2
+  *(R6-M-01, R6-m-01)*.
+- **Field semantics** *(R6-n-02)* — every baseline record reports `line` as the **definition**
+  line (`def` / `class`) and `decorator_line` as the matched decorator's own line, in both LANE 2
+  and LANE 3, so the two lanes are diff-comparable against grep output. The two differ wherever
+  a decorator stack sits above the definition (e.g. `normalize_indexes`: decorator 1542,
+  definition 1543).
 - **4** `@deprecated(deprecated_in=...)` sites, none carrying `removed_in`, of which **2** are
   EOL-passed under §4.2 (`normalize_indexes` at `3.0`,
   `DatabaseRestApi.table_extra_metadata_deprecated` at `4.0`).
@@ -138,7 +147,13 @@ Captured at `HEAD = a140e74`, snapshot committed to `fixtures/baseline.json`:
 1. `trigger_exists` — a machine-readable event/source exists (CodeQL SARIF alert, nightly-CI
    skip/failure record, parseable `@deprecated(deprecated_in=...)`).
 2. `automatability` — the fix can be expressed as a well-scoped transformation, not open
-   product judgment.
+   product judgment. For LANE 2 this is checked against the record's breadth *(R6-m-02)*: a
+   `kind = class` candidate re-enables every method in the class at once (the live rows run from
+   11 to 52 enclosed tests, under reasons that blame fixture/example-data incompatibility), which
+   is not a well-scoped transformation and cannot be scored as a test-only diff at risk 1–2.
+   `enclosed_tests > lane2_class_breadth_max` (default **5**) fails the gate with reason
+   `class_scope_too_broad` and is human-routed; at or below the threshold the LANE 2 rubric adds
+   +1 risk for any `kind = class` row.
 3. `verifiability_exists` — a concrete pass/fail signal exists (a targeted test path to run).
 
 Recurrence/frequency is NOT a gate or score factor — it is used only when choosing WHICH LANES
@@ -175,7 +190,7 @@ each row mapping an observable property to a value. Defaults:
 | Lane | `business_impact` anchor | `signal_quality` anchor | `risk` anchor |
 |---|---|---|---|
 | 1 — CodeQL | alert `security_severity_level` (critical 5 … note 1) | rule precision + `updated_at` freshness | blast radius of the touched module |
-| 2 — skipped test | breadth of the covered surface | skip `reason` specificity (a `TODO:` with a cause = 4; bare skip = 2) | test-only diff ⇒ 1–2 |
+| 2 — skipped test | breadth of the covered surface | skip `reason` specificity (a `TODO:` with a cause = 4; bare skip = 2) | test-only diff ⇒ 1–2, **+1 when `kind = class`** *(R6-m-02)* |
 | 3 — deprecation | public-API exposure | age in majors past `deprecated_in` | caller/override count (see M-02 gate) |
 
 ### §4.2 EOL definition for LANE 3 *(M-02, R2-M-02)*
@@ -289,6 +304,9 @@ question 3.
 - High score AND risk ≥ 3 → open a PR labeled `needs-human-review`, no auto-merge.
 - Medium → open an ISSUE with a proposed fix, no PR.
 - Low → log only / drop.
+- `lane2_class_breadth_max = 5` — enclosed-test ceiling above which a class-level LANE 2 skip
+  fails `automatability` *(R6-m-02)*; safety-relevant, raising it lets one PR re-enable a whole
+  test class unattended.
 - Per-run budget `budget_N = 10`: open at most 10 PRs/issues per run; overflow (even
   high-scoring) is deferred to later runs and recorded as deferred.
 - Auto-merge is gated on the FULL CI gate stack being green (§10) — the score decides whether
@@ -394,6 +412,19 @@ The baseline is **valid iff** running `nodeid` at the pre-fix commit exits `FAIL
 `invalid_red_baseline` → re-author once, then escalate. All four expected fields and their
 observed counterparts are logged so the §11 expected-reason-match KPI is computable.
 
+**Multi-item nodeids** *(R6-M-01)* — a locator is not always one-to-one with a collected item:
+a class-level LANE 2 skip collects every test method in the class (the live extremes are
+`TestPostChartDataApi` at 52 and `TestQueryContext` at 25) and a parametrized function collects
+one item per parameter tuple. `fixtures/baseline.json` records this per row as `enclosed_tests`,
+`parametrized` and `collects_single_item`; **6 of the 35** live candidates collect more than one
+item. For those rows the contract is evaluated **per collected item** and the run is a valid
+baseline iff **at least one** collected item exits `FAILED` matching `exception_type` /
+`message_pattern` **and no** collected item is `SKIPPED`; the planner's `expected_failure` may
+name the representative item's nodeid, and the per-item outcome vector is logged. `PASSED` for
+*every* item is `stale_skip`; any `SKIPPED` item is `invalid_red_baseline`. The §9.2 classifier
+reads that aggregate, so single-item rows keep the plain `FAILED` / `PASSED` / `SKIPPED` mapping
+as a special case of the same rule.
+
 ### §9.2 Branch, concurrency and commit mechanics *(M-09)*
 
 - The **orchestrator** creates `devin/remediation/<candidate_id>` from the target base and pins
@@ -405,6 +436,14 @@ observed counterparts are logged so the §11 expected-reason-match KPI is comput
   `SKIPPED` → `invalid_red_baseline`), and only then commits that test-path change. This is the
   only way the classification is observable — at `base_sha` the marker is by definition still
   present, so no other role can run the un-skipped test.
+- **Nested markers** *(R6-m-01)* — an enumerated node can sit lexically inside another skipped
+  node (2 of the 35 live candidates are methods of `TestPostChartDataApi`, itself a class-level
+  candidate). The enumerator records `enclosing_skip_nodeid` for those rows; the reviewer's
+  scratch patch MUST lift **every** unconditional marker on the path to the node before
+  classifying, otherwise the run returns `SKIPPED` and a genuine backlog item is permanently
+  misclassified `invalid_red_baseline`. Both the child and the enclosing candidate stay
+  enumerated; whichever dispatches first records the other as its `related_candidate_id`, and the
+  §14.1 marker search prevents the second from duplicating the first's artifacts.
 - The **implementer** commits non-test paths only and rebases onto the reviewer's commit at
   JOIN. It has **no** LANE 2 carve-out.
 - Every commit uses `git commit --signoff`. Push races resolve by rebase-retry (max 3), then
@@ -660,7 +699,7 @@ candidate_id = sha256(lane | repo | stable_locator)
 | Lane | `stable_locator` |
 |---|---|
 | 1 — CodeQL | `rule_id + file_path + normalized_symbol + position_digest` — **never** `alert.number` (unstable across re-scans) |
-| 2 — skipped test | the **fully qualified, collectable** pytest nodeid *(R5-M-01)* — `path::Class::method` for a class-nested test, `path::Class` for a class-level skip, `path::function` only for a module-level test. A nodeid that omits the enclosing class does not collect (`no tests ran`), which §9.1 would then read as a collection error and classify `invalid_red_baseline`; 28 of the 35 live LANE 2 candidates are class-nested, so this is the common case, not an edge case. `scripts/build_baseline.py` carries class scope and `fixtures/baseline.json` records it as `class_scope`. |
+| 2 — skipped test | the **fully qualified, collectable** pytest nodeid *(R5-M-01)* — `path::Class::method` for a class-nested test, `path::Class` for a class-level skip, `path::function` only for a module-level test. A nodeid that omits the enclosing class does not collect (`no tests ran`), which §9.1 would then read as a collection error and classify `invalid_red_baseline`; 28 of the 35 live LANE 2 candidates are class-nested, so this is the common case, not an edge case. `scripts/build_baseline.py` carries class scope and `fixtures/baseline.json` records it as `class_scope`. The locator is collectable but **not** necessarily one-to-one with a collected item — see §9.1 on the 6 multi-item rows *(R6-M-01)*. |
 | 3 — deprecation | `module:qualname` |
 
 **LANE 1 needs a positional discriminator** *(R2-M-01)*. Rule + path + symbol collides on real
@@ -857,15 +896,26 @@ code-review loop converges with green CI.
   linked to its prior `candidate_id` via the marker search / drift match and is not re-dispatched
   *(R3-m-04)*.
 
-**Added to close T-1 review round 4**
+**Added to close T-1 review rounds 4–5**
 
 - `test_colocated_alerts_all_dispatched` — all four `py/overly-large-range` fixture alerts are
   dispatched; none is suppressed as a drift match, because their weak key has multiplicity 4
   *(R4-M-01)*. Paired with `test_drift_match_requires_region_digest`, where an unambiguous weak
   key but a differing `region_digest` does **not** link.
-- `test_lane2_nodeids_are_collectable` — every enumerated LANE 2 nodeid resolves to exactly one
-  collected item (`pytest --collect-only <nodeid>`); at minimum every record with a non-null
-  `class_scope` contains the `::<Class>::` segment *(R5-M-01)*.
+- `test_lane2_nodeids_are_collectable` — every enumerated LANE 2 nodeid resolves to **at least
+  one** collected item (`pytest --collect-only <nodeid>`) and every record with a non-null
+  `class_scope` contains the `::<Class>::` segment *(R5-M-01)*. One-to-one is **not** asserted:
+  6 of the 35 live rows collect many items *(R6-M-01)*, and the test instead asserts that each
+  such row carries `collects_single_item = 0` with a non-zero `enclosed_tests` or `parametrized`.
+- `test_multi_item_red_baseline_classification` — for a multi-item locator, a run where one item
+  FAILs with the expected signature and the rest pass is a valid baseline; the same run with any
+  item `SKIPPED` is `invalid_red_baseline` and all-pass is `stale_skip` *(R6-M-01)*.
+- `test_nested_skip_requires_lifting_parent` — a candidate carrying `enclosing_skip_nodeid` whose
+  scratch patch lifts only its own marker is rejected before classification rather than recorded
+  as `invalid_red_baseline` *(R6-m-01)*.
+- `test_broad_class_skip_is_human_routed` — a `kind = class` candidate with
+  `enclosed_tests > lane2_class_breadth_max` fails automatability with reason
+  `class_scope_too_broad` *(R6-m-02)*.
 - `test_drift_survives_repeated_shifts` — a second consecutive line shift of the same alert still
   links, because state-side multiplicity counts **active** rows only *(R5-m-01)*.
 - `test_enumerator_scope_limits` — `pytestmark` assignments, imperative `pytest.skip()` bodies
@@ -1045,6 +1095,25 @@ pre-existing defect in the LANE 2 locator that four prior rounds missed. Disposi
 | R5-m-04 co-located groups can never drift-link | **Accepted as a documented tradeoff.** The residual cost (duplicate re-dispatch after an edit above the group) is now stated explicitly, with the rationale that duplication is the safe failure direction and bounded by `budget_N` + review; one-to-one pairing within a group is recorded as a later refinement. |
 | R5-n-01 "availability or backend guard" overreaches | **Accepted.** Widened to availability / backend / feature-flag / opt-in-suite, with the thumbnails flag and the perf-suite env var named. |
 | R5-n-02 the 35 are distinct nodes | **Accepted.** The instance-vs-node caveat is scoped to the 33 exclusions; the 35 are noted as 35 distinct nodeids at this HEAD. |
+
+No finding was rejected.
+
+### Revision 7 — T-1 plan review round 6
+
+Reviewer verdict `changes_required`: 0 blocking, 1 major, 2 minor, 2 nit. All seven round-5
+findings confirmed resolved against a fresh clone at `a140e74`, with `fixtures/baseline.json`
+reproduced byte-identically apart from `captured_at`, every class-qualified nodeid cross-checked
+against the AST at its recorded line, and the new scope-based `_iter_definitions` confirmed to
+introduce no enumeration regression (an `ast.walk` variant yields the identical 35/33 set). The
+major is the second-order consequence of the R5-M-01 fix. Disposition:
+
+| Finding | Disposition |
+|---|---|
+| R6-M-01 nodeids are collectable but not one-to-one | **Accepted.** Verified: 4 class-level rows enclose 11–52 tests and 2 module-level rows are parametrized, so 6 of 35 locators collect >1 item, making the §17 one-to-one assertion false and §9.1's single-signature contract undefined. Took the reviewer's option (b) plus instrumentation: the enumerator now emits `enclosed_tests`, `parametrized` and `collects_single_item`; §9.1 defines the multi-item contract (valid iff ≥1 item FAILs with the expected signature and no item is SKIPPED, per-item outcomes logged), §17's assertion is reworded to ≥1 collected item, and two §17 cases cover the aggregate classifier. |
+| R6-m-01 nested markers make child candidates permanently unclassifiable | **Accepted.** Verified: the two `TestPostChartDataApi` methods sit inside a class-level skip. The enumerator records `enclosing_skip_nodeid` (2 live rows) and §9.2 requires the reviewer's scratch patch to lift every unconditional marker on the path to the node before classifying. |
+| R6-m-02 class-level skips are not well-scoped transformations | **Accepted.** `lane2_class_breadth_max = 5` added as a safety-classified knob: `enclosed_tests` above it fails `automatability` with reason `class_scope_too_broad` and is human-routed; at or below it the LANE 2 rubric adds +1 risk for `kind = class`. |
+| R6-n-01 round-5 tests filed under a round-4 heading | **Accepted.** Heading is now "Added to close T-1 review rounds 4–5". |
+| R6-n-02 `line` means different things per lane | **Accepted.** Both lanes now emit `line` (definition) **and** `decorator_line`; the convention is stated in §3 0e. |
 
 No finding was rejected.
 

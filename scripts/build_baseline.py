@@ -126,6 +126,26 @@ def _iter_definitions(
             yield node, scope
 
 
+def _enclosed_tests(node: Definition) -> int:
+    """Count the test methods a class-level skip disables (0 for a function)."""
+    if not isinstance(node, ast.ClassDef):
+        return 0
+    return sum(
+        1
+        for child in node.body
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and child.name.startswith("test")
+    )
+
+
+def _is_parametrized(node: Definition, bindings: dict[str, str]) -> bool:
+    """Return True when the node's own nodeid expands to one item per parameter set."""
+    return any(
+        _resolve(_decorator_name(dec), bindings).endswith("mark.parametrize")
+        for dec in node.decorator_list
+    )
+
+
 def collect_skipped_tests(repo: Path) -> tuple[list[Record], list[Record]]:
     """Enumerate LANE 2 candidates and the conditional sites deliberately excluded."""
     included: list[Record] = []
@@ -136,6 +156,7 @@ def collect_skipped_tests(repo: Path) -> tuple[list[Record], list[Record]]:
         except (SyntaxError, UnicodeDecodeError):
             continue
         bindings = _import_bindings(tree)
+        skipped_scopes: dict[tuple[str, ...], str] = {}
         for node, scope in _iter_definitions(tree.body):
             for dec in node.decorator_list:
                 written = _decorator_name(dec)
@@ -143,6 +164,7 @@ def collect_skipped_tests(repo: Path) -> tuple[list[Record], list[Record]]:
                 record: Record = {
                     "path": str(path.relative_to(repo)),
                     "line": node.lineno,
+                    "decorator_line": dec.lineno,
                     "symbol": node.name,
                     "decorator": written,
                     "resolved_decorator": name,
@@ -151,9 +173,24 @@ def collect_skipped_tests(repo: Path) -> tuple[list[Record], list[Record]]:
                 }
                 record["class_scope"] = "::".join(scope) or None
                 if _is_unconditional_skip(name):
-                    record["nodeid"] = "::".join(
-                        (str(record["path"]), *scope, node.name)
+                    nodeid = "::".join((str(record["path"]), *scope, node.name))
+                    enclosed = _enclosed_tests(node)
+                    record["nodeid"] = nodeid
+                    record["enclosed_tests"] = enclosed
+                    record["parametrized"] = int(_is_parametrized(node, bindings))
+                    record["collects_single_item"] = int(
+                        enclosed == 0 and not _is_parametrized(node, bindings)
                     )
+                    record["enclosing_skip_nodeid"] = next(
+                        (
+                            skipped_scopes[scope[:i]]
+                            for i in range(len(scope), 0, -1)
+                            if scope[:i] in skipped_scopes
+                        ),
+                        None,
+                    )
+                    if isinstance(node, ast.ClassDef):
+                        skipped_scopes[(*scope, node.name)] = nodeid
                     included.append(record)
                 elif (reason := _exclusion_reason(name)) is not None:
                     record["excluded_reason"] = reason
@@ -217,7 +254,8 @@ def collect_deprecations(repo: Path) -> list[Record]:
                 out.append(
                     {
                         "path": str(path.relative_to(repo)),
-                        "line": dec.lineno,
+                        "line": node.lineno,
+                        "decorator_line": dec.lineno,
                         "symbol": node.name,
                         "qualname": qualname,
                         "locator": f"{module}:{qualname}",
@@ -314,6 +352,12 @@ def main() -> int:
             1 for d in deprecations if _eol_passed(str(d["deprecated_in"]), major)
         ),
         "codeql_open_alerts": len(codeql["open"]),
+        "multi_item_skipped_tests": sum(
+            1 for s in skipped if not s["collects_single_item"]
+        ),
+        "nested_under_skipped_class": sum(
+            1 for s in skipped if s["enclosing_skip_nodeid"]
+        ),
     }
 
     path = out_dir / "baseline.json"
