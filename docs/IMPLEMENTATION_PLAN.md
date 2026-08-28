@@ -4,10 +4,10 @@
 > plan-review step (T-1, §2) reviews against, and what every later change must be
 > reconciled with. Referenced from the README.
 >
-> **Revision 7** — incorporates T-1 review rounds 1–6: round 1 (5 blocking / 15 major /
+> **Revision 8** — incorporates T-1 review rounds 1–7: round 1 (5 blocking / 15 major /
 > 10 minor / 2 nit), round 2 (7 major / 8 minor / 2 nit), round 3 (2 major / 4 minor / 2 nit),
-> round 4 (1 major / 2 minor / 3 nit), round 5 (1 major / 4 minor / 2 nit) and round 6
-> (1 major / 2 minor / 2 nit). See §20 for the
+> round 4 (1 major / 2 minor / 3 nit), round 5 (1 major / 4 minor / 2 nit), round 6
+> (1 major / 2 minor / 2 nit) and round 7 (1 major / 4 minor / 4 nit). See §20 for the
 > revision log and the finding-by-finding disposition of every round.
 
 Produce the deliverables for an event-driven Devin remediation pipeline that finds, ranks, and
@@ -153,7 +153,10 @@ Captured at `HEAD = a140e74`, snapshot committed to `fixtures/baseline.json`:
    is not a well-scoped transformation and cannot be scored as a test-only diff at risk 1–2.
    `enclosed_tests > lane2_class_breadth_max` (default **5**) fails the gate with reason
    `class_scope_too_broad` and is human-routed; at or below the threshold the LANE 2 rubric adds
-   +1 risk for any `kind = class` row.
+   +1 risk for any `kind = class` row. Because `enclosed_tests` counts direct-body test methods
+   only *(R7-m-04)*, a `kind = class` row reporting `enclosed_tests = 0` is **also** human-routed
+   (reason `class_breadth_unknown`) rather than treated as a single-item candidate — that shape
+   means the class inherits its tests, and its true breadth is unknown to the enumerator.
 3. `verifiability_exists` — a concrete pass/fail signal exists (a targeted test path to run).
 
 Recurrence/frequency is NOT a gate or score factor — it is used only when choosing WHICH LANES
@@ -178,8 +181,13 @@ score = min( business_impact × verifiability × automatability × signal_qualit
 `automatability` and `verifiability` appear in both stages, and they are **not** the same
 judgment *(M-15)*:
 
-- The **gate** asks whether *any* well-scoped transformation / pass-fail signal exists at all —
-  binary, equivalent to rubric `>= 2`. A rubric `1` fails the gate and never reaches scoring.
+- The **gate** asks whether *any* well-scoped transformation / pass-fail signal exists at all.
+  It is **rubric `>= 2` AND every lane-specific hard condition** *(R7-m-03)* — the LANE 2 breadth
+  check (§4 gate 2, reason `class_scope_too_broad`), the LANE 2 overlap check (§9.2, reason
+  `blocked_by_enclosing_skip`) and the LANE 3
+  `no_internal_callers_and_no_override_surface` check (§4.2, reasons `public_api_surface` /
+  `internal_caller`). A rubric `1` fails the gate, and so does any hard condition, each with its
+  own recorded reason; a gate module implementing only the rubric threshold is wrong.
 - The **score factor** grades *how cleanly*, on `2..5`. Because gate-failing `1`s are already
   removed, the factor carries only residual quality information and cannot double-count a
   no/yes decision.
@@ -273,6 +281,14 @@ question 3.
     assignments and imperative in-body `pytest.skip()` / `self.skipTest()` calls are **out of
     scope** — in the target every such site is environment-conditional, so no backlog candidate
     is lost, but they appear in neither the included nor the excluded set.
+  - **`enclosed_tests` counts direct-body test methods only** *(R7-m-04)* — it is a lower bound
+    on the collected item count: inherited test methods and per-method `parametrize` expansion
+    are not counted. At `a140e74` the four class rows' counts (52 / 25 / 13 / 11) are exact
+    (their bases contribute no test methods and none of their methods is parametrized), but a
+    future subclass that inherits its tests would report `0`, which is why §4 human-routes a
+    `kind = class` row with `enclosed_tests = 0` instead of scoring it as a single-item
+    candidate. Where a live collection is available, `pytest --collect-only <nodeid>` supersedes
+    the AST count.
   - **Indirect mark aliases** — a name bound at module level to a `pytest.mark.*` object and
     re-exported (`only_postgresql = pytest.mark.skipif(…)` in `conftest.py`, used as
     `@only_postgresql`) — are out of scope **regardless of import style** *(R5-m-03)*: five of the
@@ -413,15 +429,20 @@ The baseline is **valid iff** running `nodeid` at the pre-fix commit exits `FAIL
 observed counterparts are logged so the §11 expected-reason-match KPI is computable.
 
 **Multi-item nodeids** *(R6-M-01)* — a locator is not always one-to-one with a collected item:
-a class-level LANE 2 skip collects every test method in the class (the live extremes are
-`TestPostChartDataApi` at 52 and `TestQueryContext` at 25) and a parametrized function collects
+a class-level LANE 2 skip collects every test method in the class (the live rows range from 11
+(`TestDatasourceValidateExpressionApi`) to 52 (`TestPostChartDataApi`) *(R7-n-01)*) and a
+parametrized function collects
 one item per parameter tuple. `fixtures/baseline.json` records this per row as `enclosed_tests`,
 `parametrized` and `collects_single_item`; **6 of the 35** live candidates collect more than one
 item. For those rows the contract is evaluated **per collected item** and the run is a valid
 baseline iff **at least one** collected item exits `FAILED` matching `exception_type` /
 `message_pattern` **and no** collected item is `SKIPPED`; the planner's `expected_failure` may
 name the representative item's nodeid, and the per-item outcome vector is logged. `PASSED` for
-*every* item is `stale_skip`; any `SKIPPED` item is `invalid_red_baseline`. The §9.2 classifier
+*every* item is `stale_skip`; any `SKIPPED` item is `invalid_red_baseline` — **except** an item
+whose own node carries its own unconditional marker *(R7-n-04)*: those are excluded from the
+aggregate and recorded as `still_skipped_descendants`, because the scratch patch lifts ancestors
+only (§9.2) and a descendant marker is a separate candidate with its own dispatch. The §9.2
+classifier
 reads that aggregate, so single-item rows keep the plain `FAILED` / `PASSED` / `SKIPPED` mapping
 as a special case of the same rule.
 
@@ -441,9 +462,22 @@ as a special case of the same rule.
   candidate). The enumerator records `enclosing_skip_nodeid` for those rows; the reviewer's
   scratch patch MUST lift **every** unconditional marker on the path to the node before
   classifying, otherwise the run returns `SKIPPED` and a genuine backlog item is permanently
-  misclassified `invalid_red_baseline`. Both the child and the enclosing candidate stay
-  enumerated; whichever dispatches first records the other as its `related_candidate_id`, and the
-  §14.1 marker search prevents the second from duplicating the first's artifacts.
+  misclassified `invalid_red_baseline`. Those lifts are **scratch-only and are never committed**
+  *(R7-M-01)*: the committed test-path diff of a candidate contains markers **inside its own
+  node** and nothing else. Otherwise a nested child — which passes the §4 breadth gate on its own
+  `enclosed_tests = 0` — would ship a PR deleting its 52-test parent's class marker, routing
+  around the very gate `lane2_class_breadth_max` exists to enforce.
+- **LANE 2 overlap rule** *(R7-M-01, R7-m-01)* — because the committed diff cannot touch the
+  parent, a child whose `enclosing_skip_nodeid` names a candidate that **fails** the breadth gate
+  cannot be remediated independently: merging it would leave the test still skipped, so §19's
+  "re-enabled test" claim would be false. Such a child fails the gate with reason
+  `blocked_by_enclosing_skip` and is deferred, human-routed together with its parent. Where the
+  parent *passes* the gate, the two overlap: before dispatch the orchestrator tests **nodeid
+  containment** against active state rows — not the §14.1 marker search, whose key
+  `candidate_id = sha256(lane|repo|stable_locator)` differs between `path::Class` and
+  `path::Class::method` and would therefore match nothing *(R7-m-01)* — and dispatches only the
+  enclosing candidate, recording the suppressed one as `related_candidate_id` on both the event
+  and the state row.
 - The **implementer** commits non-test paths only and rebases onto the reviewer's commit at
   JOIN. It has **no** LANE 2 carve-out.
 - Every commit uses `git commit --signoff`. Push races resolve by rebase-retry (max 3), then
@@ -556,7 +590,11 @@ Answers "how would an engineering leader know this is working?"
 - **Layer 1 — structured JSONL event log (source of truth)** — per candidate: `run_id`, `lane`,
   `candidate_id`, gate result (+ which gate failed), score + factor breakdown, tier, action,
   Devin `session_id`s by role (planner/implementer/reviewer), iterations, PR/issue URLs,
-  `test_added` / `test_paths` / `test_author` / `test_exempt_reason`, terminal outcome.
+  `test_added` / `test_paths` / `test_author` / `test_exempt_reason`, terminal outcome, plus
+  *(R7-n-03)* `red_baseline.per_item_outcomes` (the multi-item vector of §9.1, including any
+  `still_skipped_descendants`), the LANE 2 breadth fields (`enclosed_tests`, `parametrized`,
+  `collects_single_item`), `lifted_markers` (the scratch-only ancestor lifts of §9.2, recorded so
+  the never-committed rule is auditable) and `related_candidate_id`.
 - **Layer 2 — per-run summary report** — candidates seen, gated out (with reason), scored,
   dispatched by tier, deferred (budget overflow), resulting PR + issue links.
 - **Layer 3 — rolling KPI rollup** persisted to `reports/kpis.md` (default local sink; Google
@@ -647,6 +685,7 @@ README ships a config reference table with default, allowed values, and safety c
 | `auto_merge_enabled` | `false` | `true`, `false` | **safety-relevant** *(R2-m-05)* — forced `false` whenever `ci_evidence_mode = local`, and never sufficient on its own (§6 tier, §9 invariants and §10 gates all still apply) |
 | `issue_sink` | `issues` | `issues`, `pr_comment` | `pr_comment` tags the run `artifact_degraded` |
 | `version_source` | `.github/ISSUE_TEMPLATE/bug-report.yml` | repo-relative path | drift-tested; yielding no concrete release is a startup error, not an empty lane *(R2-M-02)* |
+| `lane2_class_breadth_max` | `5` | integer `>= 1` | **safety-relevant** *(R7-m-02)* — raising it lets one PR re-enable a whole test class unattended; `enclosed_tests` above it fails `automatability` as `class_scope_too_broad` (§4) |
 
 Also configurable: target `owner/repo`, GitHub token, Devin API key, per-lane factor rubrics
 (`config/rubrics.yaml`), artifact templates.
@@ -896,7 +935,7 @@ code-review loop converges with green CI.
   linked to its prior `candidate_id` via the marker search / drift match and is not re-dispatched
   *(R3-m-04)*.
 
-**Added to close T-1 review rounds 4–5**
+**Added to close T-1 review rounds 4–6** *(R7-n-02)*
 
 - `test_colocated_alerts_all_dispatched` — all four `py/overly-large-range` fixture alerts are
   dispatched; none is suppressed as a drift match, because their weak key has multiplicity 4
@@ -915,7 +954,24 @@ code-review loop converges with green CI.
   as `invalid_red_baseline` *(R6-m-01)*.
 - `test_broad_class_skip_is_human_routed` — a `kind = class` candidate with
   `enclosed_tests > lane2_class_breadth_max` fails automatability with reason
-  `class_scope_too_broad` *(R6-m-02)*.
+  `class_scope_too_broad`; one with `enclosed_tests = 0` fails with `class_breadth_unknown`
+  *(R6-m-02, R7-m-04)*.
+
+**Added to close T-1 review round 7**
+
+- `test_nested_child_commits_only_own_marker` — the committed test-path diff of a nested
+  candidate contains no marker outside its own node, even though its scratch patch lifted the
+  parent's *(R7-M-01)*.
+- `test_child_under_gate_failed_parent_not_dispatched` — a child whose `enclosing_skip_nodeid`
+  names a breadth-gate failure is gated out as `blocked_by_enclosing_skip`, not dispatched
+  *(R7-M-01)*; where the parent passes, containment suppresses the child and records
+  `related_candidate_id` on both rows *(R7-m-01)*.
+- `test_gate_applies_hard_conditions_beyond_rubric` — a candidate with `automatability` rubric 4
+  still fails the gate on a lane-specific hard condition, with the condition's own reason
+  *(R7-m-03)*.
+- `test_descendant_marker_excluded_from_aggregate` — a class-row baseline whose only `SKIPPED`
+  items carry their own markers is valid, and those items are logged as
+  `still_skipped_descendants` *(R7-n-04)*.
 - `test_drift_survives_repeated_shifts` — a second consecutive line shift of the same alert still
   links, because state-side multiplicity counts **active** rows only *(R5-m-01)*.
 - `test_enumerator_scope_limits` — `pytestmark` assignments, imperative `pytest.skip()` bodies
@@ -1114,6 +1170,30 @@ major is the second-order consequence of the R5-M-01 fix. Disposition:
 | R6-m-02 class-level skips are not well-scoped transformations | **Accepted.** `lane2_class_breadth_max = 5` added as a safety-classified knob: `enclosed_tests` above it fails `automatability` with reason `class_scope_too_broad` and is human-routed; at or below it the LANE 2 rubric adds +1 risk for `kind = class`. |
 | R6-n-01 round-5 tests filed under a round-4 heading | **Accepted.** Heading is now "Added to close T-1 review rounds 4–5". |
 | R6-n-02 `line` means different things per lane | **Accepted.** Both lanes now emit `line` (definition) **and** `decorator_line`; the convention is stated in §3 0e. |
+
+No finding was rejected.
+
+### Revision 8 — T-1 plan review round 7
+
+Reviewer verdict `changes_required`: 0 blocking, 1 major, 4 minor, 4 nit. All five round-6
+findings confirmed resolved against a fresh clone at `a140e74` — `fixtures/baseline.json`
+reproduced byte-identically apart from `captured_at`, the four class rows independently counted
+at 52 / 25 / 13 / 11 direct test methods (their base classes contribute none), the two
+parametrized rows and the two nested rows confirmed, and `line` / `decorator_line` correct in
+both lanes. The major is again second-order: Revision 7's own nested-marker rule and breadth gate
+collided. Disposition:
+
+| Finding | Disposition |
+|---|---|
+| R7-M-01 nested child either bypasses the breadth gate or ships a still-skipped test | **Accepted.** §9.2 now states that ancestor lifts are **scratch-only and never committed** (a candidate's committed diff carries markers inside its own node only), and adds the LANE 2 overlap rule: a child whose `enclosing_skip_nodeid` names a breadth-gate failure is gated out as `blocked_by_enclosing_skip` and human-routed with its parent; where the parent passes, containment suppresses the child. Two §17 cases added. |
+| R7-m-01 marker search cannot dedupe overlapping LANE 2 candidates | **Accepted.** Verified: `path::Class` and `path::Class::method` hash to different `candidate_id`s, and §14.1's drift net is LANE 1-only. Replaced with explicit **nodeid containment** against active state rows; `related_candidate_id` added to the §11 event fields and the state row. |
+| R7-m-02 `lane2_class_breadth_max` missing from the §13 knob table | **Accepted.** Added with default 5, allowed `>= 1`, classified safety-relevant. |
+| R7-m-03 §4.1 says the gate is "equivalent to rubric >= 2" | **Accepted.** Reworded: the gate is rubric `>= 2` **and** every lane-specific hard condition (LANE 2 breadth, LANE 2 overlap, LANE 3 caller/override), each with its own reason; a rubric-only gate module is wrong. |
+| R7-m-04 `enclosed_tests` is a lower bound | **Accepted.** Documented as a §5 enumerator limit (direct-body test methods only; inherited and parametrized items uncounted), `pytest --collect-only` supersedes it where available, and §4 human-routes a `kind = class` row reporting `enclosed_tests = 0` as `class_breadth_unknown` instead of treating it as single-item. |
+| R7-n-01 "extremes" misstated | **Accepted.** §9.1 now says the live rows range 11–52. |
+| R7-n-02 round-6 tests under a rounds-4–5 heading | **Accepted.** Heading widened to rounds 4–6 and a round-7 block added. |
+| R7-n-03 new logged data absent from §11 | **Accepted.** Layer 1 extended with `red_baseline.per_item_outcomes`, the breadth fields, `lifted_markers` and `related_candidate_id`. |
+| R7-n-04 descendant markers leave a class row unclassifiable | **Accepted.** §9.1 excludes items carrying their own unconditional marker from the aggregate and logs them as `still_skipped_descendants`, consistent with §9.2 lifting ancestors only. |
 
 No finding was rejected.
 
