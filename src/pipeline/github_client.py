@@ -80,14 +80,6 @@ class CiWaitResult:
     auto_merge_eligible: bool
 
 
-class _CapabilityClient(Protocol):
-    def get_repo(self) -> Mapping[str, object]:
-        """Read repository metadata."""
-
-    def list_required_contexts(self, sha: str) -> Sequence[str]:
-        """Read rendered required contexts for a commit."""
-
-
 class _BackoffResponse(Protocol):
     status_code: int
     headers: Mapping[str, str]
@@ -251,13 +243,47 @@ def run_live_preflight(config: PipelineConfig, transport: GitHubTransport) -> Li
     )
 
 
-def probe_capabilities(config: PipelineConfig, *, client: object) -> CapabilityReport:
+def _required_context_statuses(
+    config: PipelineConfig,
+    client: GitHubTransport,
+    sha: str,
+) -> dict[str, str]:
+    """Read check-run conclusions and legacy commit-status states for one SHA."""
+    root = _path(config, f"/commits/{sha}")
+    checks = _mapping(client.get(f"{root}/check-runs"), "check-runs")
+    statuses = _mapping(client.get(f"{root}/status"), "status")
+    result: dict[str, str] = {}
+    raw_checks = checks.get("check_runs")
+    if isinstance(raw_checks, list):
+        for raw_check in raw_checks:
+            if not isinstance(raw_check, Mapping):
+                continue
+            name = raw_check.get("name")
+            conclusion = raw_check.get("conclusion")
+            if isinstance(name, str) and isinstance(conclusion, str):
+                result[name] = conclusion
+    raw_statuses = statuses.get("statuses")
+    if isinstance(raw_statuses, list):
+        for raw_status in raw_statuses:
+            if not isinstance(raw_status, Mapping):
+                continue
+            context = raw_status.get("context")
+            state = raw_status.get("state")
+            if isinstance(context, str) and isinstance(state, str) and context not in result:
+                result[context] = state
+    return result
+
+
+def probe_capabilities(config: PipelineConfig, *, client: GitHubTransport) -> CapabilityReport:
     """Resolve dispatch capabilities from observed repository and CI state."""
-    capability_client = cast(_CapabilityClient, client)
-    repository = capability_client.get_repo()
+    repository = _mapping(client.get(_path(config, "")), "repository")
     has_issues_value = repository.get("has_issues")
     has_issues = has_issues_value if isinstance(has_issues_value, bool) else False
-    reported_contexts = capability_client.list_required_contexts("HEAD")
+    reported_contexts = tuple(
+        name
+        for name, conclusion in _required_context_statuses(config, client, "HEAD").items()
+        if conclusion in {"success", "successful"}
+    )
     transition = maybe_upgrade_ci_mode(
         config.ci_evidence_mode,
         reported_contexts=reported_contexts,
@@ -301,22 +327,26 @@ def maybe_upgrade_ci_mode(
 def wait_for_required_contexts(
     config: PipelineConfig,
     *,
-    client: object,
+    client: GitHubTransport,
     elapsed_s: int,
     reported_contexts: Sequence[str] = (),
+    sha: str = "HEAD",
 ) -> CiWaitResult:
     """Resolve generated-PR CI evidence without treating missing reports as green."""
-    contexts = tuple(reported_contexts)
-    if not contexts:
-        capability_client = cast(_CapabilityClient, client)
-        contexts = tuple(capability_client.list_required_contexts("HEAD"))
+    statuses = (
+        _required_context_statuses(config, client, sha)
+        if not reported_contexts
+        else {context: "success" for context in reported_contexts}
+    )
     if elapsed_s >= config.ci_wait_timeout_s:
         return CiWaitResult(
             CiEvidenceMode.LOCAL,
             ReasonCode.CI_EVIDENCE_UNAVAILABLE,
             False,
         )
-    complete = all(context in contexts for context in REQUIRED_CONTEXTS)
+    complete = all(
+        statuses.get(context) in {"success", "successful"} for context in REQUIRED_CONTEXTS
+    )
     if complete:
         return CiWaitResult(
             CiEvidenceMode.GITHUB,
@@ -463,6 +493,14 @@ class GitHubClient:
         )
         return self._number(response), self._url(response)
 
+    def create_branch(self, branch: str, base_sha: str) -> None:
+        """Create a candidate branch from the pinned target base SHA."""
+        self._write(
+            "post",
+            f"/repos/{self._config.target_owner}/{self._config.target_repo}/git/refs",
+            {"ref": f"refs/heads/{branch}", "sha": base_sha},
+        )
+
     def patch_issue(self, number: int, body: str) -> str:
         """Patch an issue after its linked PR exists."""
         response = self._write(
@@ -528,6 +566,7 @@ def publish_artifacts(
     base: str = "master",
     labels: Sequence[str] = (),
     preflight: Callable[[], None] | None = None,
+    ci_green: bool = False,
 ) -> ArtifactLinks:
     """Publish artifacts in the mandated issue → PR → issue-patch order."""
     if not client._config.has_issues:
@@ -554,6 +593,7 @@ def publish_artifacts(
         candidate.auto_merge_eligible
         and client._config.auto_merge_enabled
         and client._config.ci_evidence_mode.value == "github"
+        and ci_green is True
     ):
         client.enable_auto_merge(pr_number)
     return ArtifactLinks(issue_url, pr_url, issue_number=issue_number, pr_number=pr_number)
