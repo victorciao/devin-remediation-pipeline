@@ -1,0 +1,1 @@
+"""Deprecation candidate enumeration."""
