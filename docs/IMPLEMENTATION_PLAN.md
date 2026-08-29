@@ -715,6 +715,7 @@ README ships a config reference table with default, allowed values, and safety c
 | `issue_sink` | `issues` | `issues`, `pr_comment` | `pr_comment` tags the run `artifact_degraded` |
 | `version_source` | `.github/ISSUE_TEMPLATE/bug-report.yml` | repo-relative path | drift-tested; yielding no concrete release is a startup error, not an empty lane |
 | `lane2_class_breadth_max` | `5` | integer `>= 1` | **safety-relevant** — `enclosed_tests` above it fails `automatability` as `class_scope_too_broad` (§4) |
+| `max_sessions` | `budget_N × (3 + 2 × iteration_cap)` | `>= 3` | **ceiling, not a run killer** — a config whose value is below that floor is a **startup validation error** naming the computed floor; a ceiling reached mid-run defers the *current candidate* (`session_ceiling`) and the run continues to publication and reporting (§12, §14.1) |
 
 Also configurable: target `owner/repo`, GitHub token, Devin API key, per-lane factor rubrics
 (`config/rubrics.yaml`), artifact templates.
