@@ -501,6 +501,7 @@ class RuntimeOrchestrator:
         *,
         attempt: int = 1,
         candidate: Candidate | None = None,
+        head_sha_resolver: Callable[[], str | None] | None = None,
     ) -> OrchestrationResult:
         """Run the review loop after a planner and concurrent role join."""
         planner = self.run_planner(candidate_id, planner_prompt, attempt=attempt)
@@ -533,6 +534,10 @@ class RuntimeOrchestrator:
             if self._client.config.mode is Mode.SIMULATE and candidate is not None
             else concurrent_roles(attempt)
         )
+        if candidate is not None and head_sha_resolver is not None:
+            resolved_head_sha = head_sha_resolver()
+            if resolved_head_sha is not None:
+                candidate = candidate.model_copy(update={"head_sha": resolved_head_sha})
 
         def output(run: RoleRun) -> Mapping[str, object]:
             structured = run.snapshot.payload.get("structured_output")
@@ -548,10 +553,8 @@ class RuntimeOrchestrator:
             )
             implementer_payload = output(result.implementer)
             reviewer_payload = output(result.reviewer)
-            implementer_diff = implementer_payload.get(
-                "committed_diff", implementer_payload.get("diff")
-            )
-            reviewer_diff = reviewer_payload.get("committed_diff", reviewer_payload.get("diff"))
+            implementer_diff = implementer_payload.get("committed_diff")
+            reviewer_diff = reviewer_payload.get("committed_diff")
             findings = list(iteration.findings)
             implementer_inspection: DiffInspection | None = None
             if isinstance(implementer_diff, str):
@@ -563,6 +566,25 @@ class RuntimeOrchestrator:
                             None,
                             "implementer diff violates production-only policy",
                             ReasonCode.IMPLEMENTER_TEST_EDIT,
+                        )
+                    )
+                raw_files_changed = implementer_payload.get("files_changed")
+                files_changed = (
+                    {path for path in raw_files_changed if isinstance(path, str)}
+                    if isinstance(raw_files_changed, Sequence)
+                    and not isinstance(raw_files_changed, str)
+                    else set()
+                )
+                if files_changed and (
+                    not implementer_inspection.changed_paths
+                    or not files_changed <= set(implementer_inspection.changed_paths)
+                ):
+                    findings.append(
+                        ReviewFinding(
+                            FindingSeverity.BLOCKING,
+                            None,
+                            "implementer files_changed does not match committed_diff",
+                            ReasonCode.DISAGREEMENT_UNRESOLVED,
                         )
                     )
             reviewer_inspection: DiffInspection | None = None
@@ -605,8 +627,10 @@ class RuntimeOrchestrator:
                 diff_reviewed = (
                     isinstance(base_sha, str)
                     and isinstance(head_sha, str)
-                    and (expected_base is None or base_sha == expected_base)
-                    and (expected_head is None or head_sha == expected_head)
+                    and expected_base is not None
+                    and base_sha == expected_base
+                    and expected_head is not None
+                    and head_sha == expected_head
                     and changed_paths <= read_paths
                 )
             else:

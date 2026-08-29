@@ -52,6 +52,7 @@ class ReasonCode(str, Enum):
     CI_EVIDENCE_UNAVAILABLE = "ci_evidence_unavailable"
     CI_CHECK_FAILED = "ci_check_failed"
     DCO_TRAILER_MISSING = "dco_trailer_missing"
+    CLOSED_PULL_REQUEST = "closed_pull_request"
     AWAITING_WORKFLOW_APPROVAL = "awaiting_workflow_approval"
     ARTIFACT_DEGRADED = "artifact_degraded"
     GUARDRAIL_CLAMPED = "guardrail_clamped"
@@ -248,6 +249,8 @@ class Candidate(StrictModel):
     pr_url: str | None = None
     issue_url: str | None = None
     comment_url: str | None = None
+    merged_at: str | None = None
+    artifact_degraded: bool = False
     issue_number: int | None = Field(default=None, ge=1)
     pr_number: int | None = Field(default=None, ge=1)
     head_branch: str | None = None
@@ -293,6 +296,8 @@ class EventRecord(StrictModel):
     pr_url: str | None = None
     issue_url: str | None = None
     comment_url: str | None = None
+    merged_at: str | None = None
+    artifact_degraded: bool = False
     test_added: bool | None = None
     test_paths: list[str] = Field(default_factory=list)
     test_author: str | None = None

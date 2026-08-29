@@ -51,19 +51,6 @@ class LivePreflight:
 
 
 @dataclass(frozen=True)
-class CapabilityReport:
-    """Capability result for the pre-publication dispatch seam."""
-
-    has_issues: bool
-    ci_evidence_mode: CiEvidenceMode
-    alert_source: str
-    auto_merge_enabled: bool
-    reasons: tuple[ReasonCode, ...]
-    token_login: str | None
-    token_scopes: tuple[str, ...]
-
-
-@dataclass(frozen=True)
 class CiModeTransition:
     """One-way local-to-GitHub CI evidence transition."""
 
@@ -273,36 +260,6 @@ def _required_context_statuses(
     return result
 
 
-def probe_capabilities(config: PipelineConfig, *, client: GitHubTransport) -> CapabilityReport:
-    """Resolve dispatch capabilities from observed repository and CI state."""
-    repository = _mapping(client.get(_path(config, "")), "repository")
-    has_issues_value = repository.get("has_issues")
-    has_issues = has_issues_value if isinstance(has_issues_value, bool) else False
-    reported_contexts = tuple(
-        name
-        for name, conclusion in _required_context_statuses(config, client, "HEAD").items()
-        if conclusion == "success"
-    )
-    transition = maybe_upgrade_ci_mode(
-        config.ci_evidence_mode,
-        reported_contexts=reported_contexts,
-    )
-    reasons: list[ReasonCode] = []
-    if not has_issues and config.issue_sink is not IssueSink.PR_COMMENT:
-        reasons.append(ReasonCode.CAPABILITY_UNAVAILABLE)
-    return CapabilityReport(
-        has_issues=has_issues,
-        ci_evidence_mode=transition.mode,
-        alert_source=config.alert_source.value,
-        auto_merge_enabled=(
-            config.auto_merge_enabled and transition.mode is CiEvidenceMode.GITHUB and not reasons
-        ),
-        reasons=tuple(reasons),
-        token_login=None,
-        token_scopes=(),
-    )
-
-
 def maybe_upgrade_ci_mode(
     current: CiEvidenceMode,
     *,
@@ -410,6 +367,18 @@ class ArtifactUnavailableError(RuntimeError):
 class ClosedPullRequestError(ArtifactUnavailableError):
     """Raised when only a closed PR exists for a candidate branch."""
 
+    def __init__(self, head: str, match: PullRequestMatch | None = None) -> None:
+        super().__init__(f"only a closed pull request exists for head {head}")
+        self.match = match
+
+
+class MergedPullRequestError(ArtifactUnavailableError):
+    """Raised when an existing branch PR already merged successfully."""
+
+    def __init__(self, match: PullRequestMatch) -> None:
+        super().__init__("pull request already merged")
+        self.match = match
+
 
 @dataclass(frozen=True)
 class ArtifactLinks:
@@ -420,6 +389,16 @@ class ArtifactLinks:
     comment_url: str | None = None
     issue_number: int | None = None
     pr_number: int | None = None
+
+
+@dataclass(frozen=True)
+class PullRequestMatch:
+    """Existing pull-request identity and terminal status for one branch."""
+
+    number: int
+    url: str
+    state: str
+    merged_at: str | None = None
 
 
 class GitHubClient:
@@ -550,6 +529,26 @@ class GitHubClient:
                 return str(commit["message"])
         return None
 
+    def commit_messages_between(self, base_sha: str, head_sha: str) -> list[str]:
+        """Read every commit message introduced between two recorded SHAs."""
+        response = self._read(
+            f"/repos/{self._config.target_owner}/{self._config.target_repo}/compare/"
+            f"{base_sha}...{head_sha}"
+        )
+        if not isinstance(response, Mapping):
+            return []
+        commits = response.get("commits")
+        if not isinstance(commits, list):
+            return []
+        messages: list[str] = []
+        for item in commits:
+            if not isinstance(item, Mapping):
+                continue
+            commit = item.get("commit")
+            if isinstance(commit, Mapping) and isinstance(commit.get("message"), str):
+                messages.append(str(commit["message"]))
+        return messages
+
     def patch_issue(self, number: int, body: str) -> str:
         """Patch an issue after its linked PR exists."""
         response = self._write(
@@ -575,34 +574,43 @@ class GitHubClient:
         )
         return self._number(response), self._url(response)
 
-    def get_pr_for_head(self, head: str) -> tuple[int, str] | None:
-        """Find an existing open PR for a candidate branch."""
+    def pull_request_for_head(self, head: str) -> PullRequestMatch | None:
+        """Find one existing pull request and classify its lifecycle state."""
         response = self._read(
             f"/repos/{self._config.target_owner}/{self._config.target_repo}/pulls?"
             + urlencode({"head": f"{self._config.target_owner}:{head}", "state": "all"})
         )
         if not isinstance(response, list):
             return None
+        closed: PullRequestMatch | None = None
+        merged: PullRequestMatch | None = None
         for item in response:
             if isinstance(item, Mapping):
                 number = item.get("number")
                 url = item.get("html_url")
-                if item.get("state") == "open" and isinstance(number, int) and isinstance(url, str):
-                    return number, url
-        return None
+                state = item.get("state")
+                merged_at = item.get("merged_at")
+                if isinstance(number, int) and isinstance(url, str) and isinstance(state, str):
+                    match = PullRequestMatch(
+                        number,
+                        url,
+                        state,
+                        merged_at if isinstance(merged_at, str) else None,
+                    )
+                    if state == "open":
+                        return match
+                    if match.merged_at is not None:
+                        merged = match
+                    else:
+                        closed = match
+        return merged or closed
 
-    def has_closed_pr_for_head(self, head: str) -> bool:
-        """Report whether a non-open PR exists for a candidate branch."""
-        response = self._read(
-            f"/repos/{self._config.target_owner}/{self._config.target_repo}/pulls?"
-            + urlencode({"head": f"{self._config.target_owner}:{head}", "state": "all"})
-        )
-        if not isinstance(response, list):
-            return False
-        return any(
-            isinstance(item, Mapping) and item.get("state") in {"closed", "merged"}
-            for item in response
-        )
+    def get_pr_for_head(self, head: str) -> tuple[int, str] | None:
+        """Find an existing open PR for a candidate branch."""
+        match = self.pull_request_for_head(head)
+        if match is not None and match.state == "open":
+            return match.number, match.url
+        return None
 
     def patch_pr_body(self, number: int, body: str) -> None:
         """Update a PR body after retrieving its commit provenance."""
@@ -680,8 +688,11 @@ def publish_artifacts(
     ci_probe: Callable[[int], CiWaitResult] | None = None,
     existing_issue_number: int | None = None,
     existing_issue_url: str | None = None,
+    existing_pr_number: int | None = None,
+    existing_pr_url: str | None = None,
     after_issue: Callable[[int, str], None] | None = None,
     after_pr_created: Callable[[int, str], None] | None = None,
+    after_ci: Callable[[int], None] | None = None,
     after_issue_patched: Callable[[str], None] | None = None,
 ) -> ArtifactLinks:
     """Publish artifacts in the mandated issue → PR → issue-patch order."""
@@ -709,29 +720,35 @@ def publish_artifacts(
         raise ValueError("PR publication requires an observed CI probe")
     if preflight is not None:
         preflight()
-    try:
-        pr_number, pr_url = client.create_pr(
-            pr_title,
-            f"{pr_body.rstrip()}\n\nCloses #{issue_number}\n",
-            head=head,
-            base=base,
-        )
-    except HttpTransportError as exc:
-        if exc.status_code != 422:
-            raise
-        existing = client.get_pr_for_head(head)
-        if existing is None:
-            if client.has_closed_pr_for_head(head):
-                raise ClosedPullRequestError(
-                    f"only a closed pull request exists for head {head}"
-                ) from exc
-            raise
-        pr_number, pr_url = existing
+    if existing_pr_number is not None and existing_pr_url is not None:
+        pr_number, pr_url = existing_pr_number, existing_pr_url
+    else:
+        try:
+            pr_number, pr_url = client.create_pr(
+                pr_title,
+                f"{pr_body.rstrip()}\n\nCloses #{issue_number}\n",
+                head=head,
+                base=base,
+            )
+        except HttpTransportError as exc:
+            if exc.status_code != 422:
+                raise
+            existing = client.pull_request_for_head(head)
+            if existing is None:
+                raise
+            if existing.state == "open":
+                pr_number, pr_url = existing.number, existing.url
+            elif existing.merged_at is not None:
+                raise MergedPullRequestError(existing) from exc
+            else:
+                raise ClosedPullRequestError(head, existing) from exc
     if after_pr_created is not None:
         after_pr_created(pr_number, pr_url)
-    ci_result = ci_probe(pr_number) if ci_probe is not None else None
+    ci_result = ci_probe(pr_number)
     if preflight is not None:
         preflight()
+    if after_ci is not None:
+        after_ci(pr_number)
     client.patch_issue(issue_number, f"{issue_body.rstrip()}\n\nPR: {pr_url}\n")
     if after_issue_patched is not None:
         after_issue_patched(pr_url)
@@ -785,18 +802,19 @@ def publish_degraded(
 __all__ = [
     "ArtifactLinks",
     "ArtifactUnavailableError",
-    "CapabilityReport",
     "CiModeTransition",
     "CiWaitResult",
+    "ClosedPullRequestError",
     "GitHubClient",
     "GitHubRateLimitError",
     "GitHubTransport",
     "LivePreflight",
+    "MergedPullRequestError",
+    "PullRequestMatch",
     "PreflightError",
     "REQUIRED_CONTEXTS",
     "SimulationWriteError",
     "maybe_upgrade_ci_mode",
-    "probe_capabilities",
     "publish_artifacts",
     "publish_degraded",
     "request_with_backoff",

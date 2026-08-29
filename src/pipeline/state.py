@@ -75,7 +75,7 @@ class CandidateStateStore:
             if line.strip():
                 try:
                     rows.append(Candidate.model_validate(json.loads(line), strict=False))
-                except (json.JSONDecodeError, TypeError, ValueError):
+                except (json.JSONDecodeError, TypeError):
                     if line not in self._quarantine_seen:
                         with quarantine.open("a", encoding="utf-8") as handle:
                             handle.write(line + "\n")
@@ -105,14 +105,19 @@ class CandidateStateStore:
     def existing_artifact(self, candidate_id: str) -> bool:
         """Search persisted state and target artifacts before a write."""
         current = self.latest().get(candidate_id)
-        if current is not None and (
-            current.issue_url is not None
-            or current.pr_url is not None
-            or current.state.value
-            in {"issue_created", "pr_created", "issue_patched", "comment_created"}
-        ):
+        if self._has_local_artifact(current):
             return True
         return self.marker_exists(candidate_id)
+
+    @staticmethod
+    def _has_local_artifact(candidate: Candidate | None) -> bool:
+        """Return whether a persisted row proves an artifact already exists."""
+        return candidate is not None and (
+            candidate.issue_url is not None
+            or candidate.pr_url is not None
+            or candidate.state.value
+            in {"issue_created", "pr_created", "issue_patched", "comment_created"}
+        )
 
     def marker_exists(self, candidate_id: str) -> bool:
         """Search the target repository for one candidate's stable marker."""
@@ -139,13 +144,7 @@ class CandidateStateStore:
         with lock_path.open("a", encoding="utf-8") as lock_handle:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
             current = self.latest().get(candidate.candidate_id)
-            local_artifact = current is not None and (
-                current.issue_url is not None
-                or current.pr_url is not None
-                or current.state.value
-                in {"issue_created", "pr_created", "issue_patched", "comment_created"}
-            )
-            if local_artifact or marker_exists:
+            if self._has_local_artifact(current) or marker_exists:
                 return False
             self.append(candidate)
             return True

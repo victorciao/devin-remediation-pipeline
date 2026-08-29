@@ -74,6 +74,8 @@ def event_from_candidate(candidate: Candidate, *, run_id: str) -> EventRecord:
         pr_url=candidate.pr_url,
         issue_url=candidate.issue_url,
         comment_url=candidate.comment_url,
+        merged_at=candidate.merged_at,
+        artifact_degraded=candidate.artifact_degraded,
         test_added=candidate.test_added,
         test_paths=candidate.test_paths,
         test_author=candidate.test_author,

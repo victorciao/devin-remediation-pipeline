@@ -100,8 +100,7 @@ def compute_kpis(
     merge_rate = _merge_rate(events)
     pr_events = [event for event in events if event.pr_url is not None]
     merged_clean = sum(
-        event.terminal_outcome is CandidateState.CONVERGED and event.test_exempt_reason is None
-        for event in pr_events
+        event.merged_at is not None and event.test_exempt_reason is None for event in pr_events
     )
     rejected = sum(event.reason is ReasonCode.DISAGREEMENT_UNRESOLVED for event in pr_events)
     edited = max(len(pr_events) - merged_clean - rejected, 0)
@@ -165,7 +164,7 @@ def compute_kpis(
 def _merge_rate(events: list[EventRecord]) -> float:
     """Compute the merged-clean/edited/rejected aggregate merge rate."""
     pr_events = [event for event in events if event.pr_url is not None]
-    merged = sum(event.terminal_outcome is CandidateState.CONVERGED for event in pr_events)
+    merged = sum(event.merged_at is not None for event in pr_events)
     return merged / len(pr_events) if pr_events else 0.0
 
 
