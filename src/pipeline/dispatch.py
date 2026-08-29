@@ -13,6 +13,27 @@ from pipeline.schemas import (
     Tier,
 )
 
+HUMAN_ROUTED_REASONS = frozenset(
+    {
+        ReasonCode.CLASS_SCOPE_TOO_BROAD,
+        ReasonCode.CLASS_BREADTH_UNKNOWN,
+        ReasonCode.BLOCKED_BY_ENCLOSING_SKIP,
+        ReasonCode.PUBLIC_API_SURFACE,
+    }
+)
+DROPPED_REASONS = frozenset(
+    {
+        ReasonCode.OUT_OF_SCOPE_FRONTEND,
+        ReasonCode.INTERNAL_CALLER,
+        ReasonCode.TRIGGER_MISSING,
+        ReasonCode.AUTOMATABILITY_LOW,
+        ReasonCode.VERIFIABILITY_MISSING,
+        ReasonCode.CONDITIONAL_ENVIRONMENT_GUARD,
+        ReasonCode.EXPECTED_FAILURE_XFAIL,
+        ReasonCode.STALE_SKIP,
+    }
+)
+
 
 def tier_for_score(score: float, config: PipelineConfig) -> Tier:
     """Map scores at or above thresholds to high, medium, or low tiers."""
@@ -23,21 +44,45 @@ def tier_for_score(score: float, config: PipelineConfig) -> Tier:
     return Tier.LOW
 
 
-def _parent_for(candidate: Candidate, candidates: Sequence[Candidate]) -> Candidate | None:
-    if candidate.enclosing_skip_nodeid is None:
-        return None
-    for possible_parent in candidates:
-        if possible_parent.nodeid == candidate.enclosing_skip_nodeid:
-            return possible_parent
-    return None
+class ContainmentError(ValueError):
+    """Raised when current-run containment rows are incomplete or cyclic."""
+
+
+def _containment_depths(candidates: Sequence[Candidate]) -> dict[str, int]:
+    by_nodeid: dict[str, Candidate] = {}
+    for candidate in candidates:
+        if candidate.nodeid is not None:
+            if candidate.nodeid in by_nodeid:
+                raise ContainmentError(f"duplicate containment nodeid: {candidate.nodeid}")
+            by_nodeid[candidate.nodeid] = candidate
+
+    depths: dict[str, int] = {}
+    for candidate in candidates:
+        depth = 0
+        current = candidate
+        visited = {candidate.candidate_id}
+        while current.enclosing_skip_nodeid is not None:
+            parent = by_nodeid.get(current.enclosing_skip_nodeid)
+            if parent is None:
+                raise ContainmentError(
+                    f"missing enclosing candidate: {current.enclosing_skip_nodeid}"
+                )
+            if parent.candidate_id in visited:
+                raise ContainmentError(f"containment cycle involving {parent.candidate_id}")
+            visited.add(parent.candidate_id)
+            depth += 1
+            current = parent
+        depths[candidate.candidate_id] = depth
+    return depths
 
 
 def _ordered(candidates: Sequence[Candidate]) -> list[Candidate]:
-    """Order parents first, then score descending and candidate ID ascending."""
+    """Order by containment depth, then score descending and candidate ID ascending."""
+    depths = _containment_depths(candidates)
     return sorted(
         candidates,
         key=lambda candidate: (
-            candidate.enclosing_skip_nodeid is not None,
+            depths[candidate.candidate_id],
             -(candidate.score if candidate.score is not None else -1),
             candidate.candidate_id,
         ),
@@ -54,7 +99,7 @@ def _blocked_child(candidate: Candidate) -> Candidate:
             "action": Action.HUMAN_REVIEW,
             "state": CandidateState.BLOCKED_BY_ENCLOSING_SKIP,
             "gate_passed": False,
-            "failed_gate": GateName.LANE2_OVERLAP,
+            "failed_gate": GateName.AUTOMATABILITY,
             "reason": ReasonCode.BLOCKED_BY_ENCLOSING_SKIP,
             "labels": _with_label(candidate, NEEDS_HUMAN_REVIEW_LABEL),
             "auto_merge_eligible": False,
@@ -74,10 +119,27 @@ def _suppressed_child(candidate: Candidate) -> Candidate:
 
 
 def _gated_out(candidate: Candidate) -> Candidate:
+    reason = candidate.reason
+    if reason is None and candidate.failed_gate is not None:
+        failed_result = candidate.gate_results.get(candidate.failed_gate)
+        reason = failed_result.reason if failed_result is not None else None
+    if reason in HUMAN_ROUTED_REASONS:
+        return candidate.model_copy(
+            update={
+                "action": Action.HUMAN_REVIEW,
+                "state": CandidateState.GATED,
+                "reason": reason,
+                "auto_merge_eligible": False,
+                "labels": _with_label(candidate, NEEDS_HUMAN_REVIEW_LABEL),
+            }
+        )
+    if reason is not None and reason not in DROPPED_REASONS:
+        raise ValueError(f"no gate route defined for reason: {reason.value}")
     return candidate.model_copy(
         update={
-            "action": Action.HUMAN_REVIEW,
-            "state": CandidateState.GATED,
+            "action": Action.LOG_ONLY,
+            "state": CandidateState.TERMINAL,
+            "reason": reason,
             "auto_merge_eligible": False,
         }
     )
@@ -86,24 +148,32 @@ def _gated_out(candidate: Candidate) -> Candidate:
 def dispatch_candidates(candidates: Sequence[Candidate], config: PipelineConfig) -> list[Candidate]:
     """Dispatch scored candidates deterministically, deferring budget overflow.
 
-    Parents are ordered before children. Remaining candidates are sorted by descending
-    score and ascending ``candidate_id``; the latter is the tie-break for budget overflow.
+    Candidates are ordered by containment depth so every ancestor is decided first,
+    then by descending score and ascending ``candidate_id``. The candidate ID is the
+    tie-break for budget overflow among otherwise equal candidates.
     """
     source = list(candidates)
     decisions: dict[str, Candidate] = {}
     dispatched_count = 0
     for candidate in _ordered(source):
-        parent = _parent_for(candidate, source)
+        parent = next(
+            (
+                possible_parent
+                for possible_parent in source
+                if possible_parent.nodeid == candidate.enclosing_skip_nodeid
+            ),
+            None,
+        )
         if candidate.enclosing_skip_nodeid is not None:
             parent_decision = decisions.get(parent.candidate_id) if parent is not None else None
-            if (
-                parent_decision is None
-                or parent_decision.action is not Action.OPEN_PR
-                or parent_decision.tier is not Tier.HIGH
-            ):
-                child_decision = _blocked_child(candidate)
-            else:
+            parent_supports_containment = parent_decision is not None and (
+                (parent_decision.action is Action.OPEN_PR and parent_decision.tier is Tier.HIGH)
+                or parent_decision.state is CandidateState.SUPPRESSED_BY_CONTAINMENT
+            )
+            if parent_supports_containment:
                 child_decision = _suppressed_child(candidate)
+            else:
+                child_decision = _blocked_child(candidate)
             if parent is not None:
                 child_decision = child_decision.model_copy(
                     update={"related_candidate_id": parent.candidate_id}
@@ -167,6 +237,3 @@ def dispatch_candidates(candidates: Sequence[Candidate], config: PipelineConfig)
         dispatched_count += 1
 
     return [decisions[candidate.candidate_id] for candidate in source]
-
-
-dispatch = dispatch_candidates

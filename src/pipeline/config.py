@@ -381,6 +381,3 @@ def load_config(
         if isinstance(exc, ConfigError):
             raise
         raise ConfigError(str(exc)) from exc
-
-
-Config = PipelineConfig

@@ -93,15 +93,11 @@ class Action(str, Enum):
 
 
 class GateName(str, Enum):
-    """Named gate predicates and lane-specific hard conditions."""
+    """Named binary gate predicates."""
 
     TRIGGER_EXISTS = "trigger_exists"
     AUTOMATABILITY = "automatability"
     VERIFIABILITY_EXISTS = "verifiability_exists"
-    LANE1_SCOPE = "lane1_scope"
-    LANE2_BREADTH = "lane2_breadth"
-    LANE2_OVERLAP = "lane2_overlap"
-    NO_INTERNAL_CALLERS_AND_NO_OVERRIDE_SURFACE = "no_internal_callers_and_no_override_surface"
 
 
 class Tier(str, Enum):
@@ -182,6 +178,9 @@ class Candidate(StrictModel):
     normalized_symbol: str | None = None
     alert_number: int | None = None
     security_severity_level: str | None = None
+    rule_precision: str | None = None
+    blast_radius: str | None = None
+    updated_at_fresh: bool | None = None
     updated_at: datetime | None = None
     position_digest: str | None = None
     region_digest: str | None = None
@@ -207,6 +206,12 @@ class Candidate(StrictModel):
     qualname: str | None = None
     deprecated_in: str | None = None
     removed_in: str | None = None
+    current_major: int | None = Field(default=None, ge=0)
+    caller_count: int | None = Field(default=None, ge=0)
+    override_count: int | None = Field(default=None, ge=0)
+    targeted_test_signal: str | None = None
+    transformation_scope: str | None = None
+    scope_is_test_only: bool | None = None
     public_api_surface: bool | None = None
     internal_caller: bool | None = None
     override_surface: bool | None = None
@@ -222,6 +227,7 @@ class Candidate(StrictModel):
     automatability: int | None = Field(default=None, ge=1, le=5)
     signal_quality: int | None = Field(default=None, ge=1, le=5)
     risk: int | None = Field(default=None, ge=1, le=5)
+    factor_rows: dict[str, str] = Field(default_factory=dict)
     tier: Tier | None = None
     action: Action | None = None
     state: CandidateState = CandidateState.ENUMERATED
@@ -248,6 +254,7 @@ class EventRecord(StrictModel):
     automatability: int | None = Field(default=None, ge=1, le=5)
     signal_quality: int | None = Field(default=None, ge=1, le=5)
     risk: int | None = Field(default=None, ge=1, le=5)
+    factor_rows: dict[str, str] = Field(default_factory=dict)
     tier: Tier | None = None
     action: Action | None = None
     planner_session_id: str | None = None
@@ -274,7 +281,5 @@ class EventRecord(StrictModel):
     is_new_session_raw: bool | None = None
     retry_decision: RetryDecision = RetryDecision.PROCEED
 
-
-Layer1Event = EventRecord
 
 NEEDS_HUMAN_REVIEW_LABEL = "needs-human-review"
