@@ -207,7 +207,10 @@ def _publish_live(
         if (
             persisted.issue_number is None
             and persisted.issue_url is None
-            and state_store.existing_artifact(candidate.candidate_id)
+            and (
+                state_store.existing_artifact(candidate.candidate_id)
+                or state_store.marker_exists(candidate.candidate_id)
+            )
         ):
             deferred = persisted.model_copy(
                 update={
@@ -523,7 +526,7 @@ def _publish_live(
             state_store.append(merged)
             published.append(merged)
             continue
-        except Exception:
+        except (ArtifactUnavailableError, HttpTransportError, ValueError, OSError):
             latest = state_store.resume(candidate.candidate_id) or candidate
             deferred = latest.model_copy(
                 update={
