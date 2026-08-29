@@ -351,7 +351,7 @@ def wait_for_required_contexts(
             statuses.get(context) in {"failure", "cancelled", "timed_out", "error"}
             for context in REQUIRED_CONTEXTS
         ):
-            return CiWaitResult(CiEvidenceMode.GITHUB, None, False)
+            return CiWaitResult(CiEvidenceMode.GITHUB, ReasonCode.CI_CHECK_FAILED, False)
         if not poll:
             break
         remaining = deadline - clock()

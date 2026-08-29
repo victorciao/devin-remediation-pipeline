@@ -6,7 +6,7 @@ import json
 from collections.abc import Iterable
 from pathlib import Path
 
-from pipeline.schemas import Candidate, CandidateState, EventRecord
+from pipeline.schemas import Candidate, CandidateState, EventRecord, RunEventRecord
 
 
 class EventLog:
@@ -15,7 +15,7 @@ class EventLog:
     def __init__(self, path: Path) -> None:
         self._path = path
 
-    def append(self, event: EventRecord) -> None:
+    def append(self, event: EventRecord | RunEventRecord) -> None:
         """Append one validated event as JSONL."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._path.open("a", encoding="utf-8") as handle:
@@ -25,11 +25,28 @@ class EventLog:
         """Read all events without conflating them with candidate state."""
         if not self._path.exists():
             return []
-        return [
-            EventRecord.model_validate(json.loads(line), strict=False)
-            for line in self._path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        events: list[EventRecord] = []
+        for line in self._path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            if isinstance(payload, dict) and payload.get("event_type") == "run_capabilities":
+                continue
+            events.append(EventRecord.model_validate(payload, strict=False))
+        return events
+
+    def read_run_events(self) -> list[RunEventRecord]:
+        """Read run-level capability evidence from the event stream."""
+        if not self._path.exists():
+            return []
+        events: list[RunEventRecord] = []
+        for line in self._path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            if isinstance(payload, dict) and payload.get("event_type") == "run_capabilities":
+                events.append(RunEventRecord.model_validate(payload, strict=False))
+        return events
 
 
 def event_from_candidate(candidate: Candidate, *, run_id: str) -> EventRecord:
@@ -83,14 +100,17 @@ def append_candidate_events(
     token_login: str | None = None,
     token_scopes: Iterable[str] = (),
 ) -> None:
-    """Append one Layer 1 event for each candidate."""
-    scopes = list(token_scopes)
-    for candidate in candidates:
+    """Append candidate events and optional run-level capability evidence."""
+    if token_login is not None or token_scopes:
         log.append(
-            event_from_candidate(candidate, run_id=run_id).model_copy(
-                update={"token_login": token_login, "token_scopes": scopes}
+            RunEventRecord(
+                run_id=run_id,
+                token_login=token_login,
+                token_scopes=list(token_scopes),
             )
         )
+    for candidate in candidates:
+        log.append(event_from_candidate(candidate, run_id=run_id))
 
 
 __all__ = ["EventLog", "append_candidate_events", "event_from_candidate"]

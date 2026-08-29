@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -46,8 +47,10 @@ class ReasonCode(str, Enum):
     STALE_SKIP = "stale_skip"
     INVALID_RED_BASELINE = "invalid_red_baseline"
     CAPABILITY_UNAVAILABLE = "capability_unavailable"
+    BUDGET_OVERFLOW = "budget_overflow"
     TOKEN_CAPABILITY_MISSING = "token_capability_missing"
     CI_EVIDENCE_UNAVAILABLE = "ci_evidence_unavailable"
+    CI_CHECK_FAILED = "ci_check_failed"
     AWAITING_WORKFLOW_APPROVAL = "awaiting_workflow_approval"
     ARTIFACT_DEGRADED = "artifact_degraded"
     GUARDRAIL_CLAMPED = "guardrail_clamped"
@@ -298,11 +301,18 @@ class EventRecord(StrictModel):
     collects_single_item: bool | None = None
     lifted_markers: list[str] = Field(default_factory=list)
     related_candidate_id: str | None = None
-    token_login: str | None = None
-    token_scopes: list[str] = Field(default_factory=list)
     attempt: int = Field(default=1, ge=1)
     is_new_session_raw: bool | None = None
     retry_decision: RetryDecision = RetryDecision.PROCEED
+
+
+class RunEventRecord(StrictModel):
+    """Layer 1 run-level capability evidence."""
+
+    event_type: Literal["run_capabilities"] = "run_capabilities"
+    run_id: str = Field(min_length=1)
+    token_login: str | None = None
+    token_scopes: list[str] = Field(default_factory=list)
 
 
 NEEDS_HUMAN_REVIEW_LABEL = "needs-human-review"
