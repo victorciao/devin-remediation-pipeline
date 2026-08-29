@@ -125,12 +125,17 @@ def test_non_terminal_candidates_have_no_terminal_outcome(tmp_path: Path) -> Non
     assert outcomes["codeql-2"] is CandidateState.CONVERGED
 
 
+MERGED_AT = "2026-08-29T12:00:00Z"
+
+
 def merged(candidate_id: str, **fields: Any) -> EventRecord:  # noqa: ANN401
-    """A merged-clean PR event."""
+    """A merged-clean PR event: §11 counts only pipeline-verified merges."""
     return event(
         candidate_id,
         terminal_outcome=CandidateState.CONVERGED,
         pr_url=f"https://example.invalid/pr/{candidate_id}",
+        merged_at=fields.pop("merged_at", MERGED_AT),
+        merge_verified=fields.pop("merge_verified", True),
         **fields,
     )
 
@@ -165,10 +170,75 @@ def test_merge_rate_at_the_floor_does_not_alert(simulate_config: PipelineConfig)
     assert rollup[MERGE_RATE_ALERT] == 0
 
 
+def test_an_unverified_external_merge_is_not_counted_as_a_merge(
+    simulate_config: PipelineConfig,
+) -> None:
+    """§11 — `merged_clean`/`merge_rate` count only verified pipeline merges."""
+    events = [
+        merged(
+            "c1",
+            merge_verified=False,
+            reason=ReasonCode.MERGED_EXTERNALLY_UNVERIFIED,
+        ),
+        merged("c2"),
+    ]
+
+    rollup = compute_kpis([], events, {}, simulate_config)
+
+    assert rollup["merged_clean"] == 1
+    assert rollup["merge_rate"] == 0.5
+
+
+def test_a_merge_without_a_merged_at_timestamp_is_not_counted(
+    simulate_config: PipelineConfig,
+) -> None:
+    """§11 — a PR the pipeline never observed merged contributes nothing to the numerator."""
+    events = [merged("c1", merged_at=None), merged("c2")]
+
+    rollup = compute_kpis([], events, {}, simulate_config)
+
+    assert rollup["merged_clean"] == 1
+    assert rollup["merge_rate"] == 0.5
+
+
+def test_a_merge_flagged_verified_without_the_reason_cleared_is_not_counted(
+    simulate_config: PipelineConfig,
+) -> None:
+    """§11 — `MERGED_EXTERNALLY_UNVERIFIED` disqualifies the event on its own."""
+    events = [merged("c1", reason=ReasonCode.MERGED_EXTERNALLY_UNVERIFIED)]
+
+    rollup = compute_kpis([], events, {}, simulate_config)
+
+    assert rollup["merged_clean"] == 0
+    assert rollup["merge_rate"] == 0.0
+
+
+def test_merge_rate_alert_is_suppressed_without_pr_events(
+    simulate_config: PipelineConfig,
+) -> None:
+    """§11 — a run that opened no PR has no merge rate to alert on."""
+    events = [event("c1", terminal_outcome=CandidateState.TERMINAL)]
+
+    rollup = compute_kpis([], events, {}, simulate_config)
+
+    assert rollup["merge_rate"] == 0.0
+    assert rollup[MERGE_RATE_ALERT] == 0
+
+
+def test_merge_rate_alert_is_suppressed_for_an_empty_run(
+    simulate_config: PipelineConfig,
+) -> None:
+    """§11 — the zero-event run is quiet, not alerting."""
+    rollup = compute_kpis([], [], {}, simulate_config)
+
+    assert rollup[MERGE_RATE_ALERT] == 0
+    assert rollup[SESSION_FAILURE_ALERT] == 0
+
+
 def test_session_failure_alert_fires_above_the_ceiling(simulate_config: PipelineConfig) -> None:
     """§17 — a session-failure rate over 0.30 raises the alert."""
     events = [
-        event("c1", reason=ReasonCode.SESSION_CEILING_EXCEEDED),
+        event("c1", reason=ReasonCode.SESSION_CEILING),
         event("c2", reason=ReasonCode.ROLE_COLLISION),
         event("c3"),
         event("c4"),
@@ -182,7 +252,7 @@ def test_session_failure_alert_fires_above_the_ceiling(simulate_config: Pipeline
 
 def test_session_failure_at_the_ceiling_does_not_alert(simulate_config: PipelineConfig) -> None:
     """§11 — the alert is `> ceiling`, so exactly 0.30 is quiet."""
-    events = [event(f"c{index}", reason=ReasonCode.SESSION_CEILING_EXCEEDED) for index in range(3)]
+    events = [event(f"c{index}", reason=ReasonCode.SESSION_CEILING) for index in range(3)]
     events += [event(f"ok{index}") for index in range(7)]
 
     rollup = compute_kpis([], events, {}, simulate_config)
@@ -291,7 +361,7 @@ def test_alerts_are_rendered_visibly_in_the_markdown_rollup(
     """§11 — the rollup persisted to `reports/kpis.md` marks alerts distinctly."""
     events = [
         rejected("c1"),
-        event("c2", reason=ReasonCode.SESSION_CEILING_EXCEEDED),
+        event("c2", reason=ReasonCode.SESSION_CEILING),
     ]
 
     markdown = render_kpi_report([], events, {}, simulate_config)
@@ -330,6 +400,7 @@ def test_run_report_lists_dispatched_and_deferred() -> None:
             score=65.0,
             gate_passed=True,
             state=CandidateState.DEFERRED,
+            reason=ReasonCode.BUDGET_OVERFLOW,
         ),
         codeql_candidate(
             candidate_id="codeql-3",
@@ -347,3 +418,27 @@ def test_run_report_lists_dispatched_and_deferred() -> None:
     assert "Deferred by budget: 1" in report
     assert ReasonCode.OUT_OF_SCOPE_FRONTEND.value in report
     assert Tier.HIGH.value in report
+
+
+def test_run_report_separates_ceiling_and_capability_deferrals() -> None:
+    """§11 Layer 2 — budget, session-ceiling and capability deferrals are counted apart."""
+    candidates = [
+        codeql_candidate(
+            candidate_id="codeql-1",
+            action=Action.DEFERRED,
+            state=CandidateState.DEFERRED,
+            reason=ReasonCode.SESSION_CEILING,
+        ),
+        codeql_candidate(
+            candidate_id="codeql-2",
+            action=Action.DEFERRED,
+            state=CandidateState.DEFERRED,
+            reason=ReasonCode.CAPABILITY_UNAVAILABLE,
+        ),
+    ]
+
+    report = render_run_report(candidates, run_id="run-1")
+
+    assert "Deferred by budget: 0" in report
+    assert "Deferred by session ceiling: 1" in report
+    assert "Deferred by capability/other: 1" in report

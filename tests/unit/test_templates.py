@@ -16,13 +16,13 @@ from pipeline.templates.render import (
     render_issue_body,
     render_issue_title,
     render_pr_body,
+    render_pr_title,
     templates_match,
     validate_issue_body,
     validate_pr_body,
     validate_pr_title,
     validate_template_sections,
 )
-from tests import _api
 from tests.conftest import TARGET_CHECKOUT, TEMPLATES_DIR
 from tests.factories import codeql_candidate, lane2_candidate, lane3_candidate
 
@@ -305,7 +305,7 @@ def test_pr_title_matches_pr_lint_regex(candidate: Candidate) -> None:
 
     assert regex_text.strip() == EXPECTED_TITLE_REGEX
 
-    title = _api.render().render_pr_title(candidate)
+    title = render_pr_title(candidate)
     assert validate_pr_title(title, regex_text), title
 
 

@@ -41,6 +41,16 @@ SKIP_MARKER_DIFF = """\
      def test_run_sync_query(self):
 """
 
+# The reviewer's own-node marker removal, with the node named inside the changed hunk.
+OWN_NODE_SKIP_MARKER_DIFF = """\
+--- a/tests/integration_tests/sqllab_tests.py
++++ b/tests/integration_tests/sqllab_tests.py
+@@
+-    @pytest.mark.skip("Flaky")
+-    def test_run_sync_query(self):
++    def test_run_sync_query(self):
+"""
+
 PRODUCTION_DIFF = """\
 --- a/superset/db_engine_specs/base.py
 +++ b/superset/db_engine_specs/base.py
@@ -175,6 +185,25 @@ def test_reviewer_skip_marker_diff_accepted() -> None:
     """§9.2 — the marker is single-owner and that owner is the reviewer."""
     candidate = lane2_candidate(nodeid=NODEID)
 
+    inspection = inspect_reviewer_diff(OWN_NODE_SKIP_MARKER_DIFF, candidate)
+
+    assert inspection.accepted is True
+    assert inspection.reason is None
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "plan-vs-code: §9.3 line 517 accepts the reviewer's skip-marker-only diff, and §9.2 "
+        "scopes ownership by marker position relative to the node. `inspect_reviewer_diff` "
+        "reads only added/removed lines, so a marker removal whose node appears solely on a "
+        "context line is rejected as an implementer_test_edit."
+    ),
+)
+def test_reviewer_marker_only_removal_above_its_own_node_is_accepted() -> None:
+    """§9.2/§9.3 — removing only the marker line directly above the candidate's own node."""
+    candidate = lane2_candidate(nodeid=NODEID)
+
     inspection = inspect_reviewer_diff(SKIP_MARKER_DIFF, candidate)
 
     assert inspection.accepted is True
@@ -216,7 +245,7 @@ def test_nested_candidate_must_lift_every_ancestor_first() -> None:
     candidate = lane2_candidate(nodeid=NODEID, enclosing_skip_nodeid=CLASS_NODEID)
 
     with pytest.raises(ValueError, match="enclosing marker"):
-        inspect_reviewer_diff(SKIP_MARKER_DIFF, candidate, lifted_markers=[NODEID])
+        inspect_reviewer_diff(OWN_NODE_SKIP_MARKER_DIFF, candidate, lifted_markers=[NODEID])
 
 
 # -- §12.1 structured outputs ------------------------------------------------------------
@@ -246,7 +275,14 @@ def test_reviewer_output_schema_binds_every_test_to_a_criterion() -> None:
     """§12.1 — a reviewer test without a `criterion_id` cannot be reported at all."""
     reviewer = ROLE_OUTPUT_SCHEMAS[SessionRole.REVIEWER]
 
-    assert reviewer["required"] == ["tests", "red_baseline", "green_result", "findings"]
+    assert reviewer["required"] == [
+        "tests",
+        "red_baseline",
+        "green_result",
+        "diff_reviewed",
+        "findings",
+        "committed_diff",
+    ]
     assert node(SessionRole.REVIEWER, "properties", "tests", "items")["required"] == [
         "path",
         "nodeid",
@@ -254,11 +290,23 @@ def test_reviewer_output_schema_binds_every_test_to_a_criterion() -> None:
     ]
 
 
+def test_reviewer_output_schema_requires_the_reviewed_diff_identity() -> None:
+    """§12.1 — `diff_reviewed` records which commit range the reviewer actually read."""
+    reviewed = node(SessionRole.REVIEWER, "properties", "diff_reviewed")
+
+    assert reviewed["required"] == ["base_sha", "head_sha", "files_read"]
+
+
 def test_implementer_output_schema_has_no_test_surface() -> None:
     """§9.3 — the implementer reports production changes only."""
     implementer = ROLE_OUTPUT_SCHEMAS[SessionRole.IMPLEMENTER]
 
-    assert implementer["required"] == ["files_changed", "criteria_addressed", "commands_run"]
+    assert implementer["required"] == [
+        "files_changed",
+        "criteria_addressed",
+        "commands_run",
+        "committed_diff",
+    ]
     assert "tests" not in node(SessionRole.IMPLEMENTER, "properties")
 
 
@@ -293,7 +341,7 @@ def test_session_ceiling_aborts_run() -> None:
     with pytest.raises(SessionCeilingError) as excinfo:
         client.create_session(SessionRole.REVIEWER, "cand-1", "prompt")
 
-    assert excinfo.value.reason is ReasonCode.SESSION_CEILING_EXCEEDED
+    assert excinfo.value.reason is ReasonCode.SESSION_CEILING
 
 
 def test_session_ceiling_abort_is_recorded_as_a_terminal_event() -> None:
@@ -301,7 +349,7 @@ def test_session_ceiling_abort_is_recorded_as_a_terminal_event() -> None:
 
     recorded = event_with_ceiling(event, SessionCeilingError("ceiling"))
 
-    assert recorded.reason is ReasonCode.SESSION_CEILING_EXCEEDED
+    assert recorded.reason is ReasonCode.SESSION_CEILING
     assert recorded.terminal_outcome is not None
 
 

@@ -18,24 +18,43 @@ from pipeline.schemas import (
     NEEDS_HUMAN_REVIEW_LABEL,
     Action,
     BaselineStatus,
+    Candidate,
     CandidateState,
     ReasonCode,
 )
 from tests.factories import codeql_candidate, lane2_candidate
 
 CRITERIA = frozenset({"AC-1"})
+EXPECTED_FAILURE = {
+    "nodeid": "tests/x.py::a",
+    "exception_type": "AssertionError",
+    "message_pattern": "assert 400 == 200",
+}
+OBSERVED_FAILURE = {
+    "nodeid": "tests/x.py::a",
+    "outcome": "FAILED",
+    "exception_type": "AssertionError",
+    "message": "assert 400 == 200",
+}
 
 
 def iteration(**overrides: object) -> ReviewIteration:
+    """A complete iteration: §12.1 makes a recorded `diff_reviewed` a convergence precondition."""
     fields: dict[str, object] = {
         "red_baseline": BaselineStatus.VALID,
         "green": True,
         "planner_criteria": CRITERIA,
         "reviewer_criteria": CRITERIA,
         "addressed_criteria": CRITERIA,
+        "diff_reviewed": True,
     }
     fields.update(overrides)
     return ReviewIteration(**fields)  # type: ignore[arg-type]
+
+
+def eligible_candidate() -> Candidate:
+    """A candidate dispatch already found auto-merge eligible; §13 narrows monotonically."""
+    return codeql_candidate(gate_passed=True, score=128.0, risk=1, auto_merge_eligible=True)
 
 
 # -- §12.1 criterion mapping -------------------------------------------------------------
@@ -67,18 +86,77 @@ def test_fully_mapped_reviewer_tests_are_accepted() -> None:
     assert decision is not None
     assert decision.converged is True
     assert decision.state is CandidateState.CONVERGED
-    assert decision.auto_merge_eligible is True
+    assert decision.reason is None
+
+
+def test_convergence_preserves_candidate_auto_merge_eligibility() -> None:
+    """§13 — the loop no longer decides eligibility; it may only leave dispatch's answer intact."""
+    result = run_review_loop(PipelineConfig(), iteration())
+
+    assert apply_review_result(eligible_candidate(), result).auto_merge_eligible is True
+
+
+def test_missing_diff_review_blocks_convergence_without_spending_the_cap() -> None:
+    """§9.3/§12.1 — no convergence without a recorded diff review, and the cap is not consumed."""
+    incomplete = iteration(diff_reviewed=False)
+
+    result = run_review_loop(PipelineConfig(iteration_cap=5), incomplete)
+
+    assert result.converged is False
+    assert result.iterations == 0
+    assert result.needs_human_review is True
+    assert result.disagreement_summary is not None
+    assert "reviewer diff review incomplete" in result.disagreement_summary
+    assert apply_review_result(eligible_candidate(), result).auto_merge_eligible is False
+
+
+def test_a_rerun_that_records_its_diff_review_converges() -> None:
+    """§9.3 — one incomplete iteration is rerun; the reviewed rerun converges."""
+    reruns: list[int] = []
+
+    def rerun(ordinal: int) -> ReviewIteration:
+        reruns.append(ordinal)
+        return iteration()
+
+    result = run_review_loop(PipelineConfig(), iteration(diff_reviewed=False), rerun)
+
+    assert result.converged is True
+    assert reruns == [1]
+
+
+def test_two_iterations_without_a_diff_review_escalate() -> None:
+    """§12.1 — an incomplete diff review is never retried indefinitely."""
+    incomplete = iteration(diff_reviewed=False)
+
+    result = run_review_loop(PipelineConfig(), incomplete, lambda _ordinal: incomplete)
+
+    assert result.converged is False
+    assert result.reason is ReasonCode.DISAGREEMENT_UNRESOLVED
+    assert result.needs_human_review is True
 
 
 def test_role_payloads_normalize_into_one_loop_input() -> None:
     """§12.1 — the loop consumes the three structured outputs, not free text."""
     normalized = review_iteration_from_payload(
-        {"criteria": [{"id": "AC-1", "statement": "returns indexes"}]},
+        {
+            "criteria": [
+                {
+                    "id": "AC-1",
+                    "statement": "returns indexes",
+                    "expected_failure": EXPECTED_FAILURE,
+                }
+            ]
+        },
         {
             "tests": [{"path": "tests/x.py", "nodeid": "tests/x.py::a", "criterion_id": "AC-1"}],
-            "red_baseline": {"status": "valid"},
+            "red_baseline": {"observed": {"per_item_outcomes": [OBSERVED_FAILURE]}},
             "green_result": {"passed": True},
             "findings": [{"severity": "minor", "criterion_id": "AC-1", "note": "naming"}],
+            "diff_reviewed": {
+                "base_sha": "a" * 40,
+                "head_sha": "b" * 40,
+                "files_read": ["superset/x.py"],
+            },
         },
         {"files_changed": ["superset/x.py"], "criteria_addressed": ["AC-1"], "commands_run": []},
     )
@@ -88,7 +166,23 @@ def test_role_payloads_normalize_into_one_loop_input() -> None:
     assert normalized.addressed_criteria == CRITERIA
     assert normalized.red_baseline is BaselineStatus.VALID
     assert normalized.green is True
+    assert normalized.diff_reviewed is True
     assert normalized.findings[0].severity is FindingSeverity.MINOR
+
+
+def test_a_reviewer_baseline_without_observed_items_is_invalid() -> None:
+    """§9.1 — a status claim with no per-item observation is not a red baseline."""
+    normalized = review_iteration_from_payload(
+        {"criteria": [{"id": "AC-1", "expected_failure": EXPECTED_FAILURE}]},
+        {
+            "tests": [],
+            "red_baseline": {"status": "valid"},
+            "green_result": {"passed": True},
+            "findings": [],
+        },
+    )
+
+    assert normalized.red_baseline is BaselineStatus.INVALID_RED_BASELINE
 
 
 def test_unknown_finding_severity_is_treated_as_blocking() -> None:
@@ -125,7 +219,7 @@ def test_non_converging_loop_escalates_at_exactly_the_iteration_cap(cap: int) ->
     assert result.converged is False
     assert result.iterations == cap
     assert result.reason is ReasonCode.DISAGREEMENT_UNRESOLVED
-    assert result.auto_merge_eligible is False
+    assert apply_review_result(eligible_candidate(), result).auto_merge_eligible is False
     assert result.needs_human_review is True
     assert len(reruns) == cap - 1
 
@@ -145,7 +239,7 @@ def test_still_red_join_never_auto_merges(simulate_config: PipelineConfig) -> No
 
     result = run_review_loop(simulate_config, stuck, lambda _ordinal: stuck)
 
-    assert result.auto_merge_eligible is False
+    assert apply_review_result(eligible_candidate(), result).auto_merge_eligible is False
     assert result.needs_human_review is True
     assert result.disagreement_summary is not None
 
@@ -208,24 +302,25 @@ def test_unresolved_major_blocks_auto_merge_even_when_humans_are_not_required() 
 
     result = run_review_loop(config, major)
 
-    assert result.auto_merge_eligible is False
+    assert result.converged is False
+    assert apply_review_result(eligible_candidate(), result).auto_merge_eligible is False
 
 
 def test_stale_skip_is_a_converged_reviewer_only_outcome() -> None:
     """§9 (line 492) — `stale_skip` is a valid terminal outcome exempt from red→green."""
-    stale = ReviewIteration(red_baseline=BaselineStatus.STALE_SKIP, green=False)
+    stale = ReviewIteration(red_baseline=BaselineStatus.STALE_SKIP, green=False, diff_reviewed=True)
 
     result = run_review_loop(PipelineConfig(), stale)
 
     assert result.converged is True
     assert result.reviewer_only is True
     assert result.reason is ReasonCode.STALE_SKIP
-    assert result.auto_merge_eligible is False
+    assert apply_review_result(eligible_candidate(), result).action is Action.REVIEWER_ONLY_DIFF
 
 
 def test_stale_skip_result_ships_as_a_reviewer_only_diff() -> None:
     candidate = lane2_candidate(gate_passed=True, score=128.0, risk=1)
-    stale = ReviewIteration(red_baseline=BaselineStatus.STALE_SKIP, green=False)
+    stale = ReviewIteration(red_baseline=BaselineStatus.STALE_SKIP, green=False, diff_reviewed=True)
 
     applied = apply_review_result(candidate, run_review_loop(PipelineConfig(), stale))
 

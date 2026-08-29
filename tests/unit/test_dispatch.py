@@ -18,6 +18,7 @@ from pipeline.dispatch import (
 from pipeline.gate import HARD_CONDITION_REASONS
 from pipeline.github_client import (
     ArtifactUnavailableError,
+    CiWaitResult,
     GitHubClient,
     SimulationWriteError,
     publish_artifacts,
@@ -105,8 +106,18 @@ class ArtifactTransport:
 
 
 def artifact_client(config: PipelineConfig, transport: ArtifactTransport) -> GitHubClient:
-    """A GitHub client with an injected clock and sleeper so no test ever waits."""
-    return GitHubClient(config, transport=transport, clock=lambda: 0.0, sleeper=lambda _: None)
+    """A GitHub client over a recording transport; every write is observable."""
+    return GitHubClient(config, transport=transport)
+
+
+def local_ci_probe(_pr_number: int) -> CiWaitResult:
+    """§10.1 — observed local evidence: publication proceeds, auto-merge cannot."""
+    return CiWaitResult(CiEvidenceMode.LOCAL, None, False)
+
+
+def green_github_ci_probe(_pr_number: int) -> CiWaitResult:
+    """§10.1 — every required context reported `success` under `github` evidence."""
+    return CiWaitResult(CiEvidenceMode.GITHUB, None, True)
 
 
 def github_config(
@@ -371,6 +382,7 @@ def converging_iteration(**fields: Any) -> ReviewIteration:  # noqa: ANN401
         planner_criteria=frozenset({"C1"}),
         reviewer_criteria=frozenset({"C1"}),
         addressed_criteria=frozenset({"C1"}),
+        diff_reviewed=fields.pop("diff_reviewed", True),
         **fields,
     )
 
@@ -383,7 +395,6 @@ def test_auto_merge_when_every_precondition_holds() -> None:
     decision = dispatch_candidates([apply_review_result(high_candidate(risk=2), result)], config)[0]
 
     assert result.converged is True
-    assert result.auto_merge_eligible is True
     assert decision.auto_merge_eligible is True
     assert NEEDS_HUMAN_REVIEW_LABEL not in decision.labels
 
@@ -400,7 +411,6 @@ def test_unresolved_major_blocks_auto_merge_and_labels_for_human_review() -> Non
     )
     decision = dispatch_candidates([apply_review_result(high_candidate(risk=2), result)], config)[0]
 
-    assert result.auto_merge_eligible is False
     assert decision.auto_merge_eligible is False
     assert NEEDS_HUMAN_REVIEW_LABEL in decision.labels
 
@@ -451,7 +461,6 @@ def test_existing_suite_regression_blocks_auto_merge() -> None:
     )
     decision = dispatch_candidates([apply_review_result(high_candidate(risk=1), result)], config)[0]
 
-    assert result.auto_merge_eligible is False
     assert decision.auto_merge_eligible is False
 
 
@@ -467,10 +476,25 @@ def test_missing_reviewer_test_blocks_auto_merge() -> None:
             planner_criteria=frozenset({"C1"}),
             reviewer_criteria=frozenset(),
             addressed_criteria=frozenset(),
+            diff_reviewed=True,
         ),
     )
+    decision = dispatch_candidates([apply_review_result(high_candidate(risk=1), result)], config)[0]
 
-    assert result.auto_merge_eligible is False
+    assert result.converged is False
+    assert decision.auto_merge_eligible is False
+
+
+def test_missing_diff_review_blocks_auto_merge() -> None:
+    """§9.3 — without a recorded phase-B diff review the candidate cannot auto-merge."""
+    config = github_config()
+
+    result = run_review_loop(config, converging_iteration(diff_reviewed=False))
+    decision = dispatch_candidates([apply_review_result(high_candidate(risk=1), result)], config)[0]
+
+    assert result.converged is False
+    assert decision.auto_merge_eligible is False
+    assert NEEDS_HUMAN_REVIEW_LABEL in decision.labels
 
 
 def test_local_ci_mode_forces_auto_merge_off() -> None:
@@ -500,6 +524,7 @@ def test_dispatch_preflight_aborts_when_issues_disabled() -> None:
             pr_title="fix: bound the generated range",
             pr_body="### SUMMARY\n",
             head="devin/x",
+            ci_probe=local_ci_probe,
         )
 
     assert transport.calls == []
@@ -540,6 +565,7 @@ def test_crosslink_roundtrip() -> None:
         pr_title="fix: bound the generated range",
         pr_body=f"### SUMMARY\n\n{marker}\n",
         head="devin/codeql-7",
+        ci_probe=local_ci_probe,
     )
 
     assert [path for _, path, _ in transport.calls] == [
@@ -557,7 +583,10 @@ def test_crosslink_roundtrip() -> None:
 
 def test_resume_after_issue_created_pr_failed(tmp_path: Path) -> None:
     """§14.1 — replaying the `issue created, PR not created` state creates no second issue."""
-    store = CandidateStateStore(tmp_path / "candidates.jsonl")
+    store = CandidateStateStore(
+        tmp_path / "candidates.jsonl",
+        marker_search=lambda _marker: False,
+    )
     candidate = high_candidate(candidate_id="codeql-9")
 
     assert store.append_if_new_artifact(candidate) is True
@@ -645,6 +674,7 @@ def test_simulate_mode_makes_no_remote_writes(simulate_config: PipelineConfig) -
             pr_title="fix: bound the generated range",
             pr_body="### SUMMARY\n",
             head="devin/codeql-13",
+            ci_probe=local_ci_probe,
         )
 
     assert transport.calls == []
