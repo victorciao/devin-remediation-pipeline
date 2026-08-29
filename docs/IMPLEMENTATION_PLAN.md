@@ -273,8 +273,8 @@ question 3.
     `pytest --collect-only <nodeid>` count whenever a collection is obtainable, and the AST lower
     bound otherwise; `class_breadth_unknown` applies only to a `kind = class` row for which no
     live count could be obtained **and** the AST count is `0`. `collects_single_item` is derived
-  from `enclosed_tests` and inherits the same caveat — it is not meaningful for a
-  `kind = class` row reporting `enclosed_tests = 0`.
+    from `enclosed_tests` and inherits the same caveat — it is not meaningful for a
+    `kind = class` row reporting `enclosed_tests = 0`.
   - **Indirect mark aliases** — a name bound at module level to a `pytest.mark.*` object and
     re-exported (`only_postgresql = pytest.mark.skipif(…)` in `conftest.py`, used as
     `@only_postgresql`) — are out of scope **regardless of import style**: five of the
@@ -435,8 +435,8 @@ as a special case of the same rule.
 - The **orchestrator** creates `devin/remediation/<candidate_id>` from the target base and pins
   `base_sha`; it — not the sessions — opens the PR, and only after JOIN.
 - The **reviewer** runs its red baseline in its own checkout at `base_sha` and pushes
-  test-path-only commits first. **For LANE 2 the reviewer also owns the skip-marker change**
-: it applies the removal or narrowing as a scratch working-tree patch on
+  test-path-only commits first. **For LANE 2 the reviewer also owns the skip-marker change**:
+  it applies the removal or narrowing as a scratch working-tree patch on
   `base_sha`, classifies the result (`FAILED` → valid baseline; `PASSED` → `stale_skip`;
   `SKIPPED` → `invalid_red_baseline`), and only then commits that test-path change. This is the
   only way the classification is observable — at `base_sha` the marker is by definition still
@@ -450,9 +450,8 @@ as a special case of the same rule.
   node** and nothing else. Otherwise a nested child — which passes the §4 breadth gate on its own
   `enclosed_tests = 0` — would ship a PR deleting its 52-test parent's class marker, routing
   around the very gate `lane2_class_breadth_max` exists to enforce.
-- **LANE 2 overlap rule** — **a child cannot be remediated independently
-  while any ancestor marker would survive the merge**, concretely, for a child carrying
-  `enclosing_skip_nodeid`:
+- **LANE 2 overlap rule** — **a child cannot be remediated independently while any ancestor
+  marker would survive the merge.** Concretely, for a child carrying `enclosing_skip_nodeid`:
   - the enclosing candidate is **dispatched in this run** (it passed every gate and is high-tier)
     — the two overlap, so the orchestrator dispatches only the enclosing candidate and suppresses
     the child, recording `related_candidate_id` on both rows. Overlap is detected by **nodeid
@@ -771,7 +770,11 @@ drift hits. The match is therefore two-condition and lossy-by-default-off:
    **written into the state row at dispatch**: the comparison reads persisted values
    and never re-reads source at a prior commit.
 
-Neither condition can be relaxed by config.
+Neither condition can be relaxed by config. Accepted consequence: condition 1 means a co-located
+group can never drift-link, so any edit above line 55 of `add_chart_to_existing_dashboard.py`
+re-dispatches all four `py/overly-large-range` alerts as new candidates, bounded by `budget_N` and
+human review. A one-to-one pairing on `(region_digest, within-line column ordinal)` inside a
+multiplicity > 1 group is **out of scope for v1**.
 
 `state/candidates.jsonl` (append-only, last-write-wins by `candidate_id`) is the **dedupe and
 resume source of truth** — distinct from the Layer 1 observability log. States:
@@ -876,7 +879,6 @@ code-review loop converges with green CI.
   `stale_skip`.
 - tier mapping at the threshold boundaries (`59/60`, `19/20`) and the `score_cap` clamp.
 
-
 - `test_codeql_locator_separates_colocated_alerts` — the four `py/overly-large-range` fixture
   alerts on `add_chart_to_existing_dashboard.py:55` yield four distinct `candidate_id`s.
 - `test_current_major_from_version_source` — resolves `6.1.0 → 6` from the bug-report form, and
@@ -899,7 +901,6 @@ code-review loop converges with green CI.
   with reason `out_of_scope_frontend`.
 - `test_gsheet_sink_rejected_in_simulate`.
 - `test_pr_comment_sink_state_transition_and_validation`.
-
 
 - `test_ci_evidence_mode_upgrades_once` — a required context reporting on a generated PR head
   flips `local → github` exactly once and logs the transition; a pending workflow-approval state
@@ -925,7 +926,6 @@ code-review loop converges with green CI.
 - `test_broad_class_skip_is_human_routed` — a `kind = class` candidate with
   `enclosed_tests > lane2_class_breadth_max` fails automatability with reason
   `class_scope_too_broad`; one with `enclosed_tests = 0` fails with `class_breadth_unknown`.
-
 
 - `test_nested_child_commits_only_own_marker` — the committed test-path diff of a nested
   candidate contains no marker outside its own node, even though its scratch patch lifted the
