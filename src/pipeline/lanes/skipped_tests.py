@@ -144,6 +144,7 @@ def enumerate_skipped_tests(
     *,
     repo_name: str = "victorciao/superset",
     live_count_provider: LiveCountProvider | None = None,
+    failures: list[Record] | None = None,
 ) -> tuple[list[Candidate], list[Record]]:
     """Enumerate unconditional skips and return conditional exclusions separately."""
     candidates: list[Candidate] = []
@@ -153,6 +154,13 @@ def enumerate_skipped_tests(
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except (OSError, SyntaxError, UnicodeDecodeError):
+            if failures is not None:
+                failures.append(
+                    {
+                        "path": str(path.relative_to(repo)),
+                        "reason": "collection_error",
+                    }
+                )
             continue
         bindings = _import_bindings(tree)
         skipped_scopes.clear()

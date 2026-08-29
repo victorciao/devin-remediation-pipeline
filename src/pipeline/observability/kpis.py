@@ -62,18 +62,11 @@ def compute_burndown(
         denominator = int(total_value)
         lane_rows = [candidate for candidate in candidates if candidate.lane is lane]
         progress = sum(
-            candidate.state
-            in {
-                CandidateState.TERMINAL,
-                CandidateState.CONVERGED,
-                CandidateState.PR_CREATED,
-                CandidateState.ISSUE_CREATED,
-            }
-            and candidate.state
-            not in {
-                CandidateState.BLOCKED_BY_ENCLOSING_SKIP,
-                CandidateState.SUPPRESSED_BY_CONTAINMENT,
-            }
+            candidate.state is CandidateState.CONVERGED
+            or (
+                candidate.state is CandidateState.TERMINAL
+                and candidate.reason is ReasonCode.STALE_SKIP
+            )
             for candidate in lane_rows
         )
         result[lane] = BurnDown(denominator, progress, max(denominator - progress, 0))
@@ -171,8 +164,9 @@ def compute_kpis(
 
 def _merge_rate(events: list[EventRecord]) -> float:
     """Compute the merged-clean/edited/rejected aggregate merge rate."""
-    merged = sum(event.terminal_outcome is CandidateState.CONVERGED for event in events)
-    return merged / len(events) if events else 0.0
+    pr_events = [event for event in events if event.pr_url is not None]
+    merged = sum(event.terminal_outcome is CandidateState.CONVERGED for event in pr_events)
+    return merged / len(pr_events) if pr_events else 0.0
 
 
 def _criterion_coverage(candidates: list[Candidate], events: list[EventRecord]) -> float:

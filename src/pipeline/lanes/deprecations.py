@@ -118,17 +118,84 @@ def _decorated_functions(
 
 
 def _references(repo: Path, symbol: str, defining_path: Path, defining_line: int) -> int:
-    pattern = re.compile(rf"\b{re.escape(symbol)}\b")
+    defining_module = str(defining_path.relative_to(repo)).removesuffix(".py").replace("/", ".")
+
+    class ReferenceVisitor(ast.NodeVisitor):
+        def __init__(self, aliases: set[str], direct: bool) -> None:
+            self.aliases = aliases
+            self.direct = direct
+            self.count = 0
+            self._bound: list[set[str]] = [set()]
+
+        def _is_shadowed(self, name: str) -> bool:
+            return any(name in scope for scope in reversed(self._bound))
+
+        def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+            if node.lineno == defining_line and self.direct:
+                return
+            self._bound.append(
+                {
+                    argument.arg
+                    for argument in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
+                }
+                | ({node.args.vararg.arg} if node.args.vararg else set())
+                | ({node.args.kwarg.arg} if node.args.kwarg else set())
+            )
+            self.generic_visit(node)
+            self._bound.pop()
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self._visit_function(node)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            self._visit_function(node)
+
+        def visit_Name(self, node: ast.Name) -> None:
+            if (
+                isinstance(node.ctx, ast.Load)
+                and node.id in self.aliases
+                and not self._is_shadowed(node.id)
+            ):
+                self.count += 1
+
+        def visit_Attribute(self, node: ast.Attribute) -> None:
+            if (
+                isinstance(node.ctx, ast.Load)
+                and node.attr == symbol
+                and (
+                    self.direct
+                    or (
+                        isinstance(node.value, ast.Name)
+                        and node.value.id in self.aliases
+                        and not self._is_shadowed(node.value.id)
+                    )
+                )
+            ):
+                self.count += 1
+            self.generic_visit(node)
+
     count = 0
     for path in sorted((repo / "superset").rglob("*.py")):
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeDecodeError):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, UnicodeDecodeError):
             continue
-        for line_number, line in enumerate(lines, start=1):
-            if path == defining_path and line_number == defining_line:
-                continue
-            count += len(pattern.findall(line))
+        aliases: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == defining_module:
+                aliases.update(
+                    alias.asname or alias.name for alias in node.names if alias.name == symbol
+                )
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == defining_module:
+                        aliases.add(alias.asname or alias.name.rsplit(".", 1)[-1])
+        direct = path == defining_path
+        if direct:
+            aliases.add(symbol)
+        visitor = ReferenceVisitor(aliases, direct)
+        visitor.visit(tree)
+        count += visitor.count
     return count
 
 
@@ -148,6 +215,7 @@ def enumerate_deprecations(
     current_major: int | None = None,
     version_source: str = VERSION_SOURCE,
     eol_major_lag: int = 2,
+    failures: list[Record] | None = None,
 ) -> list[Candidate]:
     """Enumerate deprecated symbols and annotate EOL and caller observables."""
     release = current_release_value
@@ -159,6 +227,13 @@ def enumerate_deprecations(
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except (OSError, SyntaxError, UnicodeDecodeError):
+            if failures is not None:
+                failures.append(
+                    {
+                        "path": str(path.relative_to(repo)),
+                        "reason": "collection_error",
+                    }
+                )
             continue
         for node, decorator, parents in _decorated_functions(tree):
             deprecated_in = _keyword_string(decorator, "deprecated_in")
