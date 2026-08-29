@@ -4,6 +4,9 @@
 > plan-review step (T-1, §2) reviews against, and what every later change must be
 > reconciled with. Referenced from the README.
 >
+> **Revision 10** — editorial only: §3 0d is rewritten in plain language on the human owner's
+> request (§20). No semantics, thresholds, checks or fallbacks changed.
+>
 > **Revision 9 (consolidated)** — the plan-review loop is closed: round 8 returned
 > `approved_with_minor` with **0 blocking and 0 major**, and this revision folds in its three
 > minor and three nit findings. Incorporates T-1 review rounds 1–8: round 1 (5 blocking / 15 major /
@@ -84,17 +87,30 @@ error). The implementer must not author/edit build-time tests (an implementer ed
 - **Review pause** — if scope shifts from assumptions (e.g. no CodeQL alerts present, or a
   missing token scope), pause for human review before Phase 1 build.
 
-### 0d — Target-repo capability preconditions (blocking exit criteria)
+### 0d — "Can we actually do this here?" — target-repo capability preconditions (blocking exit criteria)
 
-A lane or dispatch path whose precondition is unmet is disabled for the run and recorded as
-`capability_unavailable`; it never silently no-ops. *(B-01, B-02, B-03)*
+**In plain terms.** The pipeline needs the target repo to let it do four things: read security
+alerts, open issues, open pull requests, and find out whether tests passed. Any of those can be
+switched off on a given GitHub repo — a fresh fork, for instance, has Actions disabled by default
+and may have Issues turned off. So before the run does any work, 0d asks each question out loud
+and writes the answer down.
 
-| Precondition | Check | If unmet |
+The rule that matters is what happens on a "no". A capability the pipeline does not have is
+**switched off for the run and reported as `capability_unavailable`** — it is never allowed to
+quietly produce nothing. "I could not look" and "I looked and the repo is clean" are opposite
+findings, and a run that renders them identically (both as *0 candidates*) would mislead the
+reader into thinking a lane is healthy when it never executed. That distinction is the entire
+purpose of this section. Where a safe fallback exists the pipeline degrades to it (post to a PR
+comment instead of an issue; read alerts from a SARIF file instead of the API); where the answer
+means the pipeline cannot trust its own evidence, it gives up the corresponding privilege — most
+importantly, it stops being allowed to merge anything on its own. *(B-01, B-02, B-03)*
+
+| What we're asking | How it's checked | If the answer is no |
 |---|---|---|
-| Issues enabled | `GET /repos/{o}/{r}` → `has_issues == true` | dispatch preflight aborts **before any write**; degraded path `issue_sink = pr_comment` (§7) |
-| Actions **can run**, not merely registered *(R2-M-06)* | `GET /actions/workflows` → `total_count > 0` **and** `GET /actions/runs?event=pull_request` (or `workflow_dispatch`) → ≥1 `completed` run | `ci_evidence_mode` falls back to `local` (§10); auto-merge hard-disabled |
-| Code scanning available | `GET /code-scanning/alerts`; outcome split by status *(R2-m-03)* — `200` → available; `403` → `token_capability_missing` (hard stop, same row as below); `404` / empty analysis → `capability_unavailable` | LANE 1 falls back to `alert_source = sarif_file` (§5); no live LANE 1 evidence |
-| Token capability | `repo` (or fine-grained Contents/Issues/PR/Actions/Code-scanning write). The probe records the **token identity** (`GET /user` login + `x-oauth-scopes`) in the event log so a permissions failure is never misread as an absent analysis *(R2-m-03)* | hard stop |
+| **Can we file issues here?** Issues can be disabled per repo, and §7 requires a companion issue for every fix. | `GET /repos/{o}/{r}` → `has_issues == true` | The dispatch preflight stops **before writing anything** — no half-created artifacts. Degraded path: post the companion write-up as a PR comment instead (`issue_sink = pr_comment`, §7). |
+| **Has GitHub ever actually run this repo's tests on a PR?** Not "are workflows present" — a fork inherits every workflow file but runs none of them, so presence proves nothing. *(R2-M-06)* | `GET /actions/workflows` → `total_count > 0` **and** `GET /actions/runs?event=pull_request` (or `workflow_dispatch`) → ≥1 `completed` run | We cannot rely on GitHub's green checkmark, so evidence falls back to `ci_evidence_mode = local` (§10): the pipeline runs the linters and targeted tests itself and attaches the output to the PR. Because that is weaker proof, **auto-merge is hard-disabled** — every PR waits for a human. §10.1 upgrades this to `github` once a generated PR actually triggers a real check. |
+| **Can we read this repo's security alerts?** LANE 1 has no input without them. | `GET /code-scanning/alerts`, with the outcome split by status code *(R2-m-03)* — `200` → available; `403` → `token_capability_missing` (a token problem, see the row below, hard stop); `404` / empty analysis → genuinely `capability_unavailable` | LANE 1 reads from a committed SARIF file instead (`alert_source = sarif_file`, §5) and the run records that it produced no *live* LANE 1 evidence. |
+| **Does our token actually carry the permissions we think it does?** | `repo` (or fine-grained Contents / Issues / PRs / Actions / Code-scanning write). The probe also records **who the token is** (`GET /user` login plus `x-oauth-scopes`) in the event log, so "we were not allowed to look" can never be filed as "there was nothing to find" *(R2-m-03)* | Hard stop. A run on a token that cannot write is not a run worth reporting. |
 
 ### 0e — Recorded Phase 0 outcome for `victorciao/superset`
 
@@ -139,7 +155,12 @@ Captured at `HEAD = a140e74`, snapshot committed to `fixtures/baseline.json`:
   `python`, `typescript` — recorded in `docs/PHASE0_DISCOVERY.md`.
 - **Actions runs: 1** (`CodeQL Setup`, event `dynamic`). No `pull_request` or
   `workflow_dispatch` run has ever completed, so the strengthened 0d row above resolves
-  `ci_evidence_mode = local` for the evidence run *(R2-M-06)*.
+  `ci_evidence_mode = local` for the evidence run *(R2-M-06)*. This is expected for an untouched
+  fork rather than a defect: Actions are disabled on a new fork until the owner enables them, and
+  Superset's test workflows fire on `pull_request`, whereas real Superset PRs target
+  `apache/superset` — so nothing has ever triggered them here. The pipeline's own first PR against
+  the fork is the event that can, which is what §10.1's one-way `local → github` upgrade exists
+  for.
 
 ---
 
@@ -1264,6 +1285,21 @@ none.
 No finding was rejected. **The plan-review loop is closed at round 8** with 0 blocking and 0 major;
 blocking has been 0 since round 1. This revision is the consolidated plan handed to the human owner
 for final approval before T2–T13 implementation begins.
+
+### Revision 10 — editorial rewrite of §3 0d (no review round)
+
+Requested by the human owner during final plan review: 0d read as a table of API probes without
+saying what question each probe answers or why the section exists, so its actual point — that an
+unavailable capability must be reported as unavailable and never as a clean zero — was not legible
+to a non-implementer. The section now opens with a plain-language statement of intent and the table
+asks each precondition as a question ("Can we file issues here?", "Has GitHub ever actually run
+this repo's tests on a PR?"), keeping the exact endpoint, status-code and fallback semantics in a
+separate column. The fork-specific reason the Actions row resolves `local` — a fork inherits
+workflow files but runs none of them, and no PR has ever been opened against `victorciao/superset`
+— is now stated inline rather than left implicit.
+
+No behavioural, threshold or gate change; no re-review round was run, and the round-8 verdict
+stands.
 
 ---
 
