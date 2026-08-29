@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import time
 import uuid
@@ -75,6 +76,21 @@ class RunAbort(RuntimeError):
     """Raised when a blocking capability or runtime guard aborts a run."""
 
 
+def _commit_message(repo_path: Path, revision: str) -> str | None:
+    """Read the candidate branch commit message without exposing command failures."""
+    try:
+        result = subprocess.run(
+            ["git", "show", "-s", "--format=%B", revision],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout
+
+
 def _publish_live(
     candidates: Sequence[Candidate],
     *,
@@ -94,6 +110,7 @@ def _publish_live(
         clock=time.monotonic,
         sleeper=time.sleep,
     )
+    commit_message = _commit_message(repo_path, head_branch)
     templates = {
         Lane.CODEQL: config.templates_dir / "issues/security_tracking.md",
         Lane.SKIPPED_TESTS: config.templates_dir / "issues/bug_report.yml",
@@ -155,6 +172,7 @@ def _publish_live(
             planner_outputs.get(candidate.candidate_id, {}),
             reviewer_outputs.get(candidate.candidate_id, {}),
             automation_metadata={"mode": "live", "would_write": False},
+            commit_message=commit_message,
         )
         validate_pr_body(pr_body)
         pr_title = render_pr_title(candidate)

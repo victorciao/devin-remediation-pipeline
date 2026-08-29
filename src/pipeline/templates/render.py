@@ -60,6 +60,16 @@ def _reviewer_text(reviewer_output: Mapping[str, object]) -> str:
     return "\n".join(lines) or "No reviewer test details supplied."
 
 
+def _commit_signoff(commit_message: str | None) -> str | None:
+    if commit_message is None:
+        return None
+    for line in reversed(commit_message.splitlines()):
+        candidate = line.strip()
+        if re.fullmatch(r"Signed-off-by:\s+[^<\n]+<[^<>\n]+>", candidate):
+            return candidate
+    return None
+
+
 def render_pr_body(
     template: str,
     candidate: Candidate,
@@ -68,6 +78,7 @@ def render_pr_body(
     *,
     automation_metadata: Mapping[str, object] | None = None,
     issue_number: int | None = None,
+    commit_message: str | None = None,
 ) -> str:
     """Render a PR body while preserving the vendored Superset checkbox block."""
     summary = (
@@ -98,9 +109,10 @@ def render_pr_body(
         "",
         "### ADDITIONAL INFORMATION",
         additional,
-        "",
-        "Signed-off-by: implementer commit verified by pipeline",
     ]
+    signoff = _commit_signoff(commit_message)
+    if signoff is not None:
+        sections.extend(["", signoff])
     if automation_metadata is not None:
         sections.extend(
             [
@@ -120,13 +132,19 @@ def render_issue_title(candidate: Candidate, generated_title: str) -> str:
 
 
 def render_pr_title(candidate: Candidate) -> str:
-    """Render a conventional Superset title for any remediation lane."""
-    locator = re.sub(r"\s+", " ", candidate.stable_locator).strip()
+    """Render a short, conventional Superset title for any remediation lane."""
+
+    def subject(value: str, fallback: str) -> str:
+        normalized = re.sub(r"\s+", " ", value).strip()
+        return (normalized or fallback)[:60].rstrip(" .,;:")
+
     if candidate.lane is Lane.CODEQL:
-        return f"fix(security): remediate {locator}"
+        return f"fix(security): remediate {subject(candidate.rule_id or '', 'CodeQL alert')}"
     if candidate.lane is Lane.SKIPPED_TESTS:
-        return f"test: re-enable {locator}"
-    return f"refactor: remove deprecated {locator}"
+        nodeid = candidate.nodeid or candidate.stable_locator
+        return f"test: re-enable {subject(nodeid.rsplit('::', 1)[-1], 'skipped test')}"
+    symbol = candidate.qualname or candidate.stable_locator.rsplit(":", 1)[-1]
+    return f"refactor: remove deprecated {subject(symbol, 'deprecated symbol')}"
 
 
 def render_issue_body(
