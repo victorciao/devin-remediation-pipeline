@@ -82,6 +82,7 @@ from pipeline.simulation import simulate_run
 from pipeline.state import (
     CandidateStateStore,
     ResumeAction,
+    StatePreservationError,
     github_marker_search,
 )
 from pipeline.templates.render import (
@@ -134,7 +135,7 @@ def _publish_live(
     state_store: CandidateStateStore,
     ci_mode_events: list[RunEventRecord],
     ci_mode_state: list[CiEvidenceMode],
-    ci_run_started: float,
+    ci_elapsed_s: list[float],
     run_id: str,
 ) -> list[Candidate]:
     """Publish live artifacts after review, preserving the mandated write order."""
@@ -414,16 +415,18 @@ def _publish_live(
             commit_messages_holder[0] = commit_messages[-1]
             if not wait_for_ci:
                 return CiWaitResult(ci_mode_state[0], None, False)
+            wait_started = time.monotonic()
             wait_result = wait_for_required_contexts(
                 config,
                 client=transport,
-                elapsed_s=int(time.monotonic() - ci_run_started),
+                elapsed_s=ci_elapsed_s[0],
                 sha=head_sha,
                 poll=True,
                 on_mode_transition=record_ci_mode_transition,
                 ci_mode=ci_mode_state[0],
                 is_fork=is_fork,
             )
+            ci_elapsed_s[0] += time.monotonic() - wait_started
             ci_mode_state[0] = wait_result.mode
             ci_reasons[0] = wait_result.reason
             ci_details[0] = wait_result.detail
@@ -580,6 +583,7 @@ def _publish_live(
         except (
             ArtifactUnavailableError,
             GitHubResponseError,
+            StatePreservationError,
             ArtifactValidationError,
             PreflightError,
             HttpTransportError,
@@ -637,13 +641,9 @@ def _publish_live(
         published_candidate = publication_source.model_copy(
             update={
                 "state": (
-                    CandidateState.TERMINAL
-                    if links.merged_at is not None
-                    else (
-                        CandidateState.ISSUE_PATCHED
-                        if config.has_issues
-                        else CandidateState.COMMENT_CREATED
-                    )
+                    CandidateState.ISSUE_PATCHED
+                    if config.has_issues
+                    else CandidateState.COMMENT_CREATED
                 ),
                 "issue_number": links.issue_number or publication_source.issue_number,
                 "pr_number": links.pr_number,
@@ -652,14 +652,12 @@ def _publish_live(
                 "head_branch": branch,
                 "head_sha": head_sha_holder[0] or publication_source.head_sha,
                 "comment_url": comment_url_value,
-                "merged_at": links.merged_at or publication_source.merged_at,
+                "merged_at": publication_source.merged_at,
                 "ci_evidence_mode": ci_mode_state[0].value,
                 "auto_merge_requested": (
                     links.auto_merge_requested or publication_source.auto_merge_requested
                 ),
-                "merge_verified": (
-                    links.merged_at is not None or publication_source.merge_verified
-                ),
+                "merge_verified": publication_source.merge_verified,
             }
         )
         latest_persisted: Candidate | None = latest_after_publication
@@ -938,9 +936,11 @@ def _prepare_live_candidate(
         ):
             previous = getattr(persisted, field)
             current = getattr(prepared, field)
-            assert previous is None or current == previous
+            if previous is not None and current != previous:
+                raise StatePreservationError(f"resume preparation discarded persisted {field}")
         if persisted.head_sha is not None:
-            assert prepared.head_sha is not None
+            if prepared.head_sha is None:
+                raise StatePreservationError("resume preparation discarded persisted head_sha")
     return prepared
 
 
@@ -968,7 +968,7 @@ def run_once(
     github_transport: UrllibGitHubTransport | None = None
     ci_mode_events: list[RunEventRecord] = []
     ci_mode_state = [config.ci_evidence_mode]
-    ci_run_started = time.monotonic()
+    ci_elapsed_s = [0.0]
     if config.mode is Mode.LIVE:
         if head_branch is None:
             raise RunAbort("LIVE requires --head-branch for PR publication")
@@ -1327,12 +1327,13 @@ def run_once(
                 state_store=state_store,
                 ci_mode_events=ci_mode_events,
                 ci_mode_state=ci_mode_state,
-                ci_run_started=ci_run_started,
+                ci_elapsed_s=ci_elapsed_s,
                 run_id=run_id,
             )
         except (
             ArtifactUnavailableError,
             GitHubResponseError,
+            StatePreservationError,
             ArtifactValidationError,
             PreflightError,
             HttpTransportError,

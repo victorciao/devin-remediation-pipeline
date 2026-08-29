@@ -21,6 +21,10 @@ class ResumeAction(str, Enum):
     DEFER = "defer"
 
 
+class StatePreservationError(RuntimeError):
+    """Raised when a resume write would discard durable artifact identity."""
+
+
 @dataclass(frozen=True)
 class ResumeDecision:
     """Pure decision for resuming one persisted candidate."""
@@ -254,6 +258,7 @@ __all__ = [
     "CandidateStateStore",
     "ResumeAction",
     "ResumeDecision",
+    "StatePreservationError",
     "decide_resume",
     "has_local_artifact",
     "github_marker_search",

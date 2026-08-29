@@ -269,7 +269,7 @@ def wait_for_required_contexts(
     config: PipelineConfig,
     *,
     client: GitHubTransport,
-    elapsed_s: int,
+    elapsed_s: float,
     reported_contexts: Mapping[str, str] | None = None,
     sha: str = "HEAD",
     poll: bool = True,
@@ -293,7 +293,7 @@ def wait_for_required_contexts(
         )
         complete = all(statuses.get(context) == "success" for context in REQUIRED_CONTEXTS)
         awaiting_approval = any(
-            statuses.get(context) in {"action_required", "awaiting_approval"}
+            statuses.get(context) in {"action_required", "awaiting_approval", "waiting"}
             for context in REQUIRED_CONTEXTS
         )
         transition = maybe_upgrade_ci_mode(
@@ -378,7 +378,6 @@ class ArtifactLinks:
     comment_url: str | None = None
     issue_number: int | None = None
     pr_number: int | None = None
-    merged_at: str | None = None
     auto_merge_requested: bool = False
 
 
