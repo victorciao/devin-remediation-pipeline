@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping
 from pydantic import BaseModel, ConfigDict, Field
 
 from pipeline.config import PipelineConfig
+from pipeline.rubric import ResolvedFactors, RubricTables, resolve_factors
 from pipeline.schemas import Candidate, GateName, GateResult, Lane, ReasonCode
 
 
@@ -18,10 +19,11 @@ class GateEvaluation(BaseModel):
     failed_gate: GateName | None = None
     failed_gates: list[GateName] = Field(default_factory=list)
     hard_condition_failures: list[ReasonCode] = Field(default_factory=list)
+    resolved_factors: ResolvedFactors | None = None
 
 
 HardCondition = Callable[[Candidate, PipelineConfig, int | None], ReasonCode | None]
-HardConditionSpec = tuple[GateName, ReasonCode, HardCondition]
+HardConditionSpec = tuple[GateName, frozenset[ReasonCode], HardCondition]
 
 
 def _lane1_scope(
@@ -80,26 +82,43 @@ def _lane3_callers(
 
 
 LANE_HARD_CONDITIONS: Mapping[Lane, tuple[HardConditionSpec, ...]] = {
-    Lane.CODEQL: ((GateName.VERIFIABILITY_EXISTS, ReasonCode.OUT_OF_SCOPE_FRONTEND, _lane1_scope),),
+    Lane.CODEQL: (
+        (
+            GateName.VERIFIABILITY_EXISTS,
+            frozenset({ReasonCode.OUT_OF_SCOPE_FRONTEND}),
+            _lane1_scope,
+        ),
+    ),
     Lane.SKIPPED_TESTS: (
-        (GateName.AUTOMATABILITY, ReasonCode.CLASS_SCOPE_TOO_BROAD, _lane2_breadth),
-        (GateName.AUTOMATABILITY, ReasonCode.CLASS_BREADTH_UNKNOWN, _lane2_breadth),
-        (GateName.AUTOMATABILITY, ReasonCode.BLOCKED_BY_ENCLOSING_SKIP, _lane2_overlap),
+        (
+            GateName.AUTOMATABILITY,
+            frozenset(
+                {
+                    ReasonCode.CLASS_SCOPE_TOO_BROAD,
+                    ReasonCode.CLASS_BREADTH_UNKNOWN,
+                }
+            ),
+            _lane2_breadth,
+        ),
+        (
+            GateName.AUTOMATABILITY,
+            frozenset({ReasonCode.BLOCKED_BY_ENCLOSING_SKIP}),
+            _lane2_overlap,
+        ),
     ),
     Lane.DEPRECATIONS: (
-        (GateName.AUTOMATABILITY, ReasonCode.PUBLIC_API_SURFACE, _lane3_callers),
-        (GateName.AUTOMATABILITY, ReasonCode.INTERNAL_CALLER, _lane3_callers),
+        (
+            GateName.AUTOMATABILITY,
+            frozenset({ReasonCode.PUBLIC_API_SURFACE, ReasonCode.INTERNAL_CALLER}),
+            _lane3_callers,
+        ),
     ),
 }
 HARD_CONDITION_REASONS = frozenset(
-    {
-        ReasonCode.OUT_OF_SCOPE_FRONTEND,
-        ReasonCode.CLASS_SCOPE_TOO_BROAD,
-        ReasonCode.CLASS_BREADTH_UNKNOWN,
-        ReasonCode.BLOCKED_BY_ENCLOSING_SKIP,
-        ReasonCode.PUBLIC_API_SURFACE,
-        ReasonCode.INTERNAL_CALLER,
-    }
+    reason
+    for conditions in LANE_HARD_CONDITIONS.values()
+    for _, reasons, _ in conditions
+    for reason in reasons
 )
 
 
@@ -128,8 +147,15 @@ def evaluate_gates(
     config: PipelineConfig,
     *,
     live_enclosed_tests: int | None = None,
+    rubrics: RubricTables | None = None,
+    resolved_factors: ResolvedFactors | None = None,
 ) -> GateEvaluation:
     """Evaluate all binary gates before scoring, preserving each failure reason."""
+    factors = (
+        resolved_factors
+        if resolved_factors is not None
+        else resolve_factors(candidate, config, rubrics)
+    )
     results: dict[GateName, GateResult] = {}
     failures: list[GateName] = []
 
@@ -145,12 +171,14 @@ def evaluate_gates(
     if live_count is None:
         live_count = candidate.live_enclosed_tests
     hard_failures: list[tuple[GateName, ReasonCode]] = []
-    for gate_name, expected_reason, condition in LANE_HARD_CONDITIONS.get(candidate.lane, ()):
+    for gate_name, allowed_reasons, condition in LANE_HARD_CONDITIONS.get(candidate.lane, ()):
         reason = condition(candidate, config, live_count)
-        if reason is not None and reason is expected_reason:
+        if reason is not None:
+            if reason not in allowed_reasons:
+                raise ValueError(f"hard condition returned an unregistered reason: {reason.value}")
             hard_failures.append((gate_name, reason))
 
-    automatability_passed = candidate.automatability is not None and candidate.automatability >= 2
+    automatability_passed = factors.automatability >= 2
     automatability_reason = None if automatability_passed else ReasonCode.AUTOMATABILITY_LOW
     automatability_failures = [
         reason for gate_name, reason in hard_failures if gate_name is GateName.AUTOMATABILITY
@@ -166,7 +194,7 @@ def evaluate_gates(
     if not automatability_result.passed:
         failures.append(GateName.AUTOMATABILITY)
 
-    verifiability_passed = candidate.verifiability is not None and candidate.verifiability >= 2
+    verifiability_passed = factors.verifiability >= 2
     has_verifiability = _verifiability_exists(candidate)
     verifiability_passed = verifiability_passed and has_verifiability
     verifiability_failures = [
@@ -194,4 +222,5 @@ def evaluate_gates(
         failed_gate=failures[0] if failures else None,
         failed_gates=failures,
         hard_condition_failures=[reason for _, reason in hard_failures],
+        resolved_factors=factors,
     )

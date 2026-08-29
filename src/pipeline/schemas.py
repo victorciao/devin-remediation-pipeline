@@ -40,6 +40,7 @@ class ReasonCode(str, Enum):
     SUPPRESSED_BY_CONTAINMENT = "suppressed_by_containment"
     PUBLIC_API_SURFACE = "public_api_surface"
     INTERNAL_CALLER = "internal_caller"
+    NOT_EOL = "not_eol"
     CONDITIONAL_ENVIRONMENT_GUARD = "conditional_environment_guard"
     EXPECTED_FAILURE_XFAIL = "expected_failure_xfail"
     STALE_SKIP = "stale_skip"
@@ -55,6 +56,7 @@ class ReasonCode(str, Enum):
     ROLE_COLLISION = "role_collision"
     SESSION_CEILING_EXCEEDED = "session_ceiling_exceeded"
     COLLECTION_ERROR = "collection_error"
+    RUBRIC_FACTOR_UNRESOLVED = "rubric_factor_unresolved"
 
 
 class CandidateState(str, Enum):

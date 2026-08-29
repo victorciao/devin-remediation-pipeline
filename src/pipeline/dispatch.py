@@ -19,12 +19,13 @@ HUMAN_ROUTED_REASONS = frozenset(
         ReasonCode.CLASS_BREADTH_UNKNOWN,
         ReasonCode.BLOCKED_BY_ENCLOSING_SKIP,
         ReasonCode.PUBLIC_API_SURFACE,
+        ReasonCode.INTERNAL_CALLER,
     }
 )
 DROPPED_REASONS = frozenset(
     {
         ReasonCode.OUT_OF_SCOPE_FRONTEND,
-        ReasonCode.INTERNAL_CALLER,
+        ReasonCode.NOT_EOL,
         ReasonCode.TRIGGER_MISSING,
         ReasonCode.AUTOMATABILITY_LOW,
         ReasonCode.VERIFIABILITY_MISSING,
