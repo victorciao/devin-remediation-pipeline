@@ -73,9 +73,22 @@ capability probes; an unmet probe is recorded as `capability_unavailable` or
 `token_capability_missing`, rather than becoming an empty lane. Actions history resolves
 `ci_evidence_mode`; local evidence hard-disables auto-merge.
 
-The command-line entrypoint currently refuses LIVE before remote work unless a guarded Devin
-and GitHub transport is supplied by an embedding runtime. Consequently, no LIVE capability
-probe or remote artifact write is claimed as verified here.
+After obtaining explicit approval for a target run, provide the Devin-created branch and run:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m pipeline \
+  --mode=live --head-branch devin/remediation-run \
+  --repo-path /home/ubuntu/repos/superset \
+  --output-dir ./live-output \
+  --baseline fixtures/baseline.json
+```
+
+The command-line entrypoint constructs guarded stdlib HTTP transports for LIVE, performs a
+read-only GitHub capability preflight before candidate work, and then runs Devin sessions and
+ordered GitHub publication only when the preconditions pass. A missing credential, unreadable
+capability, unavailable required service, missing `--head-branch`, or hard runtime ceiling
+causes a non-zero abort before the relevant work. No LIVE capability probes, remote writes, CI
+evidence, merge behavior, or production results are claimed here because LIVE has not been run.
 
 ## Configuration reference (§13)
 

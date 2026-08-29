@@ -74,7 +74,10 @@ def simulate_run(
                 candidate,
                 planner.get(candidate.candidate_id, {}),
                 reviewer.get(candidate.candidate_id, {}),
-                automation_metadata={"mode": "simulate", "would_write": True},
+                automation_metadata={
+                    "mode": config.mode.value,
+                    "would_write": config.mode.value == "simulate",
+                },
             )
             validate_pr_body(pr_body)
             pr_path = output_dir / "reports" / "prs" / f"{candidate.candidate_id}.md"

@@ -13,6 +13,13 @@ from pipeline.schemas import Candidate, Tier
 class GitHubTransport(Protocol):
     """Minimal transport required for GitHub writes."""
 
+    @property
+    def response_headers(self) -> Mapping[str, str]:
+        """Return non-sensitive headers from the latest response."""
+
+    def get(self, path: str) -> object:
+        """Read a GitHub resource."""
+
     def post(self, path: str, payload: Mapping[str, object]) -> Mapping[str, object]:
         """Create an issue, pull request, comment, or label."""
 
@@ -50,6 +57,8 @@ class ArtifactLinks:
     issue_url: str | None
     pr_url: str | None
     comment_url: str | None = None
+    issue_number: int | None = None
+    pr_number: int | None = None
 
 
 class GitHubClient:
@@ -207,7 +216,7 @@ def publish_artifacts(
         preflight()
     issue_number, issue_url = client.create_issue(issue_title, issue_body, labels)
     if candidate.tier is Tier.MEDIUM or pr_title is None or pr_body is None or head is None:
-        return ArtifactLinks(issue_url, None)
+        return ArtifactLinks(issue_url, None, issue_number=issue_number)
     if preflight is not None:
         preflight()
     pr_number, pr_url = client.create_pr(
@@ -225,7 +234,7 @@ def publish_artifacts(
         and client._config.ci_evidence_mode.value == "github"
     ):
         client.enable_auto_merge(pr_number)
-    return ArtifactLinks(issue_url, pr_url)
+    return ArtifactLinks(issue_url, pr_url, issue_number=issue_number, pr_number=pr_number)
 
 
 def publish_degraded(
@@ -253,7 +262,7 @@ def publish_degraded(
     if preflight is not None:
         preflight()
     comment_url = client.comment_pr(pr_number, comment_body)
-    return ArtifactLinks(None, pr_url, comment_url)
+    return ArtifactLinks(None, pr_url, comment_url, pr_number=pr_number)
 
 
 __all__ = [
