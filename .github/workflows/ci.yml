@@ -28,4 +28,6 @@ jobs:
       - name: Mypy
         run: mypy --strict src tests
       - name: Pytest with coverage gate
+        env:
+          SUPERSET_CHECKOUT: ${{ github.workspace }}/superset
         run: pytest --cov --cov-report=term-missing
