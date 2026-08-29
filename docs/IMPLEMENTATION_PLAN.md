@@ -49,15 +49,37 @@ The implementing Devin session(s) build REPO A via this workflow:
    dedicated PLANNER session, if one is created — build-time has no standing planner role) and
    committed back to `docs/IMPLEMENTATION_PLAN.md`. Bounded by
    `iteration_cap = 5`, then human escalation.
-2. **IMPLEMENT + TEST CONCURRENTLY** — once the plan is approved, an IMPLEMENTER agent builds
-   REPO A modules while a distinct REVIEWER agent independently authors REPO A's own tests.
-3. **CODE-REVIEW LOOP** — reviewer/implementer iterate until no blocking/major findings remain,
-   bounded by `iteration_cap = 5`; hitting the cap escalates to a human.
-4. **PUSH** — push PR(s) on REPO A only after the loop converges AND REPO A CI is green.
+2. **IMPLEMENT + TEST CONCURRENTLY (reviewer phase A)** — once the plan is approved, an
+   IMPLEMENTER agent builds REPO A modules while a distinct REVIEWER agent independently authors
+   REPO A's own tests from this plan, **diff-blind**: phase A reads production code only to
+   resolve names and signatures, never to derive expected behaviour from it.
+3. **CODE-REVIEW LOOP (reviewer phase B)** — reviewer/implementer iterate until no blocking/major
+   findings remain, bounded by `iteration_cap = 5`; hitting the cap escalates to a human.
+
+   Phase B is a **read of the implementer's diff**, and is a distinct obligation from phase A:
+   - Each iteration reads `git diff --merge-base <base>` and every changed module in
+     `src/**` **end to end** — not windows around the symbols the tests touch.
+   - Findings are delivered as a structured artifact (one row per finding: `severity` from
+     `blocking` / `major` / `minor` / `nit`, file, line range, plan clause, observed behaviour,
+     triggering path, proposed fix), committed under `docs/reviews/`. Prose-only or
+     failing-tests-only delivery does NOT satisfy this step.
+   - Phase B MUST look for defect classes a plan-derived suite cannot catch by construction:
+     safety-invariant bypasses on error/retry/resume paths, state-machine and idempotency holes,
+     identity/drift collisions, ceilings checked too late, secrets reaching logs, exceptions or
+     artifacts, and containment enforced by convention rather than construction.
+   - **A green test suite is not convergence.** Convergence is "no unresolved blocking/major
+     finding in the phase-B artifact". A round that reports only "suite is green" is an
+     incomplete iteration and does not advance the counter.
+4. **PUSH** — push PR(s) on REPO A only after phase B converges AND REPO A CI is green. CI green
+   alone is not a push precondition.
 
 Build-time reviewer and implementer MUST be distinct sessions (collision = configuration
 error). The implementer must not author/edit build-time tests (an implementer edit →
-`needs-human-review`), mirroring the runtime rule.
+`needs-human-review`), mirroring the runtime rule. The phase-A test author and the phase-B
+code reviewer MAY be the same session, but phase B MUST NOT be reduced to re-running phase A's
+suite; a session that authored the suite carries a standing bias toward its own criteria, so if
+phase B is delegated to a separate session it MUST be independent of BOTH the implementer and the
+test author.
 
 ---
 
@@ -384,8 +406,11 @@ Three independent, distinct sessions per candidate:
   criteria that act as the shared test oracle.
 - **IMPLEMENTER** — writes ONLY the code fix to the planner's spec. Barred from creating/editing
   tests (any such edit → `needs-human-review`).
-- **REVIEWER** — concurrently (from the planner spec, NOT the implementer's diff) authors the
-  red→green regression test, then runs the code-review loop.
+- **REVIEWER** — two ordered phases. **Phase A** authors the red→green regression test from the
+  planner spec, **NOT** from the implementer's diff (so the test cannot be shaped to whatever the
+  implementer happened to write). **Phase B**, after the join, reads the implementer's diff and
+  runs the code-review loop. Phase A's diff-blindness is a constraint on test authoring ONLY and
+  is never a licence to skip the phase-B read.
 
 **Sequence**
 
@@ -395,8 +420,12 @@ Three independent, distinct sessions per candidate:
    the expected reason (a test that passes pre-fix, or fails for an unrelated reason, is invalid
    → re-author/escalate). Then red→green against the implementer's fix. A still-red join is a
    real bug signal that feeds the review loop.
-4. Code-review loop (severity taxonomy: `blocking` / `major` / `minor` / `nit`) until no
-   blocking/major remain, bounded by `iteration_cap = 5`.
+4. Code-review loop (reviewer phase B; severity taxonomy: `blocking` / `major` / `minor` / `nit`)
+   until no blocking/major remain, bounded by `iteration_cap = 5`. The reviewer reads the
+   implementer's full diff — reachable via the candidate branch head against `base_sha` — and
+   emits `findings` per §12.1. An iteration whose only output is the red→green result of the
+   reviewer's own test is incomplete: it does not count toward `iteration_cap` and does not
+   satisfy convergence. Findings need not map to an acceptance criterion (see §12.1).
 5. **Terminal** — converged + all gates green → dispatch/auto-merge eligible; cap hit or
    unresolved red→green disagreement → `disagreement_unresolved` → `needs-human-review` (post a
    disagreement summary: failing test, mapped criterion, pre-fix signature, fix rationale). NO
@@ -494,12 +523,16 @@ is simply deleting a dead skip marker) that ships as a reviewer-only diff.
 
 **Structural invariants (NOT configurable)** — reviewer≠implementer separation, red-baseline
 requirement (per §9.1/§9.3), no-auto-merge-without-green-CI, no third adjudicating agent,
-criterion-mapped tests, **and "an unresolved `major` never auto-merges"**. This runtime
-flow has NO plan-review step.
+criterion-mapped tests, **an unresolved `major` never auto-merges**, and **no convergence without
+a recorded phase-B diff review** (§12.1 `diff_reviewed`). This runtime flow has NO plan-review
+step.
 
 **Additional safeguards against reviewer-as-sole-test-author risk** — each reviewer test maps to
 a planner acceptance criterion (unmapped → escalate); a fix+test that breaks an existing suite
-test blocks auto-merge regardless of the reviewer's own test being green.
+test blocks auto-merge regardless of the reviewer's own test being green; and a green red→green
+result is never sufficient for convergence, because the reviewer that authored the test is
+biased toward its own criteria — the phase-B diff read is what covers the defect classes those
+criteria do not name.
 
 ---
 
@@ -619,11 +652,21 @@ PLANNER     -> { criteria: [ { id: "AC-1", statement, expected_failure {…§9.1
 IMPLEMENTER -> { files_changed[], criteria_addressed[], commands_run[] }
 REVIEWER    -> { tests: [ { path, nodeid, criterion_id } ],
                  red_baseline { … }, green_result { … },
-                 findings: [ { severity, criterion_id, note } ] }
+                 diff_reviewed { base_sha, head_sha, files_read[] },
+                 findings: [ { severity, criterion_id | null, file, lines, note } ] }
 ```
 
-A reviewer test whose `criterion_id` is absent from the planner output is **rejected** (the §9
-unmapped-test escalation).
+A reviewer **test** whose `criterion_id` is absent from the planner output is **rejected** (the §9
+unmapped-test escalation). A reviewer **finding** is NOT subject to that rule: `criterion_id` is
+nullable on findings, because the phase-B defect classes the review must catch (secret leakage,
+crash-between-writes ordering holes, identity collisions, late ceiling checks) belong to no
+acceptance criterion, and rejecting them for being unmapped would funnel the review back into
+spec conformance. An off-criterion finding carries its severity and blocks convergence exactly
+like a mapped one.
+
+`diff_reviewed` is **required**: a reviewer response that omits it, or that names no files while
+the implementer's diff is non-empty, is an incomplete iteration per §2/§9 step 4 — it does not
+count toward `iteration_cap` and cannot satisfy convergence.
 
 ### §12.2 Polling and cost contract
 
@@ -854,7 +897,12 @@ code-review loop converges with green CI.
 - \>10 gate-passing high-score candidates → exactly 10 dispatched, rest recorded deferred.
 - a converged PR with an unresolved `major` (no `blocking`) → NOT auto-merge eligible →
   `needs-human-review`.
-- reviewer test with no mapped planner criterion → rejected/escalated.
+- reviewer test with no mapped planner criterion → rejected/escalated, while a reviewer
+  **finding** with `criterion_id = null` is accepted and, at `blocking`/`major`, blocks
+  convergence and auto-merge.
+- a reviewer iteration reporting green red→green but omitting `diff_reviewed` (or naming zero
+  files against a non-empty implementer diff) does NOT converge, does NOT advance
+  `iteration_cap`, and is recorded as an incomplete iteration.
 - a pre-fix failure whose signature doesn't match the expected reason → invalid red baseline.
 - a still-red join not converging within the cap → `disagreement_unresolved` →
   `needs-human-review`, never auto-merge.
