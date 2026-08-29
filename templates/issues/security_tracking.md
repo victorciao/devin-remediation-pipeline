@@ -1,1 +1,9 @@
-<!-- Detail-free security tracking template is populated in T8. -->
+### SUMMARY (no exploit detail)
+
+### SCOPE (files or modules only)
+
+### REMEDIATION STATUS
+
+### VERIFICATION
+
+### REFERENCES (rule ID only)

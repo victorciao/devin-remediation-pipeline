@@ -17,7 +17,19 @@ from pipeline.red_baseline import (
     classify_implementer_diff,
     inspect_reviewer_diff,
 )
-from pipeline.schemas import Candidate, EventRecord, RetryDecision
+from pipeline.review_loop import (
+    ReviewIteration,
+    ReviewLoopResult,
+    review_iteration_from_payload,
+    run_review_loop,
+)
+from pipeline.schemas import (
+    Candidate,
+    CandidateState,
+    EventRecord,
+    ReasonCode,
+    RetryDecision,
+)
 
 
 class SessionRole(str, Enum):
@@ -82,19 +94,39 @@ class OrchestrationResult:
     planner: RoleRun
     implementer: RoleRun
     reviewer: RoleRun
+    review: ReviewLoopResult | None = None
 
 
 class SessionCeilingError(RuntimeError):
     """Raised when a run exceeds its configured session or cost ceiling."""
+
+    reason = ReasonCode.SESSION_CEILING_EXCEEDED
 
 
 class SessionDedupeError(RuntimeError):
     """Raised when an idempotent retry returns an existing session."""
 
 
-TERMINAL_STATUSES = frozenset(
-    {"completed", "failed", "errored", "cancelled", "timeout", "succeeded"}
+class RoleCollisionError(ConfigError):
+    """Raised when two runtime roles receive the same session identity."""
+
+    reason = ReasonCode.ROLE_COLLISION
+
+
+KNOWN_STATUSES = frozenset(
+    {
+        "working",
+        "blocked",
+        "expired",
+        "finished",
+        "suspend_requested",
+        "suspend_requested_frontend",
+        "resume_requested",
+        "resume_requested_frontend",
+        "resumed",
+    }
 )
+TERMINAL_STATUSES = frozenset({"blocked", "expired", "finished"})
 
 
 def resolve_retry_decision(
@@ -127,6 +159,16 @@ def event_with_attempt(
     )
 
 
+def event_with_ceiling(event: EventRecord, error: SessionCeilingError) -> EventRecord:
+    """Record a hard session or cost ceiling abort in a Layer 1 event."""
+    return event.model_copy(
+        update={
+            "reason": error.reason,
+            "terminal_outcome": CandidateState.TERMINAL,
+        }
+    )
+
+
 class SessionClient:
     """Create and poll role sessions through one injectable transport seam."""
 
@@ -136,8 +178,8 @@ class SessionClient:
         *,
         transport: DevinTransport | None = None,
         role_limits: Mapping[SessionRole, RoleLimits] | None = None,
-        max_sessions: int = 20,
-        max_total_acu: float = 500.0,
+        max_sessions: int | None = None,
+        max_total_acu: float | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -146,14 +188,20 @@ class SessionClient:
         self._config = config
         self._transport = transport
         self._limits = dict(role_limits or {})
-        self._max_sessions = max_sessions
-        self._max_total_acu = max_total_acu
+        self._max_sessions = config.max_sessions if max_sessions is None else max_sessions
+        self._max_total_acu = config.max_total_acu if max_total_acu is None else max_total_acu
         self._clock = clock
         self._sleeper = sleeper
         self._session_count = 0
         self._total_acu = 0.0
         self._previous: dict[tuple[str, SessionRole], str] = {}
+        self._issued_roles: dict[str, SessionRole] = {}
         self._lock = threading.Lock()
+
+    @property
+    def config(self) -> PipelineConfig:
+        """Return the configuration used for this client."""
+        return self._config
 
     def _limit(self, role: SessionRole) -> RoleLimits:
         return self._limits.get(role, RoleLimits())
@@ -218,13 +266,40 @@ class SessionClient:
             raise SessionDedupeError(
                 f"retry returned an existing {role.value} session: {session_id}"
             )
+        with self._lock:
+            issued_role = self._issued_roles.get(session_id)
+            if issued_role is not None and issued_role is not role:
+                raise RoleCollisionError(
+                    f"session {session_id} was issued to both {issued_role.value} and {role.value}"
+                )
+            self._issued_roles[session_id] = role
         self._previous[(candidate_id, role)] = session_id
         return SessionAttempt(role, candidate_id, attempt, session_id, raw, decision)
 
     def poll_session(self, role: SessionRole, session_id: str) -> SessionSnapshot:
         """Poll until the API reports a terminal status or the role times out."""
         if self._config.mode is Mode.SIMULATE:
-            return SessionSnapshot(session_id, "completed", {"session_id": session_id})
+            output: Mapping[str, object]
+            if role is SessionRole.PLANNER:
+                output = {"criteria": [], "files_in_scope": [], "out_of_scope": []}
+            elif role is SessionRole.IMPLEMENTER:
+                output = {
+                    "files_changed": [],
+                    "criteria_addressed": [],
+                    "commands_run": [],
+                }
+            else:
+                output = {
+                    "tests": [],
+                    "red_baseline": {"status": "valid"},
+                    "green_result": {"passed": True},
+                    "findings": [],
+                }
+            return SessionSnapshot(
+                session_id,
+                "finished",
+                {"session_id": session_id, "structured_output": output},
+            )
         if self._transport is None:
             raise ConfigError("live session orchestration requires a transport")
         deadline = self._clock() + self._limit(role).session_timeout_s
@@ -232,7 +307,7 @@ class SessionClient:
             response = self._transport.get(f"/v1/sessions/{session_id}")
             status = response.get("status_enum", response.get("status"))
             if not isinstance(status, str):
-                raise ValueError("session response lacks status_enum")
+                status = "unknown"
             snapshot = SessionSnapshot(session_id, status, response)
             if status in TERMINAL_STATUSES:
                 acu = response.get("acu_used", response.get("acu"))
@@ -392,31 +467,54 @@ class RuntimeOrchestrator:
         *,
         attempt: int = 1,
     ) -> OrchestrationResult:
-        """Plan first, then run implementer and reviewer concurrently."""
+        """Run the review loop after a planner and concurrent role join."""
         planner = self.run_planner(candidate_id, planner_prompt, attempt=attempt)
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            implementer_future = executor.submit(
-                self.run_implementer,
-                candidate_id,
-                implementer_prompt,
-                attempt=attempt,
+
+        def concurrent_roles(role_attempt: int) -> OrchestrationResult:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                implementer_future = executor.submit(
+                    self.run_implementer,
+                    candidate_id,
+                    implementer_prompt,
+                    attempt=role_attempt,
+                )
+                reviewer_future = executor.submit(
+                    self.run_reviewer,
+                    candidate_id,
+                    reviewer_prompt,
+                    attempt=role_attempt,
+                )
+                implementer = implementer_future.result()
+                reviewer = reviewer_future.result()
+            return OrchestrationResult(planner, implementer, reviewer)
+
+        current = concurrent_roles(attempt)
+
+        def output(run: RoleRun) -> Mapping[str, object]:
+            structured = run.snapshot.payload.get("structured_output")
+            if isinstance(structured, Mapping):
+                return structured
+            return {}
+
+        def iteration_from(result: OrchestrationResult) -> ReviewIteration:
+            return review_iteration_from_payload(
+                output(result.planner),
+                output(result.reviewer),
+                output(result.implementer),
             )
-            reviewer_future = executor.submit(
-                self.run_reviewer,
-                candidate_id,
-                reviewer_prompt,
-                attempt=attempt,
-            )
-            implementer = implementer_future.result()
-            reviewer = reviewer_future.result()
-        ids = {
-            planner.attempt.session_id,
-            implementer.attempt.session_id,
-            reviewer.attempt.session_id,
-        }
-        if len(ids) != 3:
-            raise ConfigError("planner, implementer, and reviewer sessions must be distinct")
-        return OrchestrationResult(planner, implementer, reviewer)
+
+        def rerun(role_attempt: int) -> ReviewIteration:
+            nonlocal current
+            current = concurrent_roles(role_attempt)
+            return iteration_from(current)
+
+        review = run_review_loop(self._client.config, iteration_from(current), rerun)
+        return OrchestrationResult(
+            current.planner,
+            current.implementer,
+            current.reviewer,
+            review,
+        )
 
 
 __all__ = [
@@ -432,6 +530,8 @@ __all__ = [
     "SessionRole",
     "SessionSnapshot",
     "SessionCeilingError",
+    "RoleCollisionError",
     "event_with_attempt",
+    "event_with_ceiling",
     "resolve_retry_decision",
 ]

@@ -1,1 +1,1 @@
-<!-- Conventional-Commits regex is populated in T8. -->
+^(build|chore|ci|docs|feat|fix|perf|refactor|style|test|other)(\(.+\))?(\!)?:\s.+

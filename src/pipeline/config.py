@@ -95,6 +95,8 @@ class PipelineConfig(BaseModel):
     eol_major_lag: int = Field(default=2, ge=1, strict=True)
     merge_rate_floor: float = Field(default=0.50, ge=0.0, le=1.0, strict=True)
     session_failure_ceiling: float = Field(default=0.30, ge=0.0, le=1.0, strict=True)
+    max_sessions: int = Field(default=20, ge=1, strict=True)
+    max_total_acu: float = Field(default=500.0, gt=0, strict=True)
     kpi_sink: KpiSink = KpiSink.LOCAL
     major_only_requires_human: bool = True
     alert_source: AlertSource = AlertSource.API
@@ -255,12 +257,14 @@ def _parse_cli(args: Sequence[str]) -> tuple[dict[str, object], bool]:
             "eol_major_lag",
             "ci_wait_timeout_s",
             "lane2_class_breadth_max",
+            "max_sessions",
         }:
             values[normalized_key] = _parse_int(normalized_key, raw_value)
         elif normalized_key in {
             "coverage_bar",
             "merge_rate_floor",
             "session_failure_ceiling",
+            "max_total_acu",
         }:
             values[normalized_key] = _parse_float(normalized_key, raw_value)
         elif normalized_key in {"major_only_requires_human", "auto_merge_enabled"}:
@@ -287,6 +291,8 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
         "AUTO_MERGE_ENABLED": "auto_merge_enabled",
         "CI_WAIT_TIMEOUT_S": "ci_wait_timeout_s",
         "LANE2_CLASS_BREADTH_MAX": "lane2_class_breadth_max",
+        "MAX_SESSIONS": "max_sessions",
+        "MAX_TOTAL_ACU": "max_total_acu",
         "KPI_SINK": "kpi_sink",
         "ALERT_SOURCE": "alert_source",
         "ALERT_FIXTURE_PATH": "alert_fixture_path",
@@ -314,6 +320,7 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
             "EOL_MAJOR_LAG",
             "CI_WAIT_TIMEOUT_S",
             "LANE2_CLASS_BREADTH_MAX",
+            "MAX_SESSIONS",
         }:
             values[field_name] = _parse_int(field_name, raw_value)
         elif name in {
@@ -323,6 +330,7 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
             "TIER_MEDIUM_MIN",
             "MERGE_RATE_FLOOR",
             "SESSION_FAILURE_CEILING",
+            "MAX_TOTAL_ACU",
         }:
             values[field_name] = _parse_float(field_name, raw_value)
         elif name in {"MAJOR_ONLY_REQUIRES_HUMAN", "AUTO_MERGE_ENABLED"}:
