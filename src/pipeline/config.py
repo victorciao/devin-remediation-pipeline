@@ -95,7 +95,7 @@ class PipelineConfig(BaseModel):
     eol_major_lag: int = Field(default=2, ge=1, strict=True)
     merge_rate_floor: float = Field(default=0.50, ge=0.0, le=1.0, strict=True)
     session_failure_ceiling: float = Field(default=0.30, ge=0.0, le=1.0, strict=True)
-    max_sessions: int = Field(default=20, ge=1, strict=True)
+    max_sessions: int = Field(default=130, ge=1, strict=True)
     max_total_acu: float = Field(default=500.0, gt=0, strict=True)
     kpi_sink: KpiSink = KpiSink.LOCAL
     major_only_requires_human: bool = True
@@ -184,6 +184,11 @@ class PipelineConfig(BaseModel):
             raise ConfigError("tier_high_min must be greater than tier_medium_min")
         if self.mode == Mode.LIVE and (self.github_token is None or self.devin_api_key is None):
             raise ConfigError("mode=live requires github_token and devin_api_key")
+        required_floor = self.budget_N * (3 + 2 * self.iteration_cap)
+        if self.max_sessions < required_floor:
+            raise ConfigError(
+                f"max_sessions={self.max_sessions} is below required floor {required_floor}"
+            )
         if self.ci_evidence_mode == CiEvidenceMode.LOCAL:
             self.__dict__["auto_merge_enabled"] = False
         return self

@@ -70,7 +70,11 @@ def classify_red_baseline(
                 "nodeid": outcome.nodeid,
                 "outcome": outcome.outcome.value,
                 "exception_type": outcome.exception_type,
-                "message": outcome.message,
+                "message": (
+                    outcome.message[:160] + "…"
+                    if outcome.message is not None and len(outcome.message) > 160
+                    else outcome.message
+                ),
             },
         )
     if not applicable or any(outcome.outcome is ItemOutcome.SKIPPED for outcome in applicable):

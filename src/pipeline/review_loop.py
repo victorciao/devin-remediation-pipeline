@@ -7,7 +7,17 @@ from dataclasses import dataclass
 from enum import Enum
 
 from pipeline.config import PipelineConfig
-from pipeline.schemas import Action, BaselineStatus, Candidate, CandidateState, ReasonCode
+from pipeline.red_baseline import classify_red_baseline
+from pipeline.schemas import (
+    Action,
+    BaselineStatus,
+    Candidate,
+    CandidateState,
+    ExpectedFailure,
+    PerItemOutcome,
+    ReasonCode,
+    RedBaselineResult,
+)
 
 
 class FindingSeverity(str, Enum):
@@ -41,20 +51,22 @@ class ReviewIteration:
     failing_test: str | None = None
     pre_fix_signature: str | None = None
     fix_rationale: str | None = None
+    diff_reviewed: bool = False
+    red_result: RedBaselineResult | None = None
 
 
 @dataclass(frozen=True)
 class ReviewLoopResult:
-    """Final convergence and independent auto-merge decisions."""
+    """Final convergence decision; dispatch owns auto-merge eligibility."""
 
     converged: bool
-    auto_merge_eligible: bool
     iterations: int
     state: CandidateState
     reason: ReasonCode | None = None
     disagreement_summary: str | None = None
     reviewer_only: bool = False
     needs_human_review: bool = False
+    red_result: RedBaselineResult | None = None
 
 
 def _criterion_findings(iteration: ReviewIteration) -> list[ReviewFinding]:
@@ -92,6 +104,15 @@ def _disagreement_summary(iteration: ReviewIteration) -> str:
     )
 
 
+def _terminal_reason(iteration: ReviewIteration) -> ReasonCode:
+    if any(
+        "implementer diff violates production-only policy" in finding.note
+        for finding in iteration.findings
+    ):
+        return ReasonCode.IMPLEMENTER_TEST_EDIT
+    return ReasonCode.DISAGREEMENT_UNRESOLVED
+
+
 def evaluate_review_iteration(
     iteration: ReviewIteration,
     *,
@@ -103,11 +124,11 @@ def evaluate_review_iteration(
     if iteration.red_baseline is BaselineStatus.STALE_SKIP and not findings:
         return ReviewLoopResult(
             converged=True,
-            auto_merge_eligible=False,
             iterations=1,
             state=CandidateState.TERMINAL,
             reason=ReasonCode.STALE_SKIP,
             reviewer_only=True,
+            red_result=iteration.red_result,
         )
     if iteration.red_baseline is BaselineStatus.STALE_SKIP:
         findings.append(
@@ -138,9 +159,9 @@ def evaluate_review_iteration(
     if not has_blocking and not has_major:
         return ReviewLoopResult(
             converged=True,
-            auto_merge_eligible=not has_major,
             iterations=1,
             state=CandidateState.CONVERGED,
+            red_result=iteration.red_result,
         )
     return None
 
@@ -153,17 +174,31 @@ def run_review_loop(
     """Iterate implementer/reviewer decisions until convergence or the cap."""
     iteration = initial
     reauthor_attempts = 0
-    for ordinal in range(1, config.iteration_cap + 1):
+    ordinal = 1
+    while ordinal <= config.iteration_cap:
+        if not iteration.diff_reviewed:
+            if rerun is None:
+                return ReviewLoopResult(
+                    converged=False,
+                    iterations=ordinal - 1,
+                    state=CandidateState.TERMINAL,
+                    reason=_terminal_reason(iteration),
+                    disagreement_summary=_disagreement_summary(iteration),
+                    needs_human_review=True,
+                    red_result=iteration.red_result,
+                )
+            iteration = rerun(ordinal)
+            continue
         if iteration.red_baseline is BaselineStatus.INVALID_RED_BASELINE:
             if reauthor_attempts >= 1:
                 return ReviewLoopResult(
                     converged=False,
-                    auto_merge_eligible=False,
                     iterations=ordinal,
                     state=CandidateState.TERMINAL,
-                    reason=ReasonCode.DISAGREEMENT_UNRESOLVED,
+                    reason=_terminal_reason(iteration),
                     disagreement_summary=_disagreement_summary(iteration),
                     needs_human_review=True,
+                    red_result=iteration.red_result,
                 )
             reauthor_attempts += 1
         decision = evaluate_review_iteration(
@@ -173,24 +208,25 @@ def run_review_loop(
         if decision is not None:
             return ReviewLoopResult(
                 converged=decision.converged,
-                auto_merge_eligible=decision.auto_merge_eligible,
                 iterations=ordinal,
                 state=decision.state,
                 reason=decision.reason,
                 disagreement_summary=decision.disagreement_summary,
                 reviewer_only=decision.reviewer_only,
+                red_result=iteration.red_result,
             )
         if ordinal == config.iteration_cap or rerun is None:
             return ReviewLoopResult(
                 converged=False,
-                auto_merge_eligible=False,
                 iterations=ordinal,
                 state=CandidateState.TERMINAL,
-                reason=ReasonCode.DISAGREEMENT_UNRESOLVED,
+                reason=_terminal_reason(iteration),
                 disagreement_summary=_disagreement_summary(iteration),
                 needs_human_review=True,
+                red_result=iteration.red_result,
             )
         iteration = rerun(ordinal + 1)
+        ordinal += 1
     raise AssertionError("review loop exhausted without a decision")
 
 
@@ -199,9 +235,10 @@ def apply_review_result(candidate: Candidate, result: ReviewLoopResult) -> Candi
     update: dict[str, object] = {
         "state": result.state,
         "reason": result.reason,
-        "auto_merge_eligible": result.auto_merge_eligible,
         "unresolved_major": result.reason is ReasonCode.DISAGREEMENT_UNRESOLVED,
     }
+    if result.red_result is not None:
+        update["red_baseline"] = result.red_result
     if result.reviewer_only:
         update["action"] = Action.REVIEWER_ONLY_DIFF
     elif result.needs_human_review:
@@ -258,15 +295,48 @@ def review_iteration_from_payload(
                 )
             )
 
+    expected: ExpectedFailure | None = None
+    if isinstance(raw_criteria, Sequence) and not isinstance(raw_criteria, str):
+        for raw in raw_criteria:
+            if not isinstance(raw, Mapping):
+                continue
+            raw_expected = raw.get("expected_failure")
+            if not isinstance(raw_expected, Mapping):
+                continue
+            try:
+                expected = ExpectedFailure.model_validate(raw_expected, strict=True)
+            except (TypeError, ValueError):
+                continue
+            break
     baseline = reviewer_output.get("red_baseline")
     baseline_status = BaselineStatus.INVALID_RED_BASELINE
-    if isinstance(baseline, Mapping):
-        raw_status = baseline.get("status")
-        if isinstance(raw_status, str):
-            try:
-                baseline_status = BaselineStatus(raw_status)
-            except ValueError:
-                pass
+    red_result: RedBaselineResult | None = None
+    if isinstance(baseline, Mapping) and expected is not None:
+        raw_observed = baseline.get("observed", baseline.get("observed_fields"))
+        observed_items: list[PerItemOutcome] = []
+        if isinstance(raw_observed, Mapping):
+            raw_outcomes = raw_observed.get(
+                "per_item_outcomes",
+                raw_observed.get("outcomes"),
+            )
+            if isinstance(raw_outcomes, Sequence) and not isinstance(raw_outcomes, str):
+                for raw_outcome in raw_outcomes:
+                    if not isinstance(raw_outcome, Mapping):
+                        continue
+                    try:
+                        observed_items.append(
+                            PerItemOutcome.model_validate(raw_outcome, strict=True)
+                        )
+                    except (TypeError, ValueError):
+                        continue
+            else:
+                try:
+                    observed_items.append(PerItemOutcome.model_validate(raw_observed, strict=True))
+                except (TypeError, ValueError):
+                    pass
+        if observed_items:
+            red_result = classify_red_baseline(expected, observed_items)
+            baseline_status = red_result.status
     green_result = reviewer_output.get("green_result")
     green = False
     if isinstance(green_result, Mapping):
@@ -283,6 +353,25 @@ def review_iteration_from_payload(
     )
     if isinstance(raw_addressed, Sequence) and not isinstance(raw_addressed, str):
         addressed = {item for item in raw_addressed if isinstance(item, str)}
+    diff_reviewed_value = reviewer_output.get("diff_reviewed")
+    diff_reviewed = False
+    if isinstance(diff_reviewed_value, Mapping):
+        base_sha = diff_reviewed_value.get("base_sha")
+        head_sha = diff_reviewed_value.get("head_sha")
+        files_read = diff_reviewed_value.get("files_read")
+        has_files = isinstance(files_read, Sequence) and not isinstance(files_read, str)
+        changed = implementer_output.get("files_changed") if implementer_output else None
+        changed_count = (
+            isinstance(changed, Sequence) and not isinstance(changed, str) and bool(changed)
+        )
+        diff_reviewed = (
+            isinstance(base_sha, str)
+            and bool(base_sha)
+            and isinstance(head_sha, str)
+            and bool(head_sha)
+            and has_files
+            and (bool(files_read) or not changed_count)
+        )
     return ReviewIteration(
         red_baseline=baseline_status,
         green=green,
@@ -290,6 +379,8 @@ def review_iteration_from_payload(
         planner_criteria=frozenset(planner_criteria),
         reviewer_criteria=frozenset(reviewer_criteria),
         addressed_criteria=frozenset(addressed),
+        diff_reviewed=diff_reviewed,
+        red_result=red_result,
     )
 
 

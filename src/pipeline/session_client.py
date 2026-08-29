@@ -18,6 +18,8 @@ from pipeline.red_baseline import (
     inspect_reviewer_diff,
 )
 from pipeline.review_loop import (
+    FindingSeverity,
+    ReviewFinding,
     ReviewIteration,
     ReviewLoopResult,
     review_iteration_from_payload,
@@ -100,7 +102,7 @@ class OrchestrationResult:
 class SessionCeilingError(RuntimeError):
     """Raised when a run exceeds its configured session or cost ceiling."""
 
-    reason = ReasonCode.SESSION_CEILING_EXCEEDED
+    reason = ReasonCode.SESSION_CEILING
 
 
 class SessionDedupeError(RuntimeError):
@@ -291,8 +293,13 @@ class SessionClient:
             else:
                 output = {
                     "tests": [],
-                    "red_baseline": {"status": "valid"},
+                    "red_baseline": {"observed": []},
                     "green_result": {"passed": True},
+                    "diff_reviewed": {
+                        "base_sha": "simulate-base",
+                        "head_sha": "simulate-head",
+                        "files_read": [],
+                    },
                     "findings": [],
                 }
             return SessionSnapshot(
@@ -366,7 +373,7 @@ ROLE_OUTPUT_SCHEMAS: Mapping[SessionRole, Mapping[str, object]] = {
     },
     SessionRole.REVIEWER: {
         "type": "object",
-        "required": ["tests", "red_baseline", "green_result", "findings"],
+        "required": ["tests", "red_baseline", "green_result", "diff_reviewed", "findings"],
         "properties": {
             "tests": {
                 "type": "array",
@@ -376,12 +383,21 @@ ROLE_OUTPUT_SCHEMAS: Mapping[SessionRole, Mapping[str, object]] = {
                     "properties": {
                         "path": {"type": "string"},
                         "nodeid": {"type": "string"},
-                        "criterion_id": {"type": "string"},
+                        "criterion_id": {"type": ["string", "null"]},
                     },
                 },
             },
             "red_baseline": {"type": "object"},
             "green_result": {"type": "object"},
+            "diff_reviewed": {
+                "type": "object",
+                "required": ["base_sha", "head_sha", "files_read"],
+                "properties": {
+                    "base_sha": {"type": "string"},
+                    "head_sha": {"type": "string"},
+                    "files_read": {"type": "array", "items": {"type": "string"}},
+                },
+            },
             "findings": {
                 "type": "array",
                 "items": {
@@ -389,7 +405,7 @@ ROLE_OUTPUT_SCHEMAS: Mapping[SessionRole, Mapping[str, object]] = {
                     "required": ["severity", "criterion_id", "note"],
                     "properties": {
                         "severity": {"type": "string"},
-                        "criterion_id": {"type": "string"},
+                        "criterion_id": {"type": ["string", "null"]},
                         "note": {"type": "string"},
                     },
                 },
@@ -466,6 +482,7 @@ class RuntimeOrchestrator:
         reviewer_prompt: str,
         *,
         attempt: int = 1,
+        candidate: Candidate | None = None,
     ) -> OrchestrationResult:
         """Run the review loop after a planner and concurrent role join."""
         planner = self.run_planner(candidate_id, planner_prompt, attempt=attempt)
@@ -497,11 +514,57 @@ class RuntimeOrchestrator:
             return {}
 
         def iteration_from(result: OrchestrationResult) -> ReviewIteration:
-            return review_iteration_from_payload(
+            iteration = review_iteration_from_payload(
                 output(result.planner),
                 output(result.reviewer),
                 output(result.implementer),
             )
+            implementer_payload = output(result.implementer)
+            reviewer_payload = output(result.reviewer)
+            implementer_diff = implementer_payload.get(
+                "committed_diff", implementer_payload.get("diff")
+            )
+            reviewer_diff = reviewer_payload.get("committed_diff", reviewer_payload.get("diff"))
+            findings = list(iteration.findings)
+            if isinstance(implementer_diff, str):
+                inspection = self.inspect_implementer_diff(implementer_diff)
+                if not inspection.accepted:
+                    findings.append(
+                        ReviewFinding(
+                            FindingSeverity.BLOCKING,
+                            None,
+                            "implementer diff violates production-only policy",
+                        )
+                    )
+            if candidate is not None and isinstance(reviewer_diff, str):
+                inspection = self.inspect_reviewer_diff(
+                    reviewer_diff,
+                    candidate,
+                    lifted_markers=tuple(candidate.lifted_markers),
+                )
+                if not inspection.accepted:
+                    findings.append(
+                        ReviewFinding(
+                            FindingSeverity.BLOCKING,
+                            None,
+                            "reviewer diff violates reviewer ownership policy",
+                        )
+                    )
+            if findings != list(iteration.findings):
+                iteration = ReviewIteration(
+                    red_baseline=iteration.red_baseline,
+                    green=iteration.green,
+                    findings=tuple(findings),
+                    planner_criteria=iteration.planner_criteria,
+                    reviewer_criteria=iteration.reviewer_criteria,
+                    addressed_criteria=iteration.addressed_criteria,
+                    failing_test=iteration.failing_test,
+                    pre_fix_signature=iteration.pre_fix_signature,
+                    fix_rationale=iteration.fix_rationale,
+                    diff_reviewed=iteration.diff_reviewed,
+                    red_result=iteration.red_result,
+                )
+            return iteration
 
         def rerun(role_attempt: int) -> ReviewIteration:
             nonlocal current

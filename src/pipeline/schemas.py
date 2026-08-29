@@ -55,6 +55,7 @@ class ReasonCode(str, Enum):
     IMPLEMENTER_TEST_EDIT = "implementer_test_edit"
     ROLE_COLLISION = "role_collision"
     SESSION_CEILING_EXCEEDED = "session_ceiling_exceeded"
+    SESSION_CEILING = "session_ceiling"
     COLLECTION_ERROR = "collection_error"
     RUBRIC_FACTOR_UNRESOLVED = "rubric_factor_unresolved"
 
@@ -68,6 +69,7 @@ class CandidateState(str, Enum):
     DISPATCHING = "dispatching"
     ISSUE_CREATED = "issue_created"
     PR_CREATED = "pr_created"
+    ISSUE_PATCHED = "issue_patched"
     CONVERGED = "converged"
     TERMINAL = "terminal"
     COMMENT_CREATED = "comment_created"
@@ -241,6 +243,10 @@ class Candidate(StrictModel):
     reason: ReasonCode | None = None
     pr_url: str | None = None
     issue_url: str | None = None
+    issue_number: int | None = Field(default=None, ge=1)
+    pr_number: int | None = Field(default=None, ge=1)
+    head_branch: str | None = None
+    head_sha: str | None = None
     unresolved_major: bool = False
     auto_merge_eligible: bool | None = None
     labels: list[str] = Field(default_factory=list)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -10,8 +11,25 @@ from pipeline.dedupe import find_drift_match
 from pipeline.schemas import Candidate
 
 
+def github_marker_search(
+    query: Callable[[str], object],
+) -> Callable[[str], bool]:
+    """Return a marker lookup backed by GitHub's issue and pull-request search."""
+
+    def contains(marker: str) -> bool:
+        result = query(marker)
+        if isinstance(result, dict):
+            total = result.get("total_count")
+            return isinstance(total, int) and total > 0
+        if isinstance(result, list):
+            return bool(result)
+        return False
+
+    return contains
+
+
 def repository_marker_search(repository: Path) -> Callable[[str], bool]:
-    """Return a bounded marker lookup over text files in a target checkout."""
+    """Compatibility helper for local callers; LIVE uses GitHub search instead."""
 
     def contains(marker: str) -> bool:
         for path in repository.rglob("*"):
@@ -73,7 +91,8 @@ class CandidateStateStore:
         if current is not None and (
             current.issue_url is not None
             or current.pr_url is not None
-            or current.state.value in {"issue_created", "pr_created", "comment_created"}
+            or current.state.value
+            in {"issue_created", "pr_created", "issue_patched", "comment_created"}
         ):
             return True
         return self.marker_exists(candidate_id)
@@ -86,17 +105,20 @@ class CandidateStateStore:
 
     def append(self, candidate: Candidate) -> None:
         """Append one candidate lifecycle row after rereading current state."""
-        self._read_rows()
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(candidate.model_dump(mode="json"), sort_keys=True) + "\n")
 
     def append_if_new_artifact(self, candidate: Candidate) -> bool:
-        """Append only when neither state nor target artifacts contain the marker."""
-        if self.existing_artifact(candidate.candidate_id):
-            return False
-        self.append(candidate)
-        return True
+        """Atomically reserve a candidate before the first artifact write."""
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self._path.with_suffix(self._path.suffix + ".lock")
+        with lock_path.open("a", encoding="utf-8") as lock_handle:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            if self.existing_artifact(candidate.candidate_id):
+                return False
+            self.append(candidate)
+            return True
 
     def supersede(self, previous: Candidate, current: Candidate) -> None:
         """Append the two immutable rows needed to record a drift supersession."""
@@ -119,4 +141,4 @@ class CandidateStateStore:
         )
 
 
-__all__ = ["CandidateStateStore", "repository_marker_search"]
+__all__ = ["CandidateStateStore", "github_marker_search", "repository_marker_search"]
