@@ -2,7 +2,7 @@ services:
   remediation:
     build:
       context: .
-    user: "${PIPELINE_UID:-1000}:${PIPELINE_GID:-1000}"
+    user: "${PIPELINE_UID:-10001}:${PIPELINE_GID:-10001}"
     network_mode: none
     environment:
       PIPELINE_MODE: simulate

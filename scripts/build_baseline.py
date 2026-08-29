@@ -31,6 +31,12 @@ def _git(repo: Path, *args: str) -> str:
 
 
 def main() -> int:
+    if len(sys.argv) < 3 or len(sys.argv) > 4:
+        print(
+            "usage: build_baseline.py <superset-checkout> <out-dir> [codeql-alerts.json]",
+            file=sys.stderr,
+        )
+        return 2
     repo = Path(sys.argv[1]).resolve()
     out_dir = Path(sys.argv[2]).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -18,5 +18,6 @@ RUN useradd --create-home --uid 10001 pipeline
 RUN mkdir -p /output && chown pipeline:pipeline /output
 
 USER pipeline
+WORKDIR /output
 
 ENTRYPOINT ["python", "-m", "pipeline"]
