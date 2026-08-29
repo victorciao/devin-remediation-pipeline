@@ -253,6 +253,8 @@ class Candidate(StrictModel):
     comment_url: str | None = None
     merged_at: str | None = None
     merge_verified: bool = False
+    auto_merge_requested: bool = False
+    ci_evidence_mode: str | None = None
     artifact_degraded: bool = False
     issue_number: int | None = Field(default=None, ge=1)
     pr_number: int | None = Field(default=None, ge=1)
@@ -301,6 +303,8 @@ class EventRecord(StrictModel):
     comment_url: str | None = None
     merged_at: str | None = None
     merge_verified: bool = False
+    auto_merge_requested: bool = False
+    ci_evidence_mode: str | None = None
     artifact_degraded: bool = False
     test_added: bool | None = None
     test_paths: list[str] = Field(default_factory=list)

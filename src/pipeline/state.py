@@ -29,6 +29,16 @@ class ResumeDecision:
     step: str | None = None
 
 
+def has_local_artifact(candidate: Candidate | None) -> bool:
+    """Return whether a persisted row proves an artifact already exists."""
+    return candidate is not None and (
+        candidate.issue_url is not None
+        or candidate.pr_url is not None
+        or candidate.state.value
+        in {"issue_created", "pr_created", "issue_patched", "comment_created"}
+    )
+
+
 def decide_resume(
     persisted: Candidate | None,
     *,
@@ -48,21 +58,9 @@ def decide_resume(
         return ResumeDecision(ResumeAction.SKIP)
     if persisted.state is CandidateState.CONVERGED and artifacts_present:
         return ResumeDecision(ResumeAction.SKIP)
-    if not has_local_artifact(persisted) and not marker_search_available and not artifacts_present:
-        return ResumeDecision(ResumeAction.DEFER)
-    if not has_local_artifact(persisted) and artifacts_present:
+    if not has_local_artifact(persisted) and (artifacts_present or not marker_search_available):
         return ResumeDecision(ResumeAction.DEFER)
     return ResumeDecision(ResumeAction.RESUME_AT_STEP, "publication")
-
-
-def has_local_artifact(candidate: Candidate | None) -> bool:
-    """Return whether a persisted row proves an artifact already exists."""
-    return candidate is not None and (
-        candidate.issue_url is not None
-        or candidate.pr_url is not None
-        or candidate.state.value
-        in {"issue_created", "pr_created", "issue_patched", "comment_created"}
-    )
 
 
 def github_marker_search(
@@ -114,6 +112,7 @@ class CandidateStateStore:
         self.quarantined_rows = 0
         self._quarantine_seen: set[str] | None = None
         self._marker_results: dict[str, bool | None] = {}
+        self._marker_search_unconfigured: set[str] = set()
 
     def _read_rows(self) -> list[Candidate]:
         if not self._path.exists():
@@ -164,16 +163,29 @@ class CandidateStateStore:
             return True
         return self.marker_exists(candidate_id)
 
-    def has_local_artifact(self, candidate: Candidate | None) -> bool:
-        """Return whether a persisted row proves an artifact already exists."""
-        return has_local_artifact(candidate)
+    def resume_decision(self, candidate_id: str) -> ResumeDecision:
+        """Resolve resume behavior from persisted state and one marker lookup."""
+        persisted = self.resume(candidate_id)
+        local_artifact = has_local_artifact(persisted)
+        if persisted is None or not local_artifact:
+            artifacts_present = self.existing_artifact(candidate_id)
+            marker_search_available = not self.marker_search_unavailable(candidate_id)
+        else:
+            artifacts_present = True
+            marker_search_available = True
+        return decide_resume(
+            persisted,
+            artifacts_present=artifacts_present,
+            marker_search_available=marker_search_available,
+        )
 
     def marker_exists(self, candidate_id: str) -> bool:
         """Search the target repository for one candidate's stable marker."""
         if candidate_id in self._marker_results:
             return self._marker_results[candidate_id] is True
         if self._marker_search is None:
-            self._marker_results[candidate_id] = None
+            self._marker_search_unconfigured.add(candidate_id)
+            self._marker_results[candidate_id] = False
             return False
         try:
             result = self._marker_search(f"<!-- devin-remediation-id: {candidate_id} -->")
@@ -185,10 +197,13 @@ class CandidateStateStore:
             return False
 
     def marker_search_unavailable(self, candidate_id: str) -> bool:
-        """Return whether the memoized marker lookup failed for one candidate."""
+        """Return whether the configured marker lookup failed for one candidate."""
         if candidate_id not in self._marker_results:
             self.marker_exists(candidate_id)
-        return self._marker_results.get(candidate_id) is None
+        return (
+            candidate_id not in self._marker_search_unconfigured
+            and self._marker_results.get(candidate_id) is None
+        )
 
     def append(self, candidate: Candidate) -> None:
         """Append one candidate lifecycle row after rereading current state."""
@@ -201,7 +216,7 @@ class CandidateStateStore:
         """Atomically reserve a candidate before the first artifact write."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         marker_exists = self.marker_exists(candidate.candidate_id)
-        if self.marker_search_unavailable(candidate.candidate_id) and not self.has_local_artifact(
+        if self.marker_search_unavailable(candidate.candidate_id) and not has_local_artifact(
             self.latest().get(candidate.candidate_id)
         ):
             return False
@@ -209,7 +224,7 @@ class CandidateStateStore:
         with lock_path.open("a", encoding="utf-8") as lock_handle:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
             current = self.latest().get(candidate.candidate_id)
-            if self.has_local_artifact(current) or marker_exists:
+            if has_local_artifact(current) or marker_exists:
                 return False
             self.append(candidate)
             return True

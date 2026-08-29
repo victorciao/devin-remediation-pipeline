@@ -23,6 +23,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -44,6 +45,7 @@ from pipeline.github_client import (
     CiWaitResult,
     ClosedPullRequestError,
     GitHubClient,
+    GitHubResponseError,
     LivePreflight,
     MergedPullRequestError,
     PreflightError,
@@ -80,7 +82,6 @@ from pipeline.simulation import simulate_run
 from pipeline.state import (
     CandidateStateStore,
     ResumeAction,
-    decide_resume,
     github_marker_search,
 )
 from pipeline.templates.render import (
@@ -132,6 +133,8 @@ def _publish_live(
     transport: UrllibGitHubTransport,
     state_store: CandidateStateStore,
     ci_mode_events: list[RunEventRecord],
+    ci_mode_state: list[CiEvidenceMode],
+    ci_run_started: float,
     run_id: str,
 ) -> list[Candidate]:
     """Publish live artifacts after review, preserving the mandated write order."""
@@ -189,21 +192,7 @@ def _publish_live(
             published.append(degraded)
             continue
         persisted = state_store.resume(candidate.candidate_id)
-        artifacts_present = False
-        has_local = state_store.has_local_artifact(persisted)
-        marker_search_available = True
-        if persisted is None or not has_local:
-            artifacts_present = state_store.existing_artifact(candidate.candidate_id)
-            marker_search_available = not state_store.marker_search_unavailable(
-                candidate.candidate_id
-            )
-        elif persisted is not None:
-            artifacts_present = True
-        decision = decide_resume(
-            persisted,
-            artifacts_present=artifacts_present,
-            marker_search_available=marker_search_available,
-        )
+        decision = state_store.resume_decision(candidate.candidate_id)
         if decision.action is ResumeAction.SKIP:
             published.append(persisted or candidate)
             continue
@@ -386,6 +375,8 @@ def _publish_live(
                         "issue_number": issue_numbers[0],
                         "artifact_degraded": candidate_for_callback.artifact_degraded,
                         "merge_verified": candidate_for_callback.merge_verified,
+                        "auto_merge_requested": candidate_for_callback.auto_merge_requested,
+                        "ci_evidence_mode": ci_mode_state[0].value,
                     }
                 )
             )
@@ -405,32 +396,35 @@ def _publish_live(
             ci_details: list[str | None] = ci_detail_holder,
             commit_messages_holder: list[str | None] = commit_message_holder,
         ) -> CiWaitResult:
-            head_sha = client.pull_request_head_sha(pr_number)
+            head_sha, is_fork = client.pull_request_head_metadata(pr_number)
             head_shas[0] = head_sha
             if head_sha is None:
                 ci_reasons[0] = ReasonCode.CI_EVIDENCE_UNAVAILABLE
-                return CiWaitResult(CiEvidenceMode.LOCAL, ci_reasons[0], False)
+                return CiWaitResult(ci_mode_state[0], ci_reasons[0], False)
             base_for_probe = candidate_for_probe.base_sha
             if base_for_probe is None:
                 ci_reasons[0] = ReasonCode.CI_EVIDENCE_UNAVAILABLE
-                return CiWaitResult(CiEvidenceMode.LOCAL, ci_reasons[0], False)
+                return CiWaitResult(ci_mode_state[0], ci_reasons[0], False)
             commit_messages = client.commit_messages_between(base_for_probe, head_sha)
             if not commit_messages or any(
                 _SIGNOFF_TRAILER.search(message) is None for message in commit_messages
             ):
                 ci_reasons[0] = ReasonCode.DCO_TRAILER_MISSING
-                return CiWaitResult(CiEvidenceMode.LOCAL, ci_reasons[0], False)
+                return CiWaitResult(ci_mode_state[0], ci_reasons[0], False)
             commit_messages_holder[0] = commit_messages[-1]
             if not wait_for_ci:
-                return CiWaitResult(CiEvidenceMode.LOCAL, None, False)
+                return CiWaitResult(ci_mode_state[0], None, False)
             wait_result = wait_for_required_contexts(
                 config,
                 client=transport,
-                elapsed_s=0,
+                elapsed_s=int(time.monotonic() - ci_run_started),
                 sha=head_sha,
                 poll=True,
                 on_mode_transition=record_ci_mode_transition,
+                ci_mode=ci_mode_state[0],
+                is_fork=is_fork,
             )
+            ci_mode_state[0] = wait_result.mode
             ci_reasons[0] = wait_result.reason
             ci_details[0] = wait_result.detail
             return wait_result
@@ -566,7 +560,7 @@ def _publish_live(
                 latest.state is CandidateState.ISSUE_PATCHED
                 and latest.pr_number == exc.match.number
                 and latest.reason is None
-                and latest.auto_merge_eligible is True
+                and latest.auto_merge_requested
             )
             merged = latest.model_copy(
                 update={
@@ -585,6 +579,7 @@ def _publish_live(
             continue
         except (
             ArtifactUnavailableError,
+            GitHubResponseError,
             ArtifactValidationError,
             PreflightError,
             HttpTransportError,
@@ -622,8 +617,10 @@ def _publish_live(
                 )
             except HttpTransportError:
                 pass
+        latest_after_publication = state_store.resume(candidate.candidate_id)
+        publication_source = latest_after_publication or candidate
         if ci_reason_holder[0] is not None:
-            candidate = candidate.model_copy(
+            publication_source = publication_source.model_copy(
                 update={
                     "reason": ci_reason_holder[0],
                     "reason_detail": ci_detail_holder[0],
@@ -631,14 +628,12 @@ def _publish_live(
                 }
             )
         elif label_failures:
-            candidate = candidate.model_copy(
+            publication_source = publication_source.model_copy(
                 update={
                     "auto_merge_eligible": False,
                     "artifact_degraded": True,
                 }
             )
-        latest_after_publication = state_store.resume(candidate.candidate_id)
-        publication_source = latest_after_publication or candidate
         published_candidate = publication_source.model_copy(
             update={
                 "state": (
@@ -658,6 +653,10 @@ def _publish_live(
                 "head_sha": head_sha_holder[0] or publication_source.head_sha,
                 "comment_url": comment_url_value,
                 "merged_at": links.merged_at or publication_source.merged_at,
+                "ci_evidence_mode": ci_mode_state[0].value,
+                "auto_merge_requested": (
+                    links.auto_merge_requested or publication_source.auto_merge_requested
+                ),
                 "merge_verified": (
                     links.merged_at is not None or publication_source.merge_verified
                 ),
@@ -859,18 +858,7 @@ def _prepare_live_candidate(
 ) -> Candidate:
     """Reserve and create a candidate branch before any role session starts."""
     persisted = state_store.resume(candidate.candidate_id)
-    has_local = state_store.has_local_artifact(persisted)
-    marker_search_available = True
-    if persisted is None or not has_local:
-        artifacts_present = state_store.existing_artifact(candidate.candidate_id)
-        marker_search_available = not state_store.marker_search_unavailable(candidate.candidate_id)
-    else:
-        artifacts_present = True
-    decision = decide_resume(
-        persisted,
-        artifacts_present=artifacts_present,
-        marker_search_available=marker_search_available,
-    )
+    decision = state_store.resume_decision(candidate.candidate_id)
     if decision.action is ResumeAction.SKIP:
         return persisted if persisted is not None else candidate
     if decision.action is ResumeAction.DEFER:
@@ -887,13 +875,11 @@ def _prepare_live_candidate(
         if persisted is not None and persisted.head_branch is not None
         else f"{head_branch.rstrip('/')}/{candidate.candidate_id}"
     )
-    prepared = candidate.model_copy(
+    prepared = (persisted or candidate).model_copy(
         update={
             "state": CandidateState.DISPATCHING,
             "base_sha": persisted.base_sha if persisted and persisted.base_sha else base_sha,
             "head_branch": branch,
-            "issue_number": persisted.issue_number if persisted else None,
-            "issue_url": persisted.issue_url if persisted else None,
         }
     )
     if persisted is None:
@@ -923,7 +909,14 @@ def _prepare_live_candidate(
         if exc.status_code != 422:
             raise
         existing_sha = client.branch_sha(prepared.head_branch or branch)
-        if existing_sha != (prepared.base_sha or base_sha):
+        recorded_base = prepared.base_sha or base_sha
+        descendant = (
+            existing_sha is not None
+            and recorded_base is not None
+            and existing_sha != recorded_base
+            and bool(client.commit_messages_between(recorded_base, existing_sha))
+        )
+        if existing_sha != recorded_base and not descendant:
             deferred = prepared.model_copy(
                 update={
                     "state": CandidateState.DEFERRED,
@@ -932,6 +925,22 @@ def _prepare_live_candidate(
             )
             state_store.append(deferred)
             return deferred
+        if existing_sha is not None:
+            prepared = prepared.model_copy(update={"head_sha": existing_sha})
+    if persisted is not None:
+        for field in (
+            "issue_url",
+            "pr_url",
+            "comment_url",
+            "merged_at",
+            "issue_number",
+            "pr_number",
+        ):
+            previous = getattr(persisted, field)
+            current = getattr(prepared, field)
+            assert previous is None or current == previous
+        if persisted.head_sha is not None:
+            assert prepared.head_sha is not None
     return prepared
 
 
@@ -958,6 +967,8 @@ def run_once(
     session_transport: DevinTransport | None = None
     github_transport: UrllibGitHubTransport | None = None
     ci_mode_events: list[RunEventRecord] = []
+    ci_mode_state = [config.ci_evidence_mode]
+    ci_run_started = time.monotonic()
     if config.mode is Mode.LIVE:
         if head_branch is None:
             raise RunAbort("LIVE requires --head-branch for PR publication")
@@ -1315,10 +1326,13 @@ def run_once(
                 transport=github_transport,
                 state_store=state_store,
                 ci_mode_events=ci_mode_events,
+                ci_mode_state=ci_mode_state,
+                ci_run_started=ci_run_started,
                 run_id=run_id,
             )
         except (
             ArtifactUnavailableError,
+            GitHubResponseError,
             ArtifactValidationError,
             PreflightError,
             HttpTransportError,

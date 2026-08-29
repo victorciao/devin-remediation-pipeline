@@ -227,8 +227,12 @@ def _required_context_statuses(
                 continue
             name = raw_check.get("name")
             conclusion = raw_check.get("conclusion")
-            if isinstance(name, str) and isinstance(conclusion, str):
-                result[name] = conclusion
+            status = raw_check.get("status")
+            if isinstance(name, str):
+                if isinstance(conclusion, str):
+                    result[name] = conclusion
+                elif isinstance(status, str):
+                    result[name] = status
     raw_statuses = statuses.get("statuses")
     if isinstance(raw_statuses, list):
         for raw_status in raw_statuses:
@@ -273,11 +277,13 @@ def wait_for_required_contexts(
     clock: Callable[[], float] = time.monotonic,
     poll_interval_s: float = 15.0,
     on_mode_transition: Callable[[CiModeTransition], None] | None = None,
+    ci_mode: CiEvidenceMode | None = None,
+    is_fork: bool = False,
 ) -> CiWaitResult:
     """Resolve generated-PR CI evidence without treating missing reports as green."""
     started = clock()
     deadline = started + max(config.ci_wait_timeout_s - elapsed_s, 0)
-    current_mode = config.ci_evidence_mode
+    current_mode = ci_mode or config.ci_evidence_mode
     already_upgraded = current_mode is CiEvidenceMode.GITHUB
     while True:
         statuses = (
@@ -287,7 +293,7 @@ def wait_for_required_contexts(
         )
         complete = all(statuses.get(context) == "success" for context in REQUIRED_CONTEXTS)
         awaiting_approval = any(
-            statuses.get(context) in {"action_required", "awaiting_approval", "waiting"}
+            statuses.get(context) in {"action_required", "awaiting_approval"}
             for context in REQUIRED_CONTEXTS
         )
         transition = maybe_upgrade_ci_mode(
@@ -315,6 +321,17 @@ def wait_for_required_contexts(
                 False,
                 "awaiting_workflow_approval",
             )
+        if (
+            is_fork
+            and not any(context in statuses for context in REQUIRED_CONTEXTS)
+            and clock() - started >= poll_interval_s
+        ):
+            return CiWaitResult(
+                current_mode,
+                ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+                False,
+                "awaiting_workflow_approval",
+            )
         if not poll:
             break
         remaining = deadline - clock()
@@ -330,6 +347,10 @@ class SimulationWriteError(RuntimeError):
 
 class ArtifactUnavailableError(RuntimeError):
     """Raised when the configured GitHub artifact sink is unavailable."""
+
+
+class GitHubResponseError(ArtifactUnavailableError):
+    """Raised when GitHub returns a structurally invalid response."""
 
 
 class ClosedPullRequestError(ArtifactUnavailableError):
@@ -358,6 +379,7 @@ class ArtifactLinks:
     issue_number: int | None = None
     pr_number: int | None = None
     merged_at: str | None = None
+    auto_merge_requested: bool = False
 
 
 @dataclass(frozen=True)
@@ -397,7 +419,7 @@ class GitHubClient:
         if self._config.mode is Mode.SIMULATE:
             raise SimulationWriteError("SIMULATE forbids GitHub writes")
         if self._transport is None:
-            raise ValueError("GitHub transport is unavailable")
+            raise GitHubResponseError("GitHub transport is unavailable")
         operation = self._transport.post if method == "post" else self._transport.patch
         if self._write_guard is not None:
             self._write_guard()
@@ -406,7 +428,7 @@ class GitHubClient:
     def _read(self, path: str) -> object:
         """Issue one guarded read request through the configured transport."""
         if self._transport is None:
-            raise ValueError("GitHub transport is unavailable")
+            raise GitHubResponseError("GitHub transport is unavailable")
         return self._transport.get(path)
 
     @staticmethod
@@ -414,7 +436,7 @@ class GitHubClient:
         """Extract the canonical URL from a GitHub mutation response."""
         value = response.get("html_url", response.get("url"))
         if not isinstance(value, str) or not value:
-            raise ValueError("GitHub response lacks html_url")
+            raise GitHubResponseError("GitHub response lacks html_url")
         return value
 
     @staticmethod
@@ -422,7 +444,7 @@ class GitHubClient:
         """Extract an issue or pull-request number."""
         value = response.get("number")
         if not isinstance(value, int):
-            raise ValueError("GitHub response lacks number")
+            raise GitHubResponseError("GitHub response lacks number")
         return value
 
     def create_issue(self, title: str, body: str, labels: Sequence[str]) -> tuple[int, str]:
@@ -463,6 +485,24 @@ class GitHubClient:
             if isinstance(head, Mapping) and isinstance(head.get("sha"), str):
                 return str(head["sha"])
         return None
+
+    def pull_request_head_metadata(self, number: int) -> tuple[str | None, bool]:
+        """Read the current head SHA and whether the PR originates from a fork."""
+        response = self._read(
+            f"/repos/{self._config.target_owner}/{self._config.target_repo}/pulls/{number}"
+        )
+        if not isinstance(response, Mapping):
+            return None, False
+        head = response.get("head")
+        if not isinstance(head, Mapping):
+            return None, False
+        sha = head.get("sha")
+        repository = head.get("repo")
+        full_name = repository.get("full_name") if isinstance(repository, Mapping) else None
+        is_fork = isinstance(full_name, str) and full_name != (
+            f"{self._config.target_owner}/{self._config.target_repo}"
+        )
+        return (sha if isinstance(sha, str) else None), is_fork
 
     def commit_messages_between(self, base_sha: str, head_sha: str) -> list[str]:
         """Read every commit message introduced between two recorded SHAs."""
@@ -609,7 +649,7 @@ class GitHubClient:
         self._ensured_labels[label] = True
         return True
 
-    def enable_auto_merge(self, number: int, *, ci_mode: CiEvidenceMode) -> str | None:
+    def enable_auto_merge(self, number: int, *, ci_mode: CiEvidenceMode) -> None:
         """Request auto-merge only after the caller has checked all gates."""
         if not self._config.auto_merge_enabled or ci_mode is not CiEvidenceMode.GITHUB:
             raise ValueError("auto-merge requires enabled GitHub CI evidence")
@@ -618,8 +658,6 @@ class GitHubClient:
             f"/repos/{self._config.target_owner}/{self._config.target_repo}/pulls/{number}/auto-merge",
             {"merge_method": "squash"},
         )
-        match = self.pull_request(number)
-        return match.merged_at if match is not None else None
 
 
 def publish_artifacts(
@@ -674,6 +712,9 @@ def publish_artifacts(
         pr_number, pr_url = existing_pr_number, existing_pr_url
         existing_match = client.pull_request(pr_number)
         if existing_match is not None and existing_match.merged_at is not None:
+            client.patch_issue(issue_number, f"{issue_body.rstrip()}\n\nPR: {pr_url}\n")
+            if after_issue_patched is not None:
+                after_issue_patched(pr_url)
             raise MergedPullRequestError(existing_match)
     else:
         try:
@@ -693,6 +734,12 @@ def publish_artifacts(
             if existing.state == "open":
                 pr_number, pr_url = existing.number, existing.url
             elif existing.merged_at is not None:
+                client.patch_issue(
+                    issue_number,
+                    f"{issue_body.rstrip()}\n\nPR: {existing.url}\n",
+                )
+                if after_issue_patched is not None:
+                    after_issue_patched(existing.url)
                 raise MergedPullRequestError(existing) from exc
             else:
                 raise ClosedPullRequestError(head, existing) from exc
@@ -715,15 +762,16 @@ def publish_artifacts(
         and ci_result.reason is None
         and (candidate.test_added is True or candidate.test_exempt_reason is not None)
     ):
-        merged_at = client.enable_auto_merge(pr_number, ci_mode=ci_result.mode)
+        client.enable_auto_merge(pr_number, ci_mode=ci_result.mode)
+        auto_merge_requested = True
     else:
-        merged_at = None
+        auto_merge_requested = False
     return ArtifactLinks(
         issue_url,
         pr_url,
         issue_number=issue_number,
         pr_number=pr_number,
-        merged_at=merged_at,
+        auto_merge_requested=auto_merge_requested,
     )
 
 
@@ -768,6 +816,7 @@ __all__ = [
     "CiWaitResult",
     "ClosedPullRequestError",
     "GitHubClient",
+    "GitHubResponseError",
     "GitHubTransport",
     "LivePreflight",
     "MergedPullRequestError",
