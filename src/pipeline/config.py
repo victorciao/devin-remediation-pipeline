@@ -175,6 +175,23 @@ class PipelineConfig(BaseModel):
             return Path(value)
         return value
 
+    @model_validator(mode="before")
+    @classmethod
+    def default_max_sessions(cls, value: object) -> object:
+        """Derive the session ceiling when callers omit it."""
+        if not isinstance(value, dict) or "max_sessions" in value:
+            return value
+        raw_budget = value.get("budget_N", 10)
+        raw_iteration_cap = value.get("iteration_cap", 5)
+        try:
+            budget = int(raw_budget)
+            iteration_cap = int(raw_iteration_cap)
+        except (TypeError, ValueError):
+            return value
+        resolved = dict(value)
+        resolved["max_sessions"] = budget * (3 + 2 * iteration_cap)
+        return resolved
+
     @model_validator(mode="after")
     def validate_cross_field_rules(self) -> PipelineConfig:
         """Re-assert cross-field safety rules on construction and assignment."""

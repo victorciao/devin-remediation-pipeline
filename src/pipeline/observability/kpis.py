@@ -90,7 +90,7 @@ def compute_kpis(
     session_failures = sum(
         event.reason
         in {
-            ReasonCode.SESSION_CEILING_EXCEEDED,
+            ReasonCode.SESSION_CEILING,
             ReasonCode.ROLE_COLLISION,
         }
         for event in events

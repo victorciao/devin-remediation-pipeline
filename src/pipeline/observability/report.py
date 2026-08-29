@@ -17,11 +17,7 @@ def render_run_report(
 ) -> str:
     """Render a deterministic per-run summary in Markdown."""
     rows = list(candidates)
-    notes = [
-        note
-        for note in capability_notes
-        if not note.startswith(("token_identity:", "token_scopes:"))
-    ]
+    notes = list(capability_notes)
     note_lines = [f"- {note}" for note in notes] if notes else ["- None"]
     gated = Counter(
         candidate.reason.value

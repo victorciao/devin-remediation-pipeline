@@ -54,7 +54,6 @@ class ReasonCode(str, Enum):
     DISAGREEMENT_UNRESOLVED = "disagreement_unresolved"
     IMPLEMENTER_TEST_EDIT = "implementer_test_edit"
     ROLE_COLLISION = "role_collision"
-    SESSION_CEILING_EXCEEDED = "session_ceiling_exceeded"
     SESSION_CEILING = "session_ceiling"
     COLLECTION_ERROR = "collection_error"
     RUBRIC_FACTOR_UNRESOLVED = "rubric_factor_unresolved"

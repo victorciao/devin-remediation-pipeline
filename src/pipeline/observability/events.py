@@ -80,10 +80,17 @@ def append_candidate_events(
     candidates: Iterable[Candidate],
     *,
     run_id: str,
+    token_login: str | None = None,
+    token_scopes: Iterable[str] = (),
 ) -> None:
     """Append one Layer 1 event for each candidate."""
+    scopes = list(token_scopes)
     for candidate in candidates:
-        log.append(event_from_candidate(candidate, run_id=run_id))
+        log.append(
+            event_from_candidate(candidate, run_id=run_id).model_copy(
+                update={"token_login": token_login, "token_scopes": scopes}
+            )
+        )
 
 
 __all__ = ["EventLog", "append_candidate_events", "event_from_candidate"]

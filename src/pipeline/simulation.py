@@ -30,6 +30,8 @@ def simulate_run(
     planner_outputs: Mapping[str, Mapping[str, object]] | None = None,
     reviewer_outputs: Mapping[str, Mapping[str, object]] | None = None,
     capability_notes: Sequence[str] = (),
+    token_login: str | None = None,
+    token_scopes: Sequence[str] = (),
 ) -> tuple[Path, ...]:
     """Render a complete run without invoking a remote write transport."""
     state_path = output_dir / "state" / "candidates.jsonl"
@@ -86,7 +88,13 @@ def simulate_run(
             produced.append(pr_path)
 
     event_log = EventLog(events_path)
-    append_candidate_events(event_log, candidates, run_id=run_id)
+    append_candidate_events(
+        event_log,
+        candidates,
+        run_id=run_id,
+        token_login=token_login,
+        token_scopes=token_scopes,
+    )
     run_path = output_dir / "reports" / f"run-{run_id}.md"
     write_run_report(
         run_path,
