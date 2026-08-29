@@ -14,8 +14,10 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SecretStr,
     ValidationError,
     ValidationInfo,
+    ValidatorFunctionWrapHandler,
     field_validator,
     model_validator,
 )
@@ -79,7 +81,7 @@ class IssueSink(str, Enum):
 
 
 class PipelineConfig(BaseModel):
-    """The 19 configurable §13 knobs with their shipped defaults."""
+    """The §13 configuration surface with its shipped defaults."""
 
     model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True)
 
@@ -102,6 +104,26 @@ class PipelineConfig(BaseModel):
     issue_sink: IssueSink = IssueSink.ISSUES
     version_source: str = ".github/ISSUE_TEMPLATE/bug-report.yml"
     lane2_class_breadth_max: int = Field(default=5, ge=1, strict=True)
+    target_owner: str = Field(default="victorciao", min_length=1)
+    target_repo: str = Field(default="superset", min_length=1)
+    github_token: SecretStr | None = None
+    devin_api_key: SecretStr | None = None
+    rubrics_path: Path = Path("config/rubrics.yaml")
+    templates_dir: Path = Path("templates")
+
+    def __init__(self, **data: object) -> None:
+        """Construct configuration while exposing validation failures consistently."""
+        try:
+            super().__init__(**data)
+        except ValidationError as exc:
+            raise ConfigError(str(exc)) from exc
+
+    def __setattr__(self, name: str, value: object) -> None:
+        """Apply assignment validation while preserving the public error type."""
+        try:
+            super().__setattr__(name, value)
+        except ValidationError as exc:
+            raise ConfigError(str(exc)) from exc
 
     @field_validator("mode", mode="before")
     @classmethod
@@ -131,23 +153,52 @@ class PipelineConfig(BaseModel):
             return CiEvidenceMode(normalized)
         return IssueSink(normalized)
 
-    @field_validator("auto_merge_enabled", mode="after")
+    @field_validator("github_token", "devin_api_key", mode="before")
     @classmethod
-    def force_local_auto_merge_off(cls, value: bool, info: ValidationInfo) -> bool:
-        """Local evidence always disables auto-merge."""
-        data = cast(dict[str, object], info.data)
-        if data.get("ci_evidence_mode") == CiEvidenceMode.LOCAL:
-            return False
+    def normalize_secret(cls, value: object) -> SecretStr | None:
+        """Wrap environment-provided credentials without exposing their values."""
+        if value is None or isinstance(value, SecretStr):
+            return value
+        if isinstance(value, str):
+            return SecretStr(value)
+        raise TypeError("credential must be a string")
+
+    @field_validator("rubrics_path", "templates_dir", mode="before")
+    @classmethod
+    def normalize_path(cls, value: object) -> object:
+        """Accept path strings from file and environment sources."""
+        if isinstance(value, str):
+            return Path(value)
         return value
 
     @model_validator(mode="after")
     def validate_cross_field_rules(self) -> PipelineConfig:
-        """Reject unsafe sink combinations and invalid threshold ordering."""
+        """Re-assert cross-field safety rules on construction and assignment."""
         if self.kpi_sink == KpiSink.GSHEET and self.mode == Mode.SIMULATE:
             raise ConfigError("kpi_sink=gsheet is invalid while mode=simulate")
         if self.tier_high_min <= self.tier_medium_min:
             raise ConfigError("tier_high_min must be greater than tier_medium_min")
+        if self.mode == Mode.LIVE and (self.github_token is None or self.devin_api_key is None):
+            raise ConfigError("mode=live requires github_token and devin_api_key")
+        if self.ci_evidence_mode == CiEvidenceMode.LOCAL:
+            self.__dict__["auto_merge_enabled"] = False
         return self
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def normalize_validation_errors(
+        cls,
+        value: object,
+        handler: ValidatorFunctionWrapHandler,
+    ) -> PipelineConfig:
+        """Expose every invalid configuration path as ConfigError."""
+        try:
+            result: object = handler(value)
+        except ValidationError as exc:
+            raise ConfigError(str(exc)) from exc
+        if not isinstance(result, PipelineConfig):
+            raise ConfigError("configuration validator returned an invalid model")
+        return result
 
 
 def _yaml_mapping(value: object) -> dict[str, object]:
@@ -241,6 +292,12 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
         "ISSUE_SINK": "issue_sink",
         "VERSION_SOURCE": "version_source",
         "MODE": "mode",
+        "TARGET_OWNER": "target_owner",
+        "TARGET_REPO": "target_repo",
+        "GITHUB_TOKEN": "github_token",
+        "DEVIN_API_KEY": "devin_api_key",
+        "RUBRICS_PATH": "rubrics_path",
+        "TEMPLATES_DIR": "templates_dir",
     }
     for key, raw_value in env.items():
         if not key.startswith("PIPELINE_"):
@@ -269,7 +326,11 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
         elif name in {"MAJOR_ONLY_REQUIRES_HUMAN", "AUTO_MERGE_ENABLED"}:
             values[field_name] = _parse_bool(raw_value)
         else:
-            values[field_name] = raw_value
+            values[field_name] = (
+                SecretStr(raw_value)
+                if field_name in {"github_token", "devin_api_key"}
+                else raw_value
+            )
     return values
 
 
@@ -281,7 +342,11 @@ def _load_file(path: Path) -> dict[str, object]:
         raise ConfigError(f"cannot read configuration file: {path}") from exc
     except yaml.YAMLError as exc:
         raise ConfigError(f"invalid YAML configuration: {path}") from exc
-    return _yaml_mapping(parsed)
+    values = _yaml_mapping(parsed)
+    for key in values:
+        if key.lower() in {"github_token", "devin_api_key"}:
+            raise ConfigError(f"credentials are environment-only: {key}")
+    return values
 
 
 def load_config(

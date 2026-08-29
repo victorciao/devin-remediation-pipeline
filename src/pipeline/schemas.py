@@ -12,6 +12,21 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True)
 
 
+class Lane(str, Enum):
+    """Remediation source lanes."""
+
+    CODEQL = "codeql"
+    SKIPPED_TESTS = "skipped_tests"
+    DEPRECATIONS = "deprecations"
+
+
+class DefinitionKind(str, Enum):
+    """Definition shape used by skipped-test candidates."""
+
+    CLASS = "class"
+    FUNCTION = "function"
+
+
 class ReasonCode(str, Enum):
     """Normative reasons used when a candidate or run cannot proceed."""
 
@@ -36,7 +51,6 @@ class ReasonCode(str, Enum):
     ARTIFACT_DEGRADED = "artifact_degraded"
     GUARDRAIL_CLAMPED = "guardrail_clamped"
     DISAGREEMENT_UNRESOLVED = "disagreement_unresolved"
-    NEEDS_HUMAN_REVIEW = "needs-human-review"
     IMPLEMENTER_TEST_EDIT = "implementer_test_edit"
     ROLE_COLLISION = "role_collision"
     SESSION_CEILING_EXCEEDED = "session_ceiling_exceeded"
@@ -58,7 +72,14 @@ class CandidateState(str, Enum):
     BLOCKED_BY_ENCLOSING_SKIP = "blocked_by_enclosing_skip"
     SUPPRESSED_BY_CONTAINMENT = "suppressed_by_containment"
     DEFERRED = "deferred"
-    NEEDS_HUMAN_REVIEW = "needs-human-review"
+
+
+class RetryDecision(str, Enum):
+    """Resolved decision for a retried Devin session creation."""
+
+    PROCEED = "proceed"
+    FATAL_DEDUPE_HIT = "fatal_dedupe_hit"
+    PROCEED_ID_DIFFERS = "proceed_id_differs"
 
 
 class Action(str, Enum):
@@ -149,9 +170,11 @@ class Candidate(StrictModel):
     """A normalized remediation candidate and its current pipeline state."""
 
     candidate_id: str = Field(min_length=1)
-    lane: str = Field(min_length=1)
+    lane: Lane
     repo: str = Field(min_length=1)
     stable_locator: str = Field(min_length=1)
+    trigger_exists: bool | None = None
+    verifiability_exists: bool | None = None
 
     # LANE 1 locator and drift payload.
     rule_id: str | None = None
@@ -170,8 +193,9 @@ class Candidate(StrictModel):
     # LANE 2 breadth, nesting, and locator payload.
     nodeid: str | None = None
     class_scope: str | None = None
-    kind: str | None = None
+    kind: DefinitionKind | None = None
     enclosed_tests: int | None = Field(default=None, ge=0)
+    live_enclosed_tests: int | None = Field(default=None, ge=0)
     parametrized: bool | None = None
     collects_single_item: bool | None = None
     enclosing_skip_nodeid: str | None = None
@@ -183,6 +207,9 @@ class Candidate(StrictModel):
     qualname: str | None = None
     deprecated_in: str | None = None
     removed_in: str | None = None
+    public_api_surface: bool | None = None
+    internal_caller: bool | None = None
+    override_surface: bool | None = None
     line: int | None = Field(default=None, ge=1)
     decorator_line: int | None = Field(default=None, ge=1)
 
@@ -199,6 +226,9 @@ class Candidate(StrictModel):
     action: Action | None = None
     state: CandidateState = CandidateState.ENUMERATED
     reason: ReasonCode | None = None
+    unresolved_major: bool = False
+    auto_merge_eligible: bool | None = None
+    labels: list[str] = Field(default_factory=list)
     expected_failure: ExpectedFailure | None = None
     red_baseline: RedBaselineResult | None = None
 
@@ -207,7 +237,7 @@ class EventRecord(StrictModel):
     """Layer 1 per-candidate structured event record."""
 
     run_id: str = Field(min_length=1)
-    lane: str = Field(min_length=1)
+    lane: Lane
     candidate_id: str = Field(min_length=1)
     gate_passed: bool | None = None
     failed_gate: GateName | None = None
@@ -240,6 +270,11 @@ class EventRecord(StrictModel):
     related_candidate_id: str | None = None
     token_login: str | None = None
     token_scopes: list[str] = Field(default_factory=list)
+    attempt: int = Field(default=1, ge=1)
+    is_new_session_raw: bool | None = None
+    retry_decision: RetryDecision = RetryDecision.PROCEED
 
 
 Layer1Event = EventRecord
+
+NEEDS_HUMAN_REVIEW_LABEL = "needs-human-review"
