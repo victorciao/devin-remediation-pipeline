@@ -249,6 +249,7 @@ def apply_review_result(candidate: Candidate, result: ReviewLoopResult) -> Candi
         "state": result.state,
         "reason": result.reason,
         "unresolved_major": result.reason is ReasonCode.DISAGREEMENT_UNRESOLVED,
+        "auto_merge_eligible": (candidate.auto_merge_eligible if result.converged else False),
     }
     if result.red_result is not None:
         update["red_baseline"] = result.red_result
