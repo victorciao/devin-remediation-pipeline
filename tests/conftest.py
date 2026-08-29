@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,11 @@ CONFIG_DIR = REPO_ROOT / "config"
 TEST_DATA_DIR = Path(__file__).resolve().parent / "data"
 
 TARGET_REPO = "victorciao/superset"
+
+# The §14 drift checks and the LANE 2 collectability checks read the target checkout.
+TARGET_CHECKOUT = Path(
+    os.environ.get("SUPERSET_CHECKOUT", str(REPO_ROOT.parent / "superset"))
+).resolve()
 
 
 @pytest.fixture(scope="session")
@@ -56,3 +62,9 @@ def simulate_config() -> PipelineConfig:
 def rubrics() -> RubricTables:
     """The shipped `config/rubrics.yaml` tables, loaded once."""
     return load_rubrics(RUBRICS_PATH)
+
+
+@pytest.fixture(scope="session")
+def target_checkout() -> Path:
+    """The target Superset checkout the §14 drift checks compare against."""
+    return TARGET_CHECKOUT

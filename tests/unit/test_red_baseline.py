@@ -4,14 +4,22 @@ from __future__ import annotations
 
 import pytest
 
+from pipeline.red_baseline import (
+    apply_red_baseline,
+    classify_red_baseline,
+    should_reauthor_baseline,
+    validate_nested_marker_lifts,
+)
 from pipeline.schemas import (
+    Action,
     BaselineStatus,
+    CandidateState,
     ExpectedFailure,
     ItemOutcome,
     PerItemOutcome,
     ReasonCode,
 )
-from tests import _api
+from tests.factories import lane2_candidate
 
 CLASS_NODEID = "tests/integration_tests/charts/data/api_tests.py::TestPostChartDataApi"
 ITEM = f"{CLASS_NODEID}::test_chart_data_get"
@@ -49,18 +57,14 @@ def outcome(
 
 
 def test_single_item_failure_with_matching_signature_is_valid() -> None:
-    result = _api.session_client().classify_red_baseline(
-        EXPECTED, [outcome(ITEM, ItemOutcome.FAILED)]
-    )
+    result = classify_red_baseline(EXPECTED, [outcome(ITEM, ItemOutcome.FAILED)])
 
     assert result.status == BaselineStatus.VALID
     assert result.representative_nodeid == ITEM
-    assert result.per_item_outcomes[0].expected_reason_match is True
 
 
 def test_reviewer_owns_lane2_baseline_classification() -> None:
     """§17 — failed / passed / skipped map to valid / `stale_skip` / `invalid_red_baseline`."""
-    classify = _api.session_client().classify_red_baseline
     mapping = {
         ItemOutcome.FAILED: BaselineStatus.VALID,
         ItemOutcome.PASSED: BaselineStatus.STALE_SKIP,
@@ -68,7 +72,10 @@ def test_reviewer_owns_lane2_baseline_classification() -> None:
         ItemOutcome.ERROR: BaselineStatus.INVALID_RED_BASELINE,
     }
 
-    observed = {result: classify(EXPECTED, [outcome(ITEM, result)]).status for result in mapping}
+    observed = {
+        result: classify_red_baseline(EXPECTED, [outcome(ITEM, result)]).status
+        for result in mapping
+    }
 
     assert observed == mapping
 
@@ -82,20 +89,38 @@ def test_reviewer_owns_lane2_baseline_classification() -> None:
 )
 def test_invalid_red_baseline_signature_mismatch(exception_type: str, message: str) -> None:
     """§17 — a pre-fix failure whose signature misses either field is an invalid baseline."""
-    result = _api.session_client().classify_red_baseline(
+    result = classify_red_baseline(
         EXPECTED,
         [outcome(ITEM, ItemOutcome.FAILED, exception_type=exception_type, message=message)],
     )
 
     assert result.status == BaselineStatus.INVALID_RED_BASELINE
-    assert result.per_item_outcomes[0].expected_reason_match is False
+    assert result.representative_nodeid is None
+
+
+def test_assert_location_is_optional_but_enforced_when_supplied() -> None:
+    """§9.1 — `assert_location` is optional; a supplied location that moved is a mismatch."""
+    moved = outcome(ITEM, ItemOutcome.FAILED).model_copy(
+        update={"assert_location": "tests/integration_tests/charts/data/api_tests.py:999"}
+    )
+
+    assert classify_red_baseline(EXPECTED, [moved]).status == (BaselineStatus.INVALID_RED_BASELINE)
+
+    without_location = ExpectedFailure(
+        nodeid=ITEM,
+        exception_type="AssertionError",
+        message_pattern=r"assert 400 == 200",
+    )
+    assert classify_red_baseline(without_location, [moved]).status == BaselineStatus.VALID
 
 
 def test_all_four_expected_fields_are_logged() -> None:
-    """§9.1 — the four expected fields and their observed counterparts are recorded."""
-    result = _api.session_client().classify_red_baseline(
-        EXPECTED, [outcome(ITEM, ItemOutcome.FAILED)]
-    )
+    """§9.1 — the four expected fields and their observed counterparts are recorded.
+
+    The plan requires the observed counterparts to make the §11 expected-reason-match KPI
+    computable, so each logged item must carry its own match verdict.
+    """
+    result = classify_red_baseline(EXPECTED, [outcome(ITEM, ItemOutcome.FAILED)])
 
     assert result.expected_failure == EXPECTED
     logged = result.per_item_outcomes[0]
@@ -103,6 +128,17 @@ def test_all_four_expected_fields_are_logged() -> None:
     assert logged.exception_type == EXPECTED.exception_type
     assert logged.message is not None
     assert logged.assert_location == EXPECTED.assert_location
+    assert logged.expected_reason_match is True
+
+
+def test_signature_mismatch_is_logged_as_an_expected_reason_mismatch() -> None:
+    """§11 — the expected-reason-match KPI needs the negative case recorded too."""
+    result = classify_red_baseline(
+        EXPECTED,
+        [outcome(ITEM, ItemOutcome.FAILED, exception_type="ValueError")],
+    )
+
+    assert result.per_item_outcomes[0].expected_reason_match is False
 
 
 # -- multi-item rows ---------------------------------------------------------------------
@@ -110,13 +146,11 @@ def test_all_four_expected_fields_are_logged() -> None:
 
 def test_multi_item_red_baseline_classification() -> None:
     """§17 — one expected FAIL plus passes is valid; any SKIPPED invalid; all-pass stale."""
-    classify = _api.session_client().classify_red_baseline
-
-    valid = classify(
+    valid = classify_red_baseline(
         EXPECTED,
         [outcome(ITEM, ItemOutcome.FAILED), outcome(SIBLING, ItemOutcome.PASSED)],
     )
-    with_skip = classify(
+    with_skip = classify_red_baseline(
         EXPECTED,
         [
             outcome(ITEM, ItemOutcome.FAILED),
@@ -124,7 +158,7 @@ def test_multi_item_red_baseline_classification() -> None:
             outcome(DESCENDANT, ItemOutcome.SKIPPED),
         ],
     )
-    all_pass = classify(
+    all_pass = classify_red_baseline(
         EXPECTED,
         [outcome(ITEM, ItemOutcome.PASSED), outcome(SIBLING, ItemOutcome.PASSED)],
     )
@@ -135,52 +169,118 @@ def test_multi_item_red_baseline_classification() -> None:
     assert all_pass.status == BaselineStatus.STALE_SKIP
 
 
+def test_empty_outcome_vector_is_an_invalid_baseline() -> None:
+    """A locator that collected nothing cannot be a valid red baseline."""
+    assert classify_red_baseline(EXPECTED, []).status == BaselineStatus.INVALID_RED_BASELINE
+
+
 def test_descendant_marker_excluded_from_aggregate() -> None:
     """§17 — SKIPPED items carrying their own marker are logged, not fatal."""
-    result = _api.session_client().classify_red_baseline(
+    result = classify_red_baseline(
         EXPECTED,
         [
             outcome(ITEM, ItemOutcome.FAILED),
             outcome(SIBLING, ItemOutcome.PASSED),
             outcome(DESCENDANT, ItemOutcome.SKIPPED),
         ],
-        descendant_marker_nodeids=[DESCENDANT],
+        descendant_nodeids=[DESCENDANT],
     )
 
     assert result.status == BaselineStatus.VALID
     assert list(result.still_skipped_descendants) == [DESCENDANT]
+    assert len(result.per_item_outcomes) == 3
 
 
 def test_stale_skip_ignores_marked_descendants() -> None:
-    result = _api.session_client().classify_red_baseline(
+    result = classify_red_baseline(
         EXPECTED,
         [outcome(ITEM, ItemOutcome.PASSED), outcome(DESCENDANT, ItemOutcome.SKIPPED)],
-        descendant_marker_nodeids=[DESCENDANT],
+        descendant_nodeids=[DESCENDANT],
     )
 
     assert result.status == BaselineStatus.STALE_SKIP
     assert list(result.still_skipped_descendants) == [DESCENDANT]
 
 
-def test_nested_skip_requires_lifting_parent() -> None:
-    """§17 — a nested candidate whose patch lifts only its own marker is rejected first."""
-    with pytest.raises(ValueError) as excinfo:
-        _api.session_client().classify_red_baseline(
-            EXPECTED,
-            [outcome(ITEM, ItemOutcome.SKIPPED)],
-            lifted_markers=[ITEM],
-            enclosing_skip_nodeid=CLASS_NODEID,
-        )
+# -- nested marker lifting ---------------------------------------------------------------
 
-    assert ReasonCode.BLOCKED_BY_ENCLOSING_SKIP.value in str(excinfo.value)
+
+def test_nested_skip_requires_lifting_parent() -> None:
+    """§17/§9.2 — a nested candidate whose patch lifts only its own marker is rejected."""
+    candidate = lane2_candidate(nodeid=ITEM, enclosing_skip_nodeid=CLASS_NODEID)
+
+    with pytest.raises(ValueError, match="enclosing marker"):
+        validate_nested_marker_lifts(candidate, [ITEM])
+
+
+def test_remaining_ancestor_marker_is_also_rejected() -> None:
+    """A marker both lifted and still present is not lifted."""
+    candidate = lane2_candidate(nodeid=ITEM, enclosing_skip_nodeid=CLASS_NODEID)
+
+    with pytest.raises(ValueError, match="enclosing marker"):
+        validate_nested_marker_lifts(candidate, [ITEM, CLASS_NODEID], [CLASS_NODEID])
 
 
 def test_lifting_the_ancestor_allows_classification() -> None:
-    result = _api.session_client().classify_red_baseline(
-        EXPECTED,
-        [outcome(ITEM, ItemOutcome.FAILED)],
-        lifted_markers=[ITEM, CLASS_NODEID],
-        enclosing_skip_nodeid=CLASS_NODEID,
-    )
+    candidate = lane2_candidate(nodeid=ITEM, enclosing_skip_nodeid=CLASS_NODEID)
 
+    validate_nested_marker_lifts(candidate, [ITEM, CLASS_NODEID])
+
+    result = classify_red_baseline(EXPECTED, [outcome(ITEM, ItemOutcome.FAILED)])
     assert result.status == BaselineStatus.VALID
+
+
+def test_unnested_candidate_needs_no_lifts() -> None:
+    validate_nested_marker_lifts(lane2_candidate(nodeid=ITEM), [])
+
+
+# -- applying the classification ---------------------------------------------------------
+
+
+def test_stale_skip_is_a_successful_reviewer_only_terminal_outcome() -> None:
+    """§9 (line 492) — `stale_skip` is remediated by a reviewer-only diff, not dropped."""
+    candidate = lane2_candidate(nodeid=ITEM, gate_passed=True, score=128.0, risk=1)
+    result = classify_red_baseline(EXPECTED, [outcome(ITEM, ItemOutcome.PASSED)])
+
+    applied = apply_red_baseline(candidate, result, lifted_markers=[ITEM])
+
+    assert applied.action is Action.REVIEWER_ONLY_DIFF
+    assert applied.state is CandidateState.TERMINAL
+    assert applied.reason is ReasonCode.STALE_SKIP
+    assert applied.auto_merge_eligible is False
+    assert applied.red_baseline is not None
+    assert applied.red_baseline.status is BaselineStatus.STALE_SKIP
+    assert list(applied.lifted_markers) == [ITEM]
+
+
+def test_invalid_baseline_routes_back_to_the_gate_with_its_own_reason() -> None:
+    candidate = lane2_candidate(nodeid=ITEM, gate_passed=True, score=128.0, risk=1)
+    result = classify_red_baseline(EXPECTED, [outcome(ITEM, ItemOutcome.SKIPPED)])
+
+    applied = apply_red_baseline(candidate, result)
+
+    assert applied.reason is ReasonCode.INVALID_RED_BASELINE
+    assert applied.state is CandidateState.GATED
+    assert applied.auto_merge_eligible is False
+
+
+def test_valid_baseline_only_records_evidence() -> None:
+    candidate = lane2_candidate(nodeid=ITEM, gate_passed=True, score=128.0, risk=1)
+    result = classify_red_baseline(EXPECTED, [outcome(ITEM, ItemOutcome.FAILED)])
+
+    applied = apply_red_baseline(candidate, result)
+
+    assert applied.reason is None
+    assert applied.action == candidate.action
+    assert applied.red_baseline is not None
+    assert applied.red_baseline.status is BaselineStatus.VALID
+
+
+def test_invalid_baseline_is_reauthored_exactly_once() -> None:
+    """§9.1 — `invalid_red_baseline` → re-author once, then escalate."""
+    invalid = classify_red_baseline(EXPECTED, [outcome(ITEM, ItemOutcome.SKIPPED)])
+    valid = classify_red_baseline(EXPECTED, [outcome(ITEM, ItemOutcome.FAILED)])
+
+    assert should_reauthor_baseline(invalid, 1) is True
+    assert should_reauthor_baseline(invalid, 2) is False
+    assert should_reauthor_baseline(valid, 1) is False

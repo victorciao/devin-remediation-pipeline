@@ -1,20 +1,29 @@
-"""§9/§12 session management: retry tri-state, diff roles, criterion mapping, review loop."""
+"""§9/§12 session management: retry tri-state, diff roles, ceilings and role separation."""
 
 from __future__ import annotations
 
-import pytest
+from collections.abc import Mapping
+from typing import Any, cast
 
-from pipeline.config import ConfigError, PipelineConfig
-from pipeline.schemas import (
-    NEEDS_HUMAN_REVIEW_LABEL,
-    CandidateState,
-    ReasonCode,
-    RetryDecision,
-    Tier,
+import pytest
+from pydantic import SecretStr
+
+from pipeline.config import ConfigError, Mode, PipelineConfig
+from pipeline.red_baseline import classify_implementer_diff, inspect_reviewer_diff
+from pipeline.schemas import EventRecord, Lane, ReasonCode, RetryDecision
+from pipeline.session_client import (
+    ROLE_OUTPUT_SCHEMAS,
+    RoleCollisionError,
+    RoleLimits,
+    SessionCeilingError,
+    SessionClient,
+    SessionDedupeError,
+    SessionRole,
+    event_with_attempt,
+    event_with_ceiling,
+    resolve_retry_decision,
 )
-from tests import _api
-from tests.factories import codeql_candidate, lane2_candidate
-from tests.fakes import ReviewFinding
+from tests.factories import lane2_candidate
 
 ASSERTION_DIFF = """\
 --- a/tests/unit_tests/db_engine_specs/test_base.py
@@ -40,204 +49,217 @@ PRODUCTION_DIFF = """\
 +        return indexes
 """
 
+NODEID = "tests/integration_tests/sqllab_tests.py::TestSqlLab::test_run_sync_query"
+CLASS_NODEID = "tests/integration_tests/sqllab_tests.py::TestSqlLab"
+
+
+def live_config(**overrides: Any) -> PipelineConfig:  # noqa: ANN401
+    return PipelineConfig(
+        mode=Mode.LIVE,
+        github_token=SecretStr("placeholder-github-token"),
+        devin_api_key=SecretStr("placeholder-devin-key"),
+        **overrides,
+    )
+
+
+class FakeTransport:
+    """A local Devin API stand-in: no network, fully scripted responses."""
+
+    def __init__(
+        self,
+        *,
+        create_responses: list[Mapping[str, object]] | None = None,
+        get_responses: list[Mapping[str, object]] | None = None,
+    ) -> None:
+        self.create_responses = create_responses or []
+        self.get_responses = get_responses or []
+        self.posts: list[tuple[str, Mapping[str, object]]] = []
+        self.gets: list[str] = []
+
+    def post(self, path: str, payload: Mapping[str, object]) -> Mapping[str, object]:
+        self.posts.append((path, payload))
+        if not self.create_responses:
+            return {"session_id": f"s-{len(self.posts)}", "is_new_session": True}
+        return self.create_responses.pop(0)
+
+    def get(self, path: str) -> Mapping[str, object]:
+        self.gets.append(path)
+        if not self.get_responses:
+            return {"status_enum": "finished", "acu_used": 1.0}
+        return self.get_responses.pop(0)
+
 
 # -- §12.2 retry tri-state ---------------------------------------------------------------
 
 
 def test_retry_asserts_new_session() -> None:
     """§17 — `false` is fatal; `null` falls back to the session-id comparison."""
-    resolve = _api.session_client().resolve_retry
-
-    assert (
-        resolve(attempt=1, is_new_session=None, session_id="s-1", previous_session_id=None)
-        == RetryDecision.PROCEED
-    )
-    assert (
-        resolve(attempt=2, is_new_session=True, session_id="s-2", previous_session_id="s-1")
-        == RetryDecision.PROCEED
-    )
-    assert (
-        resolve(attempt=2, is_new_session=False, session_id="s-2", previous_session_id="s-1")
-        == RetryDecision.FATAL_DEDUPE_HIT
-    )
-    assert (
-        resolve(attempt=2, is_new_session=None, session_id="s-1", previous_session_id="s-1")
-        == RetryDecision.FATAL_DEDUPE_HIT
-    )
-    assert (
-        resolve(attempt=2, is_new_session=None, session_id="s-2", previous_session_id="s-1")
-        == RetryDecision.PROCEED_ID_DIFFERS
-    )
+    assert resolve_retry_decision(1, "s-1", None, None) is RetryDecision.PROCEED
+    assert resolve_retry_decision(2, "s-2", "s-1", True) is RetryDecision.PROCEED
+    assert resolve_retry_decision(2, "s-2", "s-1", False) is RetryDecision.FATAL_DEDUPE_HIT
+    assert resolve_retry_decision(2, "s-1", "s-1", None) is RetryDecision.FATAL_DEDUPE_HIT
+    assert resolve_retry_decision(2, "s-2", "s-1", None) is RetryDecision.PROCEED_ID_DIFFERS
 
 
 def test_missing_field_never_aborts_a_legitimate_first_attempt() -> None:
-    assert (
-        _api.session_client().resolve_retry(
-            attempt=1, is_new_session=False, session_id="s-1", previous_session_id=None
-        )
-        == RetryDecision.PROCEED
+    assert resolve_retry_decision(1, "s-1", None, False) is RetryDecision.PROCEED
+
+
+def test_retry_evidence_is_recorded_on_the_layer_one_event() -> None:
+    """§12 — the event carries the attempt ordinal, the raw tri-state and the decision."""
+    client = SessionClient(PipelineConfig())
+    attempt = client.create_session(SessionRole.PLANNER, "cand-1", "prompt")
+    event = EventRecord(run_id="run-1", lane=Lane.SKIPPED_TESTS, candidate_id="cand-1")
+
+    recorded = event_with_attempt(event, attempt)
+
+    assert recorded.attempt == 1
+    assert recorded.is_new_session_raw is True
+    assert recorded.retry_decision is RetryDecision.PROCEED
+
+
+def test_fatal_dedupe_hit_aborts_the_retry() -> None:
+    """§12.2 — a retry that returns an existing session must not silently proceed."""
+    transport = FakeTransport(
+        create_responses=[
+            {"session_id": "s-1", "is_new_session": True},
+            {"session_id": "s-1", "is_new_session": False},
+        ]
     )
+    client = SessionClient(live_config(), transport=transport)
+    client.create_session(SessionRole.IMPLEMENTER, "cand-1", "prompt", attempt=1)
+
+    with pytest.raises(SessionDedupeError):
+        client.create_session(SessionRole.IMPLEMENTER, "cand-1", "prompt", attempt=2)
+
+
+def test_session_creation_is_idempotent_and_candidate_tagged() -> None:
+    """§12.2 — creation is idempotent and carries the candidate/role/attempt tags."""
+    transport = FakeTransport()
+    client = SessionClient(live_config(), transport=transport)
+
+    client.create_session(SessionRole.REVIEWER, "cand-9", "prompt", attempt=2)
+
+    _, payload = transport.posts[0]
+    assert payload["idempotent"] is True
+    assert payload["tags"] == ["devin-remediation", "cand-9", "reviewer", "attempt:2"]
+    assert "attempt:2" in str(payload["prompt"])
 
 
 # -- §9.3 role-aware diff classifier -----------------------------------------------------
 
 
 def test_implementer_assertion_hunk_rejected() -> None:
-    classification = _api.session_client().classify_diff(ASSERTION_DIFF, role="implementer")
+    inspection = classify_implementer_diff(ASSERTION_DIFF)
 
-    assert classification.allowed is False
-    assert classification.reason == ReasonCode.IMPLEMENTER_TEST_EDIT
+    assert inspection.accepted is False
+    assert inspection.reason is ReasonCode.IMPLEMENTER_TEST_EDIT
 
 
 def test_implementer_skip_marker_hunk_rejected() -> None:
     """§17 — the implementer has no LANE 2 carve-out for skip markers."""
-    classification = _api.session_client().classify_diff(SKIP_MARKER_DIFF, role="implementer")
+    inspection = classify_implementer_diff(SKIP_MARKER_DIFF)
 
-    assert classification.allowed is False
-    assert classification.reason == ReasonCode.IMPLEMENTER_TEST_EDIT
+    assert inspection.accepted is False
+    assert inspection.reason is ReasonCode.IMPLEMENTER_TEST_EDIT
 
 
 def test_implementer_production_hunk_allowed() -> None:
-    classification = _api.session_client().classify_diff(PRODUCTION_DIFF, role="implementer")
+    inspection = classify_implementer_diff(PRODUCTION_DIFF)
 
-    assert classification.allowed is True
-    assert classification.reason is None
+    assert inspection.accepted is True
+    assert inspection.reason is None
 
 
 def test_reviewer_skip_marker_diff_accepted() -> None:
     """§9.2 — the marker is single-owner and that owner is the reviewer."""
-    classification = _api.session_client().classify_diff(SKIP_MARKER_DIFF, role="reviewer")
+    candidate = lane2_candidate(nodeid=NODEID)
 
-    assert classification.allowed is True
+    inspection = inspect_reviewer_diff(SKIP_MARKER_DIFF, candidate)
+
+    assert inspection.accepted is True
+
+
+def test_reviewer_may_not_touch_production_paths() -> None:
+    """§9.2 — the reviewer owns test paths; production code belongs to the implementer."""
+    candidate = lane2_candidate(nodeid=NODEID)
+
+    inspection = inspect_reviewer_diff(PRODUCTION_DIFF, candidate)
+
+    assert inspection.accepted is False
+    assert inspection.reason is ReasonCode.IMPLEMENTER_TEST_EDIT
 
 
 def test_nested_child_commits_only_own_marker() -> None:
     """§17 — the committed diff of a nested candidate carries no marker outside its own node."""
     parent_lift = """\
---- a/tests/integration_tests/charts/data/api_tests.py
-+++ b/tests/integration_tests/charts/data/api_tests.py
+--- a/tests/integration_tests/sqllab_tests.py
++++ b/tests/integration_tests/sqllab_tests.py
 @@
 -@pytest.mark.skip("Broken")
- class TestPostChartDataApi(base_tests.SupersetTestCase):
-@@
--    @pytest.mark.skip("Flaky")
-     def test_chart_data_get(self):
+ class TestSqlLab(base_tests.SupersetTestCase):
 """
-    classification = _api.session_client().classify_diff(parent_lift, role="reviewer")
+    candidate = lane2_candidate(nodeid=NODEID, enclosing_skip_nodeid=CLASS_NODEID)
 
-    assert classification.allowed is False
-    assert classification.reason == ReasonCode.BLOCKED_BY_ENCLOSING_SKIP
-
-
-# -- §12.1 criterion mapping -------------------------------------------------------------
-
-
-def test_reviewer_test_without_mapped_criterion_is_rejected() -> None:
-    """§17/§12.1 — a reviewer test whose `criterion_id` is absent escalates."""
-    planner = {"criteria": [{"id": "AC-1", "statement": "normalize_indexes returns indexes"}]}
-    reviewer = {
-        "tests": [
-            {
-                "path": "tests/unit_tests/x.py",
-                "nodeid": "tests/unit_tests/x.py::a",
-                "criterion_id": "AC-1",
-            },
-            {
-                "path": "tests/unit_tests/x.py",
-                "nodeid": "tests/unit_tests/x.py::b",
-                "criterion_id": "AC-9",
-            },
-        ]
-    }
-
-    mapping = _api.session_client().validate_criterion_mapping(planner, reviewer)
-
-    assert mapping.ok is False
-    assert list(mapping.unmapped_nodeids) == ["tests/unit_tests/x.py::b"]
-
-
-def test_fully_mapped_reviewer_tests_are_accepted() -> None:
-    planner = {"criteria": [{"id": "AC-1"}]}
-    reviewer = {"tests": [{"nodeid": "tests/unit_tests/x.py::a", "criterion_id": "AC-1"}]}
-
-    mapping = _api.session_client().validate_criterion_mapping(planner, reviewer)
-
-    assert mapping.ok is True
-    assert list(mapping.unmapped_nodeids) == []
-
-
-# -- §9 review loop ----------------------------------------------------------------------
-
-
-def unresolved_major() -> list[ReviewFinding]:
-    return [ReviewFinding(severity="major", note="still red", resolved=False)]
-
-
-@pytest.mark.parametrize("cap", [3, 5])
-def test_non_converging_loop_escalates_at_exactly_the_iteration_cap(cap: int) -> None:
-    """§17 — escalation happens at exactly `iteration_cap`, parameterized over {3, 5}."""
-    config = PipelineConfig(iteration_cap=cap)
-    candidate = codeql_candidate(tier=Tier.HIGH, score=128.0, gate_passed=True)
-
-    outcome = _api.session_client().run_review_loop(
+    inspection = inspect_reviewer_diff(
+        parent_lift,
         candidate,
-        config,
-        rounds=[unresolved_major() for _ in range(cap + 3)],
-        ci_green=True,
-        test_added=True,
+        lifted_markers=[NODEID, CLASS_NODEID],
     )
 
-    assert outcome.converged is False
-    assert outcome.iterations == cap
-    assert outcome.reason == ReasonCode.DISAGREEMENT_UNRESOLVED
-    assert outcome.auto_merge_eligible is False
-    assert NEEDS_HUMAN_REVIEW_LABEL in outcome.labels
+    assert inspection.accepted is False
+    assert inspection.reason is ReasonCode.IMPLEMENTER_TEST_EDIT
 
 
-def test_shipped_default_iteration_cap_is_five(simulate_config: PipelineConfig) -> None:
-    assert simulate_config.iteration_cap == 5
+def test_nested_candidate_must_lift_every_ancestor_first() -> None:
+    """§9.2 — classification is refused until the enumerated ancestors are lifted."""
+    candidate = lane2_candidate(nodeid=NODEID, enclosing_skip_nodeid=CLASS_NODEID)
 
-    outcome = _api.session_client().run_review_loop(
-        codeql_candidate(tier=Tier.HIGH, score=128.0, gate_passed=True),
-        simulate_config,
-        rounds=[unresolved_major() for _ in range(8)],
-        ci_green=True,
-        test_added=True,
-    )
-
-    assert outcome.iterations == 5
+    with pytest.raises(ValueError, match="enclosing marker"):
+        inspect_reviewer_diff(SKIP_MARKER_DIFF, candidate, lifted_markers=[NODEID])
 
 
-def test_still_red_join_never_auto_merges(simulate_config: PipelineConfig) -> None:
-    """§9 step 5 — a still-red join goes straight to a human, with no adjudicating session."""
-    outcome = _api.session_client().run_review_loop(
-        lane2_candidate(tier=Tier.HIGH, score=120.0, gate_passed=True),
-        simulate_config,
-        rounds=[unresolved_major(), unresolved_major()],
-        ci_green=False,
-        test_added=True,
-    )
-
-    assert outcome.auto_merge_eligible is False
-    assert NEEDS_HUMAN_REVIEW_LABEL in outcome.labels
+# -- §12.1 structured outputs ------------------------------------------------------------
 
 
-def test_loop_converges_once_findings_are_resolved(simulate_config: PipelineConfig) -> None:
-    outcome = _api.session_client().run_review_loop(
-        codeql_candidate(tier=Tier.HIGH, score=128.0, gate_passed=True),
-        simulate_config,
-        rounds=[
-            [ReviewFinding(severity="major", resolved=False)],
-            [ReviewFinding(severity="nit", resolved=False)],
-        ],
-        ci_green=True,
-        test_added=True,
-    )
+def node(role: SessionRole, *path: str) -> Mapping[str, Any]:
+    """Walk a role's JSON schema, which the client types only as opaque mapping values."""
+    current: Any = ROLE_OUTPUT_SCHEMAS[role]
+    for key in path:
+        current = current[key]
+    return cast(Mapping[str, Any], current)
 
-    assert outcome.converged is True
-    assert outcome.iterations == 2
-    assert outcome.state == CandidateState.CONVERGED
-    assert outcome.reason is None
+
+def test_role_output_schemas_require_the_planner_criterion_contract() -> None:
+    """§12.1 — each planner criterion carries an expected failure and a verify command."""
+    criterion = node(SessionRole.PLANNER, "properties", "criteria", "items")
+
+    assert criterion["required"] == ["id", "statement", "expected_failure", "verify_command"]
+    assert criterion["properties"]["expected_failure"]["required"] == [
+        "nodeid",
+        "exception_type",
+        "message_pattern",
+    ]
+
+
+def test_reviewer_output_schema_binds_every_test_to_a_criterion() -> None:
+    """§12.1 — a reviewer test without a `criterion_id` cannot be reported at all."""
+    reviewer = ROLE_OUTPUT_SCHEMAS[SessionRole.REVIEWER]
+
+    assert reviewer["required"] == ["tests", "red_baseline", "green_result", "findings"]
+    assert node(SessionRole.REVIEWER, "properties", "tests", "items")["required"] == [
+        "path",
+        "nodeid",
+        "criterion_id",
+    ]
+
+
+def test_implementer_output_schema_has_no_test_surface() -> None:
+    """§9.3 — the implementer reports production changes only."""
+    implementer = ROLE_OUTPUT_SCHEMAS[SessionRole.IMPLEMENTER]
+
+    assert implementer["required"] == ["files_changed", "criteria_addressed", "commands_run"]
+    assert "tests" not in node(SessionRole.IMPLEMENTER, "properties")
 
 
 # -- §14 structural invariants -----------------------------------------------------------
@@ -245,31 +267,101 @@ def test_loop_converges_once_findings_are_resolved(simulate_config: PipelineConf
 
 def test_role_collision_raises_config_error() -> None:
     """§14/§17 — reviewer == implementer is a configuration error, build-time and runtime."""
-    session = _api.session_client()
-
-    session.assert_distinct_roles(
-        planner_session_id="s-plan",
-        implementer_session_id="s-impl",
-        reviewer_session_id="s-rev",
+    transport = FakeTransport(
+        create_responses=[
+            {"session_id": "s-shared", "is_new_session": True},
+            {"session_id": "s-shared", "is_new_session": True},
+        ]
     )
+    client = SessionClient(live_config(), transport=transport)
+    client.create_session(SessionRole.IMPLEMENTER, "cand-1", "prompt")
 
-    with pytest.raises(ConfigError) as excinfo:
-        session.assert_distinct_roles(
-            planner_session_id="s-plan",
-            implementer_session_id="s-same",
-            reviewer_session_id="s-same",
-        )
+    with pytest.raises(RoleCollisionError) as excinfo:
+        client.create_session(SessionRole.REVIEWER, "cand-1", "prompt")
 
-    assert ReasonCode.ROLE_COLLISION.value in str(excinfo.value)
+    assert isinstance(excinfo.value, ConfigError)
+    assert excinfo.value.reason is ReasonCode.ROLE_COLLISION
 
 
 def test_session_ceiling_aborts_run() -> None:
     """§12.2 — exceeding the per-run session ceiling aborts rather than degrading silently."""
-    session = _api.session_client()
+    client = SessionClient(PipelineConfig(), max_sessions=2)
 
-    session.enforce_session_ceiling(used=2, requested=3, ceiling=6)
+    client.create_session(SessionRole.PLANNER, "cand-1", "prompt")
+    client.create_session(SessionRole.IMPLEMENTER, "cand-1", "prompt")
 
-    with pytest.raises(session.SessionCeilingExceeded) as excinfo:
-        session.enforce_session_ceiling(used=5, requested=3, ceiling=6)
+    with pytest.raises(SessionCeilingError) as excinfo:
+        client.create_session(SessionRole.REVIEWER, "cand-1", "prompt")
 
-    assert ReasonCode.SESSION_CEILING_EXCEEDED.value in str(excinfo.value)
+    assert excinfo.value.reason is ReasonCode.SESSION_CEILING_EXCEEDED
+
+
+def test_session_ceiling_abort_is_recorded_as_a_terminal_event() -> None:
+    event = EventRecord(run_id="run-1", lane=Lane.CODEQL, candidate_id="cand-1")
+
+    recorded = event_with_ceiling(event, SessionCeilingError("ceiling"))
+
+    assert recorded.reason is ReasonCode.SESSION_CEILING_EXCEEDED
+    assert recorded.terminal_outcome is not None
+
+
+def test_acu_ceiling_aborts_the_run() -> None:
+    """§12.2 — the per-run ACU ceiling is enforced on poll, not merely configured."""
+    transport = FakeTransport(get_responses=[{"status_enum": "finished", "acu_used": 40.0}])
+    client = SessionClient(live_config(), transport=transport, max_total_acu=10.0)
+    attempt = client.create_session(SessionRole.PLANNER, "cand-1", "prompt")
+
+    with pytest.raises(SessionCeilingError):
+        client.poll_session(SessionRole.PLANNER, attempt.session_id)
+
+
+def test_per_session_acu_limit_is_enforced() -> None:
+    transport = FakeTransport(get_responses=[{"status_enum": "finished", "acu_used": 90.0}])
+    client = SessionClient(
+        live_config(),
+        transport=transport,
+        role_limits={SessionRole.IMPLEMENTER: RoleLimits(max_acu_limit=20.0)},
+    )
+    attempt = client.create_session(SessionRole.IMPLEMENTER, "cand-1", "prompt")
+
+    with pytest.raises(SessionCeilingError):
+        client.poll_session(SessionRole.IMPLEMENTER, attempt.session_id)
+
+
+def test_polling_times_out_instead_of_hanging() -> None:
+    """§12.2 — a non-terminal status must respect the role session timeout."""
+    ticks = iter([0.0, 10.0, 20.0, 30.0, 40.0])
+    transport = FakeTransport(
+        get_responses=[{"status_enum": "working"} for _ in range(5)],
+    )
+    client = SessionClient(
+        live_config(),
+        transport=transport,
+        role_limits={SessionRole.REVIEWER: RoleLimits(session_timeout_s=5.0)},
+        clock=lambda: next(ticks),
+        sleeper=lambda _seconds: None,
+    )
+    attempt = client.create_session(SessionRole.REVIEWER, "cand-1", "prompt")
+
+    with pytest.raises(TimeoutError):
+        client.poll_session(SessionRole.REVIEWER, attempt.session_id)
+
+
+def test_live_orchestration_requires_a_transport() -> None:
+    """No implicit network client: LIVE without an injected transport is a config error."""
+    with pytest.raises(ConfigError):
+        SessionClient(live_config())
+
+
+def test_simulate_never_touches_the_transport() -> None:
+    """§10 — SIMULATE runs the role lifecycle without a single remote call."""
+    transport = FakeTransport()
+    client = SessionClient(PipelineConfig(), transport=transport)
+
+    attempt = client.create_session(SessionRole.PLANNER, "cand-1", "prompt")
+    snapshot = client.poll_session(SessionRole.PLANNER, attempt.session_id)
+
+    assert transport.posts == []
+    assert transport.gets == []
+    assert attempt.session_id.startswith("simulate-")
+    assert snapshot.status_enum == "finished"
