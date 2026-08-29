@@ -33,9 +33,12 @@ def decide_resume(
     persisted: Candidate | None,
     *,
     artifacts_present: bool,
+    marker_search_available: bool = True,
 ) -> ResumeDecision:
     """Resolve lifecycle resume behavior without consulting external state."""
     if persisted is None:
+        if not marker_search_available and not artifacts_present:
+            return ResumeDecision(ResumeAction.DEFER)
         return ResumeDecision(ResumeAction.RESUME_AT_STEP, "publication")
     if persisted.state in {
         CandidateState.ISSUE_PATCHED,
@@ -45,9 +48,21 @@ def decide_resume(
         return ResumeDecision(ResumeAction.SKIP)
     if persisted.state is CandidateState.CONVERGED and artifacts_present:
         return ResumeDecision(ResumeAction.SKIP)
-    if not CandidateStateStore._has_local_artifact(persisted) and artifacts_present:
+    if not has_local_artifact(persisted) and not marker_search_available and not artifacts_present:
+        return ResumeDecision(ResumeAction.DEFER)
+    if not has_local_artifact(persisted) and artifacts_present:
         return ResumeDecision(ResumeAction.DEFER)
     return ResumeDecision(ResumeAction.RESUME_AT_STEP, "publication")
+
+
+def has_local_artifact(candidate: Candidate | None) -> bool:
+    """Return whether a persisted row proves an artifact already exists."""
+    return candidate is not None and (
+        candidate.issue_url is not None
+        or candidate.pr_url is not None
+        or candidate.state.value
+        in {"issue_created", "pr_created", "issue_patched", "comment_created"}
+    )
 
 
 def github_marker_search(
@@ -145,19 +160,13 @@ class CandidateStateStore:
     def existing_artifact(self, candidate_id: str) -> bool:
         """Search persisted state and target artifacts before a write."""
         current = self.latest().get(candidate_id)
-        if self._has_local_artifact(current):
+        if has_local_artifact(current):
             return True
         return self.marker_exists(candidate_id)
 
-    @staticmethod
-    def _has_local_artifact(candidate: Candidate | None) -> bool:
+    def has_local_artifact(self, candidate: Candidate | None) -> bool:
         """Return whether a persisted row proves an artifact already exists."""
-        return candidate is not None and (
-            candidate.issue_url is not None
-            or candidate.pr_url is not None
-            or candidate.state.value
-            in {"issue_created", "pr_created", "issue_patched", "comment_created"}
-        )
+        return has_local_artifact(candidate)
 
     def marker_exists(self, candidate_id: str) -> bool:
         """Search the target repository for one candidate's stable marker."""
@@ -192,7 +201,7 @@ class CandidateStateStore:
         """Atomically reserve a candidate before the first artifact write."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         marker_exists = self.marker_exists(candidate.candidate_id)
-        if self.marker_search_unavailable(candidate.candidate_id) and not self._has_local_artifact(
+        if self.marker_search_unavailable(candidate.candidate_id) and not self.has_local_artifact(
             self.latest().get(candidate.candidate_id)
         ):
             return False
@@ -200,7 +209,7 @@ class CandidateStateStore:
         with lock_path.open("a", encoding="utf-8") as lock_handle:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
             current = self.latest().get(candidate.candidate_id)
-            if self._has_local_artifact(current) or marker_exists:
+            if self.has_local_artifact(current) or marker_exists:
                 return False
             self.append(candidate)
             return True
@@ -231,6 +240,7 @@ __all__ = [
     "ResumeAction",
     "ResumeDecision",
     "decide_resume",
+    "has_local_artifact",
     "github_marker_search",
     "repository_marker_search",
 ]

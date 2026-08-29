@@ -287,8 +287,7 @@ def wait_for_required_contexts(
         )
         complete = all(statuses.get(context) == "success" for context in REQUIRED_CONTEXTS)
         awaiting_approval = any(
-            statuses.get(context)
-            in {"action_required", "awaiting_approval", "waiting", "queued", "pending"}
+            statuses.get(context) in {"action_required", "awaiting_approval", "waiting"}
             for context in REQUIRED_CONTEXTS
         )
         transition = maybe_upgrade_ci_mode(

@@ -190,18 +190,25 @@ def _publish_live(
             continue
         persisted = state_store.resume(candidate.candidate_id)
         artifacts_present = False
-        if persisted is not None and not state_store._has_local_artifact(persisted):
+        has_local = state_store.has_local_artifact(persisted)
+        marker_search_available = True
+        if persisted is None or not has_local:
             artifacts_present = state_store.existing_artifact(candidate.candidate_id)
+            marker_search_available = not state_store.marker_search_unavailable(
+                candidate.candidate_id
+            )
         elif persisted is not None:
             artifacts_present = True
-        decision = decide_resume(persisted, artifacts_present=artifacts_present)
-        if state_store.marker_search_unavailable(candidate.candidate_id) and not artifacts_present:
-            decision = decision.__class__(ResumeAction.DEFER)
+        decision = decide_resume(
+            persisted,
+            artifacts_present=artifacts_present,
+            marker_search_available=marker_search_available,
+        )
         if decision.action is ResumeAction.SKIP:
             published.append(persisted or candidate)
             continue
-        if decision.action is ResumeAction.DEFER and persisted is not None:
-            deferred = persisted.model_copy(
+        if decision.action is ResumeAction.DEFER:
+            deferred = (persisted or candidate).model_copy(
                 update={
                     "state": CandidateState.DEFERRED,
                     "reason": ReasonCode.CAPABILITY_UNAVAILABLE,
@@ -555,14 +562,22 @@ def _publish_live(
             continue
         except MergedPullRequestError as exc:
             latest = state_store.resume(candidate.candidate_id) or candidate
+            pipeline_verified = (
+                latest.state is CandidateState.ISSUE_PATCHED
+                and latest.pr_number == exc.match.number
+                and latest.reason is None
+                and latest.auto_merge_eligible is True
+            )
             merged = latest.model_copy(
                 update={
                     "state": CandidateState.TERMINAL,
                     "pr_number": exc.match.number,
                     "pr_url": exc.match.url,
                     "merged_at": exc.match.merged_at,
-                    "reason": ReasonCode.MERGED_EXTERNALLY_UNVERIFIED,
-                    "merge_verified": False,
+                    "reason": (
+                        None if pipeline_verified else ReasonCode.MERGED_EXTERNALLY_UNVERIFIED
+                    ),
+                    "merge_verified": pipeline_verified,
                 }
             )
             state_store.append(merged)
@@ -627,9 +642,13 @@ def _publish_live(
         published_candidate = publication_source.model_copy(
             update={
                 "state": (
-                    CandidateState.ISSUE_PATCHED
-                    if config.has_issues
-                    else CandidateState.COMMENT_CREATED
+                    CandidateState.TERMINAL
+                    if links.merged_at is not None
+                    else (
+                        CandidateState.ISSUE_PATCHED
+                        if config.has_issues
+                        else CandidateState.COMMENT_CREATED
+                    )
                 ),
                 "issue_number": links.issue_number or publication_source.issue_number,
                 "pr_number": links.pr_number,
@@ -840,18 +859,22 @@ def _prepare_live_candidate(
 ) -> Candidate:
     """Reserve and create a candidate branch before any role session starts."""
     persisted = state_store.resume(candidate.candidate_id)
-    artifacts_present = (
-        state_store.existing_artifact(candidate.candidate_id)
-        if persisted is None or not state_store._has_local_artifact(persisted)
-        else True
+    has_local = state_store.has_local_artifact(persisted)
+    marker_search_available = True
+    if persisted is None or not has_local:
+        artifacts_present = state_store.existing_artifact(candidate.candidate_id)
+        marker_search_available = not state_store.marker_search_unavailable(candidate.candidate_id)
+    else:
+        artifacts_present = True
+    decision = decide_resume(
+        persisted,
+        artifacts_present=artifacts_present,
+        marker_search_available=marker_search_available,
     )
-    decision = decide_resume(persisted, artifacts_present=artifacts_present)
-    if state_store.marker_search_unavailable(candidate.candidate_id) and not artifacts_present:
-        decision = decision.__class__(ResumeAction.DEFER)
     if decision.action is ResumeAction.SKIP:
         return persisted if persisted is not None else candidate
-    if decision.action is ResumeAction.DEFER and persisted is not None:
-        deferred = persisted.model_copy(
+    if decision.action is ResumeAction.DEFER:
+        deferred = (persisted or candidate).model_copy(
             update={
                 "state": CandidateState.DEFERRED,
                 "reason": ReasonCode.CAPABILITY_UNAVAILABLE,
