@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
@@ -249,18 +249,23 @@ class SessionClient:
         }
         if structured_output_schema is not None:
             payload["structured_output_schema"] = structured_output_schema
-        if self._config.mode is Mode.SIMULATE:
-            session_id = hashlib.sha256(
-                f"{candidate_id}|{role.value}|{attempt}".encode()
-            ).hexdigest()[:16]
-            response: Mapping[str, object] = {
-                "session_id": f"simulate-{session_id}",
-                "is_new_session": True,
-            }
-        else:
-            if self._transport is None:
-                raise ConfigError("live session orchestration requires a transport")
-            response = self._transport.post("/v1/sessions", payload)
+        try:
+            if self._config.mode is Mode.SIMULATE:
+                session_id = hashlib.sha256(
+                    f"{candidate_id}|{role.value}|{attempt}".encode()
+                ).hexdigest()[:16]
+                response: Mapping[str, object] = {
+                    "session_id": f"simulate-{session_id}",
+                    "is_new_session": True,
+                }
+            else:
+                if self._transport is None:
+                    raise ConfigError("live session orchestration requires a transport")
+                response = self._transport.post("/v1/sessions", payload)
+        except Exception:
+            with self._lock:
+                self._session_count -= 1
+            raise
         session_id = self._session_id(response)
         previous = self._previous.get((candidate_id, role))
         raw = self._is_new(response)
@@ -290,6 +295,7 @@ class SessionClient:
                     "files_changed": [],
                     "criteria_addressed": [],
                     "commands_run": [],
+                    "committed_diff": "",
                 }
             else:
                 output = {
@@ -301,6 +307,7 @@ class SessionClient:
                         "head_sha": "simulate-head",
                         "files_read": [],
                     },
+                    "committed_diff": "",
                     "findings": [],
                 }
             return SessionSnapshot(
@@ -365,16 +372,24 @@ ROLE_OUTPUT_SCHEMAS: Mapping[SessionRole, Mapping[str, object]] = {
     },
     SessionRole.IMPLEMENTER: {
         "type": "object",
-        "required": ["files_changed", "criteria_addressed", "commands_run"],
+        "required": ["files_changed", "criteria_addressed", "commands_run", "committed_diff"],
         "properties": {
             "files_changed": {"type": "array", "items": {"type": "string"}},
             "criteria_addressed": {"type": "array", "items": {"type": "string"}},
             "commands_run": {"type": "array", "items": {"type": "string"}},
+            "committed_diff": {"type": "string"},
         },
     },
     SessionRole.REVIEWER: {
         "type": "object",
-        "required": ["tests", "red_baseline", "green_result", "diff_reviewed", "findings"],
+        "required": [
+            "tests",
+            "red_baseline",
+            "green_result",
+            "diff_reviewed",
+            "findings",
+            "committed_diff",
+        ],
         "properties": {
             "tests": {
                 "type": "array",
@@ -399,6 +414,7 @@ ROLE_OUTPUT_SCHEMAS: Mapping[SessionRole, Mapping[str, object]] = {
                     "files_read": {"type": "array", "items": {"type": "string"}},
                 },
             },
+            "committed_diff": {"type": "string"},
             "findings": {
                 "type": "array",
                 "items": {
@@ -503,8 +519,13 @@ class RuntimeOrchestrator:
                     reviewer_prompt,
                     attempt=role_attempt,
                 )
-                implementer = implementer_future.result()
-                reviewer = reviewer_future.result()
+                try:
+                    implementer = implementer_future.result()
+                    reviewer = reviewer_future.result()
+                except Exception:
+                    implementer_future.cancel()
+                    reviewer_future.cancel()
+                    raise
             return OrchestrationResult(planner, implementer, reviewer)
 
         current = (
@@ -532,9 +553,10 @@ class RuntimeOrchestrator:
             )
             reviewer_diff = reviewer_payload.get("committed_diff", reviewer_payload.get("diff"))
             findings = list(iteration.findings)
+            implementer_inspection: DiffInspection | None = None
             if isinstance(implementer_diff, str):
-                inspection = self.inspect_implementer_diff(implementer_diff)
-                if not inspection.accepted:
+                implementer_inspection = self.inspect_implementer_diff(implementer_diff)
+                if not implementer_inspection.accepted:
                     findings.append(
                         ReviewFinding(
                             FindingSeverity.BLOCKING,
@@ -543,13 +565,14 @@ class RuntimeOrchestrator:
                             ReasonCode.IMPLEMENTER_TEST_EDIT,
                         )
                     )
+            reviewer_inspection: DiffInspection | None = None
             if candidate is not None and isinstance(reviewer_diff, str):
-                inspection = self.inspect_reviewer_diff(
+                reviewer_inspection = self.inspect_reviewer_diff(
                     reviewer_diff,
                     candidate,
                     lifted_markers=tuple(candidate.lifted_markers),
                 )
-                if not inspection.accepted:
+                if not reviewer_inspection.accepted:
                     findings.append(
                         ReviewFinding(
                             FindingSeverity.BLOCKING,
@@ -557,7 +580,38 @@ class RuntimeOrchestrator:
                             "reviewer diff violates reviewer ownership policy",
                         )
                     )
-            if findings != list(iteration.findings):
+            diff_reviewed = (
+                iteration.diff_reviewed
+                and isinstance(implementer_diff, str)
+                and isinstance(reviewer_diff, str)
+            )
+            raw_diff_reviewed = reviewer_payload.get("diff_reviewed")
+            if diff_reviewed and isinstance(raw_diff_reviewed, Mapping):
+                files_read = raw_diff_reviewed.get("files_read")
+                read_paths = (
+                    {path for path in files_read if isinstance(path, str)}
+                    if isinstance(files_read, Sequence) and not isinstance(files_read, str)
+                    else set()
+                )
+                changed_paths = (
+                    set(implementer_inspection.changed_paths)
+                    if implementer_inspection is not None
+                    else set()
+                )
+                base_sha = raw_diff_reviewed.get("base_sha")
+                head_sha = raw_diff_reviewed.get("head_sha")
+                expected_base = candidate.base_sha if candidate is not None else None
+                expected_head = candidate.head_sha if candidate is not None else None
+                diff_reviewed = (
+                    isinstance(base_sha, str)
+                    and isinstance(head_sha, str)
+                    and (expected_base is None or base_sha == expected_base)
+                    and (expected_head is None or head_sha == expected_head)
+                    and changed_paths <= read_paths
+                )
+            else:
+                diff_reviewed = False
+            if findings != list(iteration.findings) or diff_reviewed != iteration.diff_reviewed:
                 iteration = ReviewIteration(
                     red_baseline=iteration.red_baseline,
                     green=iteration.green,
@@ -568,7 +622,7 @@ class RuntimeOrchestrator:
                     failing_test=iteration.failing_test,
                     pre_fix_signature=iteration.pre_fix_signature,
                     fix_rationale=iteration.fix_rationale,
-                    diff_reviewed=iteration.diff_reviewed,
+                    diff_reviewed=diff_reviewed,
                     red_result=iteration.red_result,
                 )
             return iteration

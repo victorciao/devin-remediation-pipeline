@@ -56,14 +56,20 @@ class CandidateStateStore:
     ) -> None:
         self._path = path
         self._marker_search = marker_search
+        self.marker_search_failed = False
 
     def _read_rows(self) -> list[Candidate]:
         if not self._path.exists():
             return []
         rows: list[Candidate] = []
+        quarantine = self._path.with_suffix(self._path.suffix + ".corrupt")
         for line in self._path.read_text(encoding="utf-8").splitlines():
             if line.strip():
-                rows.append(Candidate.model_validate(json.loads(line), strict=False))
+                try:
+                    rows.append(Candidate.model_validate(json.loads(line), strict=False))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    with quarantine.open("a", encoding="utf-8") as handle:
+                        handle.write(line + "\n")
         return rows
 
     def rows(self) -> list[Candidate]:
@@ -101,21 +107,34 @@ class CandidateStateStore:
         """Search the target repository for one candidate's stable marker."""
         if self._marker_search is None:
             return False
-        return self._marker_search(f"<!-- devin-remediation-id: {candidate_id} -->")
+        try:
+            return self._marker_search(f"<!-- devin-remediation-id: {candidate_id} -->")
+        except Exception:
+            self.marker_search_failed = True
+            return False
 
     def append(self, candidate: Candidate) -> None:
         """Append one candidate lifecycle row after rereading current state."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(candidate.model_dump(mode="json"), sort_keys=True) + "\n"
         with self._path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(candidate.model_dump(mode="json"), sort_keys=True) + "\n")
+            handle.write(line)
 
     def append_if_new_artifact(self, candidate: Candidate) -> bool:
         """Atomically reserve a candidate before the first artifact write."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        marker_exists = self.marker_exists(candidate.candidate_id)
         lock_path = self._path.with_suffix(self._path.suffix + ".lock")
         with lock_path.open("a", encoding="utf-8") as lock_handle:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-            if self.existing_artifact(candidate.candidate_id):
+            current = self.latest().get(candidate.candidate_id)
+            local_artifact = current is not None and (
+                current.issue_url is not None
+                or current.pr_url is not None
+                or current.state.value
+                in {"issue_created", "pr_created", "issue_patched", "comment_created"}
+            )
+            if local_artifact or marker_exists:
                 return False
             self.append(candidate)
             return True

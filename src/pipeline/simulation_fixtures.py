@@ -62,6 +62,14 @@ def simulation_result(
         "files_changed": [],
         "criteria_addressed": ["AC-1"],
         "commands_run": ["pytest fixtures/simulated_test.py"],
+        "committed_diff": (
+            "diff --git a/src/simulated_remediation.py b/src/simulated_remediation.py\n"
+            "--- a/src/simulated_remediation.py\n"
+            "+++ b/src/simulated_remediation.py\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new\n"
+        ),
     }
     reviewer_payload = {
         "tests": [
@@ -76,8 +84,16 @@ def simulation_result(
         "diff_reviewed": {
             "base_sha": "simulate-base",
             "head_sha": "simulate-head",
-            "files_read": ["fixtures/simulated_test.py"],
+            "files_read": ["tests/test_simulated.py"],
         },
+        "committed_diff": (
+            "diff --git a/tests/test_simulated.py b/tests/test_simulated.py\n"
+            "--- a/tests/test_simulated.py\n"
+            "+++ b/tests/test_simulated.py\n"
+            "@@ -1 +1 @@\n"
+            "-def test_old(): pass\n"
+            "+def test_new(): pass\n"
+        ),
         "findings": [],
     }
     snapshots = (

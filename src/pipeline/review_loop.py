@@ -160,7 +160,11 @@ def evaluate_review_iteration(
             ReviewFinding(
                 FindingSeverity.BLOCKING,
                 None,
-                "red baseline is invalid",
+                (
+                    "red baseline is missing"
+                    if iteration.red_baseline is BaselineStatus.MISSING
+                    else "red baseline is invalid"
+                ),
             )
         )
     if not iteration.green:
@@ -345,7 +349,7 @@ def review_iteration_from_payload(
                 continue
             break
     baseline = reviewer_output.get("red_baseline")
-    baseline_status = BaselineStatus.INVALID_RED_BASELINE
+    baseline_status = BaselineStatus.MISSING
     red_result: RedBaselineResult | None = None
     if isinstance(baseline, Mapping) and expected is not None:
         raw_observed = baseline.get("observed", baseline.get("observed_fields"))
@@ -369,6 +373,10 @@ def review_iteration_from_payload(
         if observed_items:
             red_result = classify_red_baseline(expected, observed_items)
             baseline_status = red_result.status
+        else:
+            baseline_status = BaselineStatus.INVALID_RED_BASELINE
+    elif baseline is not None:
+        baseline_status = BaselineStatus.INVALID_RED_BASELINE
     green_result = reviewer_output.get("green_result")
     green = False
     if isinstance(green_result, Mapping):

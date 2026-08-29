@@ -29,7 +29,16 @@ def render_run_report(
         for candidate in rows
         if candidate.action in {Action.OPEN_PR, Action.OPEN_ISSUE} and candidate.tier is not None
     )
-    deferred = sum(candidate.state is CandidateState.DEFERRED for candidate in rows)
+    deferred_by_reason = Counter(
+        candidate.reason.value
+        for candidate in rows
+        if candidate.state is CandidateState.DEFERRED and candidate.reason is not None
+    )
+    deferred_other = sum(
+        count
+        for reason, count in deferred_by_reason.items()
+        if reason not in {"budget_overflow", "session_ceiling"}
+    )
     links = [
         f"- `{candidate.candidate_id}`: PR={candidate.pr_url or 'n/a'}, "
         f"issue={candidate.issue_url or 'n/a'}"
@@ -44,7 +53,9 @@ def render_run_report(
             "",
             f"- Candidates seen: {len(rows)}",
             f"- Scored: {sum(candidate.score is not None for candidate in rows)}",
-            f"- Deferred by budget: {deferred}",
+            f"- Deferred by budget: {deferred_by_reason.get('budget_overflow', 0)}",
+            f"- Deferred by session ceiling: {deferred_by_reason.get('session_ceiling', 0)}",
+            f"- Deferred by capability/other: {deferred_other}",
             "",
             "## Capability notes",
             *note_lines,

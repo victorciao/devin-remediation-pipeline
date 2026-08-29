@@ -104,7 +104,7 @@ class _JsonHttpTransport:
     def _request(self, method: str, path: str, payload: Mapping[str, object] | None) -> object:
         token = self._credential()
         body = json.dumps(dict(payload)).encode("utf-8") if payload is not None else None
-        url = f"{self._base_url}/{quote(path.lstrip('/'), safe='/?:=&')}"
+        url = f"{self._base_url}/{quote(path.lstrip('/'), safe='/?:=&%')}"
         waited = 0.0
         for attempt in range(self._max_attempts):
             request = Request(url, data=body, method=method)

@@ -166,8 +166,6 @@ def _changed_hunks(diff_text: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
         elif current_path is not None:
             if line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
                 current_lines.append(line[1:])
-            elif line.startswith(" "):
-                current_lines.append(line[1:])
     if current_path is not None:
         hunks.append((current_path, tuple(current_lines)))
     return tuple(hunks)

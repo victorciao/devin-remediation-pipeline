@@ -439,6 +439,7 @@ class GitHubClient:
         self._write_guard = write_guard
         self._max_wait_s = max_wait_s
         self._max_attempts = max_attempts
+        self._ensured_labels: dict[str, bool] = {}
         if config.mode is Mode.LIVE and transport is None:
             raise ValueError("live GitHub writes require a transport")
 
@@ -473,6 +474,13 @@ class GitHubClient:
                 waited += delay
         raise AssertionError("GitHub write loop exhausted")
 
+    def _read(self, method: str, path: str) -> object:
+        """Issue one guarded read request through the configured transport."""
+        del method
+        if self._transport is None:
+            raise ValueError("GitHub transport is unavailable")
+        return self._transport.get(path)
+
     @staticmethod
     def _url(response: Mapping[str, object]) -> str:
         """Extract the canonical URL from a GitHub mutation response."""
@@ -506,6 +514,42 @@ class GitHubClient:
             {"ref": f"refs/heads/{branch}", "sha": base_sha},
         )
 
+    def branch_sha(self, branch: str) -> str | None:
+        """Read the current SHA for a candidate branch."""
+        response = self._read(
+            "get",
+            f"/repos/{self._config.target_owner}/{self._config.target_repo}/git/ref/heads/{branch}",
+        )
+        if isinstance(response, Mapping):
+            obj = response.get("object")
+            if isinstance(obj, Mapping) and isinstance(obj.get("sha"), str):
+                return str(obj["sha"])
+        return None
+
+    def pull_request_head_sha(self, number: int) -> str | None:
+        """Read the actual head SHA from a pull request."""
+        response = self._read(
+            "get",
+            f"/repos/{self._config.target_owner}/{self._config.target_repo}/pulls/{number}",
+        )
+        if isinstance(response, Mapping):
+            head = response.get("head")
+            if isinstance(head, Mapping) and isinstance(head.get("sha"), str):
+                return str(head["sha"])
+        return None
+
+    def commit_message(self, sha: str) -> str | None:
+        """Read a commit message from the target repository."""
+        response = self._read(
+            "get",
+            f"/repos/{self._config.target_owner}/{self._config.target_repo}/commits/{sha}",
+        )
+        if isinstance(response, Mapping):
+            commit = response.get("commit")
+            if isinstance(commit, Mapping) and isinstance(commit.get("message"), str):
+                return str(commit["message"])
+        return None
+
     def patch_issue(self, number: int, body: str) -> str:
         """Patch an issue after its linked PR exists."""
         response = self._write(
@@ -531,6 +575,31 @@ class GitHubClient:
         )
         return self._number(response), self._url(response)
 
+    def get_pr_for_head(self, head: str) -> tuple[int, str] | None:
+        """Find an existing open PR for a candidate branch."""
+        response = self._read(
+            "get",
+            f"/repos/{self._config.target_owner}/{self._config.target_repo}/pulls?"
+            + urlencode({"head": f"{self._config.target_owner}:{head}", "state": "all"}),
+        )
+        if not isinstance(response, list):
+            return None
+        for item in response:
+            if isinstance(item, Mapping):
+                number = item.get("number")
+                url = item.get("html_url")
+                if isinstance(number, int) and isinstance(url, str):
+                    return number, url
+        return None
+
+    def patch_pr_body(self, number: int, body: str) -> None:
+        """Update a PR body after retrieving its commit provenance."""
+        self._write(
+            "patch",
+            f"/repos/{self._config.target_owner}/{self._config.target_repo}/pulls/{number}",
+            {"body": body},
+        )
+
     def comment_pr(self, number: int, body: str) -> str:
         """Create a manager-facing degraded-path PR comment."""
         response = self._write(
@@ -547,6 +616,31 @@ class GitHubClient:
             f"/repos/{self._config.target_owner}/{self._config.target_repo}/issues/{number}/labels",
             {"labels": list(labels)},
         )
+
+    def ensure_label(self, label: str) -> bool:
+        """Ensure a repository label exists, returning false on denied creation."""
+        if label in self._ensured_labels:
+            return self._ensured_labels[label]
+        path = f"/repos/{self._config.target_owner}/{self._config.target_repo}/labels/{label}"
+        try:
+            self._read("get", path)
+            self._ensured_labels[label] = True
+            return True
+        except HttpTransportError as exc:
+            if exc.status_code != 404:
+                self._ensured_labels[label] = False
+                return False
+        try:
+            self._write(
+                "post",
+                f"/repos/{self._config.target_owner}/{self._config.target_repo}/labels",
+                {"name": label},
+            )
+        except HttpTransportError:
+            self._ensured_labels[label] = False
+            return False
+        self._ensured_labels[label] = True
+        return True
 
     def enable_auto_merge(self, number: int) -> None:
         """Request auto-merge only after the caller has checked all gates."""
@@ -571,11 +665,12 @@ def publish_artifacts(
     base: str = "master",
     labels: Sequence[str] = (),
     preflight: Callable[[], None] | None = None,
-    ci_green: bool = False,
+    ci_probe: Callable[[int], CiWaitResult] | None = None,
     existing_issue_number: int | None = None,
     existing_issue_url: str | None = None,
     after_issue: Callable[[int, str], None] | None = None,
-    after_pr: Callable[[int], bool] | None = None,
+    after_pr_created: Callable[[int, str], None] | None = None,
+    after_issue_patched: Callable[[str], None] | None = None,
 ) -> ArtifactLinks:
     """Publish artifacts in the mandated issue → PR → issue-patch order."""
     if not client._config.has_issues:
@@ -598,24 +693,40 @@ def publish_artifacts(
         after_issue(issue_number, issue_url)
     if candidate.tier is Tier.MEDIUM or pr_title is None or pr_body is None or head is None:
         return ArtifactLinks(issue_url, None, issue_number=issue_number)
+    if ci_probe is None:
+        raise ValueError("PR publication requires an observed CI probe")
     if preflight is not None:
         preflight()
-    pr_number, pr_url = client.create_pr(
-        pr_title,
-        f"{pr_body.rstrip()}\n\nCloses #{issue_number}\n",
-        head=head,
-        base=base,
-    )
-    if after_pr is not None:
-        ci_green = after_pr(pr_number)
+    try:
+        pr_number, pr_url = client.create_pr(
+            pr_title,
+            f"{pr_body.rstrip()}\n\nCloses #{issue_number}\n",
+            head=head,
+            base=base,
+        )
+    except HttpTransportError as exc:
+        if exc.status_code != 422:
+            raise
+        existing = client.get_pr_for_head(head)
+        if existing is None:
+            raise
+        pr_number, pr_url = existing
+    if after_pr_created is not None:
+        after_pr_created(pr_number, pr_url)
+    ci_result = ci_probe(pr_number) if ci_probe is not None else None
     if preflight is not None:
         preflight()
     client.patch_issue(issue_number, f"{issue_body.rstrip()}\n\nPR: {pr_url}\n")
+    if after_issue_patched is not None:
+        after_issue_patched(pr_url)
     if (
         candidate.auto_merge_eligible
         and client._config.auto_merge_enabled
         and client._config.ci_evidence_mode.value == "github"
-        and ci_green is True
+        and ci_result is not None
+        and ci_result.auto_merge_eligible
+        and ci_result.reason is None
+        and (candidate.test_added is True or candidate.test_exempt_reason is not None)
     ):
         client.enable_auto_merge(pr_number)
     return ArtifactLinks(issue_url, pr_url, issue_number=issue_number, pr_number=pr_number)
@@ -631,6 +742,8 @@ def publish_degraded(
     head: str,
     base: str = "master",
     preflight: Callable[[], None] | None = None,
+    after_pr_created: Callable[[int, str], None] | None = None,
+    after_comment_created: Callable[[str], None] | None = None,
 ) -> ArtifactLinks:
     """Publish a PR and manager-facing comment when issues are disabled."""
     if client._config.has_issues or client._config.issue_sink is not IssueSink.PR_COMMENT:
@@ -643,9 +756,13 @@ def publish_degraded(
         head=head,
         base=base,
     )
+    if after_pr_created is not None:
+        after_pr_created(pr_number, pr_url)
     if preflight is not None:
         preflight()
     comment_url = client.comment_pr(pr_number, comment_body)
+    if after_comment_created is not None:
+        after_comment_created(comment_url)
     return ArtifactLinks(None, pr_url, comment_url, pr_number=pr_number)
 
 

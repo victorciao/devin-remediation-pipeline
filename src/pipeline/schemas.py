@@ -118,6 +118,7 @@ class Tier(str, Enum):
 class BaselineStatus(str, Enum):
     """Classification of a reviewer red-baseline run."""
 
+    MISSING = "missing"
     VALID = "valid"
     STALE_SKIP = "stale_skip"
     INVALID_RED_BASELINE = "invalid_red_baseline"
@@ -245,6 +246,7 @@ class Candidate(StrictModel):
     reason: ReasonCode | None = None
     pr_url: str | None = None
     issue_url: str | None = None
+    comment_url: str | None = None
     issue_number: int | None = Field(default=None, ge=1)
     pr_number: int | None = Field(default=None, ge=1)
     head_branch: str | None = None
@@ -289,6 +291,7 @@ class EventRecord(StrictModel):
     iterations: int = Field(default=0, ge=0)
     pr_url: str | None = None
     issue_url: str | None = None
+    comment_url: str | None = None
     test_added: bool | None = None
     test_paths: list[str] = Field(default_factory=list)
     test_author: str | None = None
