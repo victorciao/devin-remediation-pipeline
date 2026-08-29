@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,20 @@ from pipeline.dispatch import (
     dispatch_candidates,
 )
 from pipeline.gate import HARD_CONDITION_REASONS
+from pipeline.github_client import (
+    ArtifactUnavailableError,
+    GitHubClient,
+    SimulationWriteError,
+    publish_artifacts,
+    publish_degraded,
+)
+from pipeline.review_loop import (
+    FindingSeverity,
+    ReviewIteration,
+    apply_review_result,
+    run_review_loop,
+)
+from pipeline.review_loop import ReviewFinding as LoopFinding
 from pipeline.schemas import (
     NEEDS_HUMAN_REVIEW_LABEL,
     Action,
@@ -28,10 +43,15 @@ from pipeline.schemas import (
     RedBaselineResult,
     Tier,
 )
-from tests import _api
+from pipeline.state import CandidateStateStore, repository_marker_search
+from pipeline.templates.render import (
+    candidate_marker,
+    render_degraded_comment_body,
+    render_pr_body,
+    validate_issue_body,
+)
 from tests.conftest import RUBRICS_PATH, TEMPLATES_DIR
 from tests.factories import codeql_candidate, lane2_candidate, lane3_candidate
-from tests.fakes import FakeGitHubClient, NoWriteGitHubClient, ReviewFinding
 
 PARENT_NODEID = "tests/integration_tests/charts/data/api_tests.py::TestPostChartDataApi"
 CHILD_NODEID = f"{PARENT_NODEID}::test_chart_data_get"
@@ -54,6 +74,30 @@ def live_config(
         devin_api_key=SecretStr("placeholder-devin-key"),
         **overrides,
     )
+
+
+class ArtifactTransport:
+    """A recording GitHub transport; a SIMULATE run must leave `calls` empty."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, Mapping[str, object]]] = []
+
+    def _respond(
+        self, method: str, path: str, payload: Mapping[str, object]
+    ) -> Mapping[str, object]:
+        self.calls.append((method, path, payload))
+        return {"number": len(self.calls), "html_url": f"https://example.invalid{path}"}
+
+    def post(self, path: str, payload: Mapping[str, object]) -> Mapping[str, object]:
+        return self._respond("post", path, payload)
+
+    def patch(self, path: str, payload: Mapping[str, object]) -> Mapping[str, object]:
+        return self._respond("patch", path, payload)
+
+
+def artifact_client(config: PipelineConfig, transport: ArtifactTransport) -> GitHubClient:
+    """A GitHub client with an injected clock and sleeper so no test ever waits."""
+    return GitHubClient(config, transport=transport, clock=lambda: 0.0, sleeper=lambda _: None)
 
 
 def github_config(
@@ -310,20 +354,28 @@ def test_stale_skip_is_exempt_from_the_red_to_green_requirement(
 # -- auto-merge gating -------------------------------------------------------------------
 
 
-def test_auto_merge_when_every_precondition_holds() -> None:
-    """§6 — green CI, a reviewer test, no unresolved major: eligible."""
-    config = github_config()
-
-    decision = _api.dispatch().auto_merge_eligible(
-        high_candidate(risk=2),
-        config,
-        findings=[ReviewFinding(severity="minor", resolved=True)],
-        ci_green=True,
-        test_added=True,
-        existing_suite_green=True,
+def converging_iteration(**fields: Any) -> ReviewIteration:  # noqa: ANN401
+    """A review iteration whose red baseline is valid and whose green run passed."""
+    return ReviewIteration(
+        red_baseline=BaselineStatus.VALID,
+        green=fields.pop("green", True),
+        planner_criteria=frozenset({"C1"}),
+        reviewer_criteria=frozenset({"C1"}),
+        addressed_criteria=frozenset({"C1"}),
+        **fields,
     )
 
-    assert decision.eligible is True
+
+def test_auto_merge_when_every_precondition_holds() -> None:
+    """§6/§9 — a valid red baseline, a green reviewer test and no major finding: eligible."""
+    config = github_config()
+
+    result = run_review_loop(config, converging_iteration())
+    decision = dispatch_candidates([apply_review_result(high_candidate(risk=2), result)], config)[0]
+
+    assert result.converged is True
+    assert result.auto_merge_eligible is True
+    assert decision.auto_merge_eligible is True
     assert NEEDS_HUMAN_REVIEW_LABEL not in decision.labels
 
 
@@ -331,16 +383,16 @@ def test_unresolved_major_blocks_auto_merge_and_labels_for_human_review() -> Non
     """§17 — a converged PR with an unresolved `major` and no `blocking` is not eligible."""
     config = github_config()
 
-    decision = _api.dispatch().auto_merge_eligible(
-        high_candidate(risk=2),
+    result = run_review_loop(
         config,
-        findings=[ReviewFinding(severity="major", note="unresolved", resolved=False)],
-        ci_green=True,
-        test_added=True,
-        existing_suite_green=True,
+        converging_iteration(
+            findings=(LoopFinding(FindingSeverity.MAJOR, None, "unresolved major review finding"),)
+        ),
     )
+    decision = dispatch_candidates([apply_review_result(high_candidate(risk=2), result)], config)[0]
 
-    assert decision.eligible is False
+    assert result.auto_merge_eligible is False
+    assert decision.auto_merge_eligible is False
     assert NEEDS_HUMAN_REVIEW_LABEL in decision.labels
 
 
@@ -380,32 +432,36 @@ def test_existing_suite_regression_blocks_auto_merge() -> None:
     """§17 — breaking a mocked existing test blocks the merge even with a green reviewer test."""
     config = github_config()
 
-    decision = _api.dispatch().auto_merge_eligible(
-        high_candidate(risk=1),
+    result = run_review_loop(
         config,
-        findings=[],
-        ci_green=False,
-        test_added=True,
-        existing_suite_green=False,
+        converging_iteration(
+            findings=(
+                LoopFinding(FindingSeverity.BLOCKING, None, "pre-existing suite test regressed"),
+            )
+        ),
     )
+    decision = dispatch_candidates([apply_review_result(high_candidate(risk=1), result)], config)[0]
 
-    assert decision.eligible is False
+    assert result.auto_merge_eligible is False
+    assert decision.auto_merge_eligible is False
 
 
 def test_missing_reviewer_test_blocks_auto_merge() -> None:
-    """§9 — no reviewer test means no auto-merge."""
+    """§9 — a planner criterion with no reviewer test mapped to it blocks auto-merge."""
     config = github_config()
 
-    decision = _api.dispatch().auto_merge_eligible(
-        high_candidate(risk=1),
+    result = run_review_loop(
         config,
-        findings=[],
-        ci_green=True,
-        test_added=False,
-        existing_suite_green=True,
+        ReviewIteration(
+            red_baseline=BaselineStatus.VALID,
+            green=True,
+            planner_criteria=frozenset({"C1"}),
+            reviewer_criteria=frozenset(),
+            addressed_criteria=frozenset(),
+        ),
     )
 
-    assert decision.eligible is False
+    assert result.auto_merge_eligible is False
 
 
 def test_local_ci_mode_forces_auto_merge_off() -> None:
@@ -421,137 +477,168 @@ def test_local_ci_mode_forces_auto_merge_off() -> None:
 # -- §7 preflight and dual artifacts -----------------------------------------------------
 
 
-def test_dispatch_preflight_aborts_when_issues_disabled(simulate_config: PipelineConfig) -> None:
+def test_dispatch_preflight_aborts_when_issues_disabled() -> None:
     """§7 — `has_issues == false` aborts before any write unless the sink is `pr_comment`."""
-    client = FakeGitHubClient(has_issues=False)
+    transport = ArtifactTransport()
+    client = artifact_client(live_config(has_issues=False), transport)
 
-    result = _api.dispatch().preflight(simulate_config, client=client)
+    with pytest.raises(ArtifactUnavailableError):
+        publish_artifacts(
+            client,
+            high_candidate(tier=Tier.HIGH),
+            issue_title="title",
+            issue_body="### SUMMARY\n",
+            pr_title="fix: bound the generated range",
+            pr_body="### SUMMARY\n",
+            head="devin/x",
+        )
 
-    assert result.ok is False
-    assert result.aborted_before_write is True
-    assert result.reason == ReasonCode.CAPABILITY_UNAVAILABLE
-    assert client.writes == []
+    assert transport.calls == []
 
 
 def test_preflight_allows_degraded_pr_comment_sink() -> None:
-    """§7 — the degraded sink keeps the run going and records `artifact_degraded`."""
-    config = pipeline_config(issue_sink=IssueSink.PR_COMMENT)
-    client = FakeGitHubClient(has_issues=False)
+    """§7 — the degraded sink keeps the run going and publishes PR + manager comment."""
+    transport = ArtifactTransport()
+    client = artifact_client(
+        live_config(has_issues=False, issue_sink=IssueSink.PR_COMMENT), transport
+    )
 
-    result = _api.dispatch().preflight(config, client=client)
+    links = publish_degraded(
+        client,
+        high_candidate(tier=Tier.HIGH),
+        pr_title="fix: bound the generated range",
+        pr_body="### SUMMARY\n",
+        comment_body="manager summary",
+        head="devin/x",
+    )
 
-    assert result.ok is True
-    assert result.issue_sink == IssueSink.PR_COMMENT
-    assert result.reason == ReasonCode.ARTIFACT_DEGRADED
-    assert client.writes == []
+    assert links.issue_url is None
+    assert links.comment_url is not None
 
 
-def test_crosslink_roundtrip(simulate_config: PipelineConfig) -> None:
+def test_crosslink_roundtrip() -> None:
     """§7 — issue first, then the PR carrying `Closes #<n>`, then the issue body is patched."""
-    client = FakeGitHubClient()
-    candidate = high_candidate(candidate_id="codeql-7")
-    marker = _api.dedupe().marker(candidate.candidate_id)
+    transport = ArtifactTransport()
+    client = artifact_client(live_config(), transport)
+    candidate = high_candidate(candidate_id="codeql-7", tier=Tier.HIGH)
+    marker = candidate_marker(candidate.candidate_id)
 
-    result = _api.dispatch().create_artifacts(
+    links = publish_artifacts(
+        client,
         candidate,
-        live_config(),
-        client=client,
+        issue_title="fix: bound the generated range",
+        issue_body=f"### SUMMARY\n\n{marker}\n",
         pr_title="fix: bound the generated range",
         pr_body=f"### SUMMARY\n\n{marker}\n",
-        issue_body=f"### SUMMARY\n\n{marker}\n",
+        head="devin/codeql-7",
     )
 
-    assert client.write_names == ["create_issue", "create_pull_request", "update_issue"]
-    assert result.issue_number == 101
-    assert result.state == CandidateState.PR_CREATED
-    pr_body = dict(client.writes[1][1])["body"]
-    patched_issue = dict(client.writes[2][1])["body"]
-    assert f"Closes #{result.issue_number}" in str(pr_body)
-    assert marker in str(pr_body)
-    assert marker in str(patched_issue)
-    assert result.pr_url is not None and result.pr_url in str(patched_issue)
-    assert simulate_config.issue_sink == IssueSink.ISSUES
+    assert [path for _, path, _ in transport.calls] == [
+        "/repos/victorciao/superset/issues",
+        "/repos/victorciao/superset/pulls",
+        "/repos/victorciao/superset/issues/1",
+    ]
+    pr_body = str(transport.calls[1][2]["body"])
+    patched_issue = str(transport.calls[2][2]["body"])
+    assert "Closes #1" in pr_body
+    assert marker in pr_body
+    assert marker in patched_issue
+    assert links.pr_url is not None and links.pr_url in patched_issue
 
 
-def test_resume_after_issue_created_pr_failed(simulate_config: PipelineConfig) -> None:
-    """§14.1 — replaying the canonical resume state creates no second issue."""
-    dispatch = _api.dispatch()
+def test_resume_after_issue_created_pr_failed(tmp_path: Path) -> None:
+    """§14.1 — replaying the `issue created, PR not created` state creates no second issue."""
+    store = CandidateStateStore(tmp_path / "candidates.jsonl")
     candidate = high_candidate(candidate_id="codeql-9")
-    marker = _api.dedupe().marker(candidate.candidate_id)
-    live = live_config()
-    client = FakeGitHubClient(fail_pr_creation=True)
 
-    with pytest.raises(RuntimeError):
-        dispatch.create_artifacts(
-            candidate,
-            live,
-            client=client,
-            pr_title="fix: bound the generated range",
-            pr_body=f"### SUMMARY\n\n{marker}\n",
-            issue_body=f"### SUMMARY\n\n{marker}\n",
+    assert store.append_if_new_artifact(candidate) is True
+    store.append(
+        candidate.model_copy(
+            update={
+                "state": CandidateState.ISSUE_CREATED,
+                "issue_url": "https://example.invalid/issues/1",
+            }
         )
-    assert client.write_names.count("create_issue") == 1
-
-    client.fail_pr_creation = False
-    replay = dispatch.create_artifacts(
-        candidate,
-        live,
-        client=client,
-        pr_title="fix: bound the generated range",
-        pr_body=f"### SUMMARY\n\n{marker}\n",
-        issue_body=f"### SUMMARY\n\n{marker}\n",
     )
 
-    assert client.write_names.count("create_issue") == 1
-    assert replay.issue_number == 101
-    assert replay.state == CandidateState.PR_CREATED
-    assert simulate_config.mode == Mode.SIMULATE
+    assert store.existing_artifact("codeql-9") is True
+    assert store.append_if_new_artifact(candidate) is False
+    resumed = store.resume("codeql-9")
+    assert resumed is not None
+    assert resumed.state is CandidateState.ISSUE_CREATED
+    assert resumed.issue_url == "https://example.invalid/issues/1"
+    assert [row.candidate_id for row in store.rows()] == ["codeql-9", "codeql-9"]
 
 
-def test_pr_comment_sink_state_transition_and_validation(tmp_path: Path) -> None:
-    """§7 degraded path — `dispatching -> pr_created -> comment_created` plus a local report."""
-    config = live_config(issue_sink=IssueSink.PR_COMMENT)
-    client = FakeGitHubClient(has_issues=False)
-    candidate = high_candidate(candidate_id="codeql-11")
-    render = _api.render()
-    issue_body = render.render_issue_body(candidate)
-
-    result = _api.dispatch().create_artifacts(
-        candidate,
-        config,
-        client=client,
-        pr_title="fix: bound the generated range",
-        pr_body=render.render_pr_body(candidate, implementation_plan="plan", tests="tests"),
-        issue_body=issue_body,
-        reports_dir=tmp_path,
+def test_resume_finds_the_marker_in_the_target_checkout(tmp_path: Path) -> None:
+    """§14.1 — a marker already present in the target repo suppresses a duplicate artifact."""
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    candidate = high_candidate(candidate_id="codeql-10")
+    (repository / "pr_body.md").write_text(
+        candidate_marker(candidate.candidate_id), encoding="utf-8"
+    )
+    store = CandidateStateStore(
+        tmp_path / "candidates.jsonl",
+        marker_search=repository_marker_search(repository),
     )
 
-    assert client.write_names == ["create_pull_request", "create_comment"]
-    assert result.issue_number is None
-    assert result.state == CandidateState.COMMENT_CREATED
-    comment_body = str(dict(client.writes[1][1])["body"])
-    validation = render.validate_issue_body(comment_body, render.select_issue_template(candidate))
-    assert validation.valid is True
-    assert (tmp_path / "issues" / f"{candidate.candidate_id}.md").is_file()
+    assert store.marker_exists("codeql-10") is True
+    assert store.append_if_new_artifact(candidate) is False
+    assert store.rows() == []
+
+
+def test_pr_comment_sink_state_transition_and_validation() -> None:
+    """§7 degraded path — the comment carries the marker and validates as an issue body."""
+    transport = ArtifactTransport()
+    config = live_config(has_issues=False, issue_sink=IssueSink.PR_COMMENT)
+    client = artifact_client(config, transport)
+    candidate = high_candidate(candidate_id="codeql-11", tier=Tier.HIGH)
+    issue_template = (TEMPLATES_DIR / "issues" / "security_tracking.md").read_text(encoding="utf-8")
+    pr_template = (TEMPLATES_DIR / "superset" / "PULL_REQUEST_TEMPLATE.md").read_text(
+        encoding="utf-8"
+    )
+    comment_body = render_degraded_comment_body(
+        issue_template,
+        candidate,
+        generated_summary="bound the generated range",
+    )
+
+    links = publish_degraded(
+        client,
+        candidate,
+        pr_title="fix: bound the generated range",
+        pr_body=render_pr_body(pr_template, candidate, {}, {}),
+        comment_body=comment_body,
+        head="devin/codeql-11",
+    )
+
+    assert [path for _, path, _ in transport.calls] == [
+        "/repos/victorciao/superset/pulls",
+        "/repos/victorciao/superset/issues/1/comments",
+    ]
+    assert links.issue_url is None
+    assert candidate_marker(candidate.candidate_id) in comment_body
+    validate_issue_body(comment_body, candidate)
 
 
 def test_simulate_mode_makes_no_remote_writes(simulate_config: PipelineConfig) -> None:
-    """§17 — SIMULATE performs zero remote writes; the fake fails the test if one is attempted."""
-    client = NoWriteGitHubClient()
-    candidate = high_candidate(candidate_id="codeql-13")
+    """§17 — SIMULATE performs zero remote writes; the transport records none attempted."""
+    transport = ArtifactTransport()
+    client = artifact_client(simulate_config, transport)
 
-    result = _api.dispatch().create_artifacts(
-        candidate,
-        simulate_config,
-        client=client,
-        pr_title="fix: bound the generated range",
-        pr_body="### SUMMARY\n",
-        issue_body="### SUMMARY\n",
-    )
+    with pytest.raises(SimulationWriteError):
+        publish_artifacts(
+            client,
+            high_candidate(candidate_id="codeql-13", tier=Tier.HIGH),
+            issue_title="title",
+            issue_body="### SUMMARY\n",
+            pr_title="fix: bound the generated range",
+            pr_body="### SUMMARY\n",
+            head="devin/codeql-13",
+        )
 
-    assert client.writes == []
-    assert result.issue_number is None
-    assert result.pr_url is None
+    assert transport.calls == []
 
 
 # -- containment and the blocked-child lifecycle -----------------------------------------
