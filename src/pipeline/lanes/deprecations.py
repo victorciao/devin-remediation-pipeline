@@ -8,6 +8,7 @@ import re
 from collections.abc import Mapping
 from pathlib import Path
 
+from pipeline.config import ConfigError
 from pipeline.schemas import Candidate, Lane, ReasonCode
 
 Record = dict[str, str | int | bool | None]
@@ -85,7 +86,7 @@ def current_release(
             elif line.strip().startswith("- type:"):
                 break
     if not releases:
-        raise RuntimeError(f"no concrete release found in {version_source}")
+        raise ConfigError(f"no concrete release found in {version_source}")
     top = max(releases)
     return ".".join(str(part) for part in top), top[0]
 

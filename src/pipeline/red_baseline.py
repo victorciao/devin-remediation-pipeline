@@ -49,17 +49,21 @@ def classify_red_baseline(
     aggregate is the successful ``stale_skip`` path.
     """
     descendants = set(descendant_nodeids)
+    logged_outcomes = [
+        outcome.model_copy(update={"expected_reason_match": _matches_expected(outcome, expected)})
+        for outcome in outcomes
+    ]
     still_skipped = [
         outcome.nodeid
-        for outcome in outcomes
+        for outcome in logged_outcomes
         if outcome.outcome is ItemOutcome.SKIPPED and outcome.nodeid in descendants
     ]
     applicable = [
         outcome
-        for outcome in outcomes
+        for outcome in logged_outcomes
         if not (outcome.outcome is ItemOutcome.SKIPPED and outcome.nodeid in descendants)
     ]
-    for outcome in outcomes:
+    for outcome in logged_outcomes:
         logger.info(
             "red_baseline_item",
             extra={
@@ -79,7 +83,7 @@ def classify_red_baseline(
         status = BaselineStatus.INVALID_RED_BASELINE
     return RedBaselineResult(
         status=status,
-        per_item_outcomes=list(outcomes),
+        per_item_outcomes=logged_outcomes,
         still_skipped_descendants=still_skipped,
         representative_nodeid=next(
             (outcome.nodeid for outcome in applicable if _matches_expected(outcome, expected)),

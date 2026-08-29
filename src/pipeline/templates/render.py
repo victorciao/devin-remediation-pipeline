@@ -98,6 +98,8 @@ def render_pr_body(
         "",
         "### ADDITIONAL INFORMATION",
         additional,
+        "",
+        "Signed-off-by: implementer commit verified by pipeline",
     ]
     if automation_metadata is not None:
         sections.extend(
@@ -115,6 +117,16 @@ def render_issue_title(candidate: Candidate, generated_title: str) -> str:
     if candidate.lane is Lane.DEPRECATIONS:
         return f"[SIP] {generated_title}"
     return generated_title
+
+
+def render_pr_title(candidate: Candidate) -> str:
+    """Render a conventional Superset title for any remediation lane."""
+    locator = re.sub(r"\s+", " ", candidate.stable_locator).strip()
+    if candidate.lane is Lane.CODEQL:
+        return f"fix(security): remediate {locator}"
+    if candidate.lane is Lane.SKIPPED_TESTS:
+        return f"test: re-enable {locator}"
+    return f"refactor: remove deprecated {locator}"
 
 
 def render_issue_body(
@@ -267,6 +279,7 @@ __all__ = [
     "render_issue_body",
     "render_issue_title",
     "render_pr_body",
+    "render_pr_title",
     "templates_match",
     "validate_pr_body",
     "validate_issue_body",

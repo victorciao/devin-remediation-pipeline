@@ -27,7 +27,6 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from pipeline.github_client import GitHubTransport
 from pipeline.session_client import DevinTransport
 
 
@@ -170,7 +169,7 @@ class UrllibDevinTransport(DevinTransport):
         return self._http._mapping(self._http._request("GET", path, None), "Devin")
 
 
-class UrllibGitHubTransport(GitHubTransport):
+class UrllibGitHubTransport:
     """Concrete GitHub API transport using GITHUB_PAT_REMEDIATION at call time."""
 
     def __init__(self, *, base_url: str = "https://api.github.com") -> None:

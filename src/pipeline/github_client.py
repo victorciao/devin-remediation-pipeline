@@ -4,10 +4,93 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, cast
+from urllib.parse import urlencode
 
-from pipeline.config import IssueSink, Mode, PipelineConfig
-from pipeline.schemas import Candidate, Tier
+from pipeline.config import CiEvidenceMode, IssueSink, Mode, PipelineConfig
+from pipeline.http_transport import HttpTransportError
+from pipeline.schemas import Candidate, ReasonCode, Tier
+
+REQUIRED_CONTEXTS = (
+    "lint-check",
+    "pre-commit (current)",
+    "unit-tests-required",
+    "test-postgres-required",
+    "test-sqlite",
+    "test-mysql",
+    "test-postgres-hive",
+    "test-postgres-presto",
+    "frontend-build",
+    "cypress-matrix-required",
+    "playwright-tests-required",
+    "dependency-review",
+    "enforce-single-migration-head",
+)
+
+
+class PreflightError(RuntimeError):
+    """Raised when a blocking LIVE capability precondition is unmet."""
+
+    def __init__(self, reason: ReasonCode, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class LivePreflight:
+    """Read-only capability result used to configure a LIVE run."""
+
+    has_issues: bool
+    code_scanning_available: bool
+    ci_evidence_mode: CiEvidenceMode
+    token_login: str
+    token_scopes: tuple[str, ...]
+    notes: tuple[str, ...]
+    code_scanning_alerts: object | None
+
+
+@dataclass(frozen=True)
+class CapabilityReport:
+    """Capability result for the pre-publication dispatch seam."""
+
+    has_issues: bool
+    ci_evidence_mode: CiEvidenceMode
+    alert_source: str
+    auto_merge_enabled: bool
+    reasons: tuple[ReasonCode, ...]
+    token_login: str | None
+    token_scopes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CiModeTransition:
+    """One-way local-to-GitHub CI evidence transition."""
+
+    mode: CiEvidenceMode
+    transitioned: bool
+    reason: ReasonCode | None = None
+
+
+@dataclass(frozen=True)
+class CiWaitResult:
+    """Result of waiting for required contexts on a generated PR."""
+
+    mode: CiEvidenceMode
+    reason: ReasonCode | None
+    auto_merge_eligible: bool
+
+
+class _CapabilityClient(Protocol):
+    def get_repo(self) -> Mapping[str, object]:
+        """Read repository metadata."""
+
+    def list_required_contexts(self, sha: str) -> Sequence[str]:
+        """Read rendered required contexts for a commit."""
+
+
+class _BackoffResponse(Protocol):
+    status_code: int
+    headers: Mapping[str, str]
 
 
 class GitHubTransport(Protocol):
@@ -40,6 +123,245 @@ class GitHubRateLimitError(RuntimeError):
         super().__init__(message)
         self.retry_after = retry_after
         self.reset_at = reset_at
+
+
+def _mapping(value: object, description: str) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        raise PreflightError(ReasonCode.CAPABILITY_UNAVAILABLE, f"{description} response invalid")
+    return {str(key): item for key, item in value.items()}
+
+
+def _workflow_count(value: object) -> int:
+    data = _mapping(value, "workflow listing")
+    total = data.get("total_count")
+    return total if isinstance(total, int) else 0
+
+
+def _has_completed_run(value: object) -> bool:
+    data = _mapping(value, "workflow history")
+    runs = data.get("workflow_runs")
+    return isinstance(runs, list) and any(
+        isinstance(run, dict)
+        and run.get("status") == "completed"
+        and isinstance(run.get("event"), str)
+        for run in runs
+    )
+
+
+def _path(config: PipelineConfig, suffix: str) -> str:
+    return f"/repos/{config.target_owner}/{config.target_repo}{suffix}"
+
+
+def run_live_preflight(config: PipelineConfig, transport: GitHubTransport) -> LivePreflight:
+    """Probe repository capabilities before any candidate work or mutation."""
+    try:
+        repository = _mapping(transport.get(_path(config, "")), "repository")
+    except HttpTransportError as exc:
+        raise PreflightError(
+            ReasonCode.CAPABILITY_UNAVAILABLE,
+            "cannot read target repository capabilities",
+        ) from exc
+
+    has_issues = repository.get("has_issues")
+    if not isinstance(has_issues, bool):
+        raise PreflightError(
+            ReasonCode.CAPABILITY_UNAVAILABLE,
+            "repository has_issues is unavailable",
+        )
+    if not has_issues and config.issue_sink is not IssueSink.PR_COMMENT:
+        raise PreflightError(
+            ReasonCode.CAPABILITY_UNAVAILABLE,
+            "target repository has issues disabled; use issue_sink=pr_comment",
+        )
+
+    code_scanning_available = True
+    code_scanning_alerts: object | None = None
+    notes: list[str] = []
+    try:
+        code_scanning_alerts = transport.get(_path(config, "/code-scanning/alerts"))
+    except HttpTransportError as exc:
+        if exc.status_code == 403:
+            raise PreflightError(
+                ReasonCode.TOKEN_CAPABILITY_MISSING,
+                "token cannot read code-scanning alerts",
+            ) from exc
+        if exc.status_code == 404:
+            code_scanning_available = False
+            notes.append("code_scanning: capability_unavailable")
+        else:
+            raise PreflightError(
+                ReasonCode.CAPABILITY_UNAVAILABLE,
+                "cannot read code-scanning alerts",
+            ) from exc
+
+    try:
+        identity = _mapping(transport.get("/user"), "token identity")
+        response_headers = transport.response_headers
+        workflows = transport.get(_path(config, "/actions/workflows"))
+        pull_request_runs = transport.get(
+            _path(
+                config,
+                "/actions/runs?"
+                + urlencode({"event": "pull_request", "status": "completed", "per_page": "1"}),
+            )
+        )
+        dispatch_runs = transport.get(
+            _path(
+                config,
+                "/actions/runs?"
+                + urlencode({"event": "workflow_dispatch", "status": "completed", "per_page": "1"}),
+            )
+        )
+    except HttpTransportError as exc:
+        raise PreflightError(
+            ReasonCode.CAPABILITY_UNAVAILABLE,
+            "cannot read Actions capability history",
+        ) from exc
+
+    login = identity.get("login")
+    if not isinstance(login, str) or not login:
+        raise PreflightError(ReasonCode.TOKEN_CAPABILITY_MISSING, "token identity is unavailable")
+    scopes = tuple(
+        scope.strip()
+        for key, value in response_headers.items()
+        if key.casefold() == "x-oauth-scopes"
+        for scope in value.split(",")
+        if scope.strip()
+    )
+    has_completed_actions = _workflow_count(workflows) > 0 and (
+        _has_completed_run(pull_request_runs) or _has_completed_run(dispatch_runs)
+    )
+    ci_mode = CiEvidenceMode.GITHUB if has_completed_actions else CiEvidenceMode.LOCAL
+    if ci_mode is CiEvidenceMode.LOCAL:
+        notes.append("ci_evidence_mode: local (no completed pull_request/workflow_dispatch run)")
+    else:
+        notes.append("ci_evidence_mode: github (completed Actions history observed)")
+    notes.append(f"token_identity: {login}")
+    notes.append(f"token_scopes: {', '.join(scopes) if scopes else 'none reported'}")
+    if not has_issues:
+        notes.append("artifact_degraded: issues disabled; PR comments selected")
+    return LivePreflight(
+        has_issues=has_issues,
+        code_scanning_available=code_scanning_available,
+        ci_evidence_mode=ci_mode,
+        token_login=login,
+        token_scopes=scopes,
+        notes=tuple(notes),
+        code_scanning_alerts=code_scanning_alerts,
+    )
+
+
+def probe_capabilities(config: PipelineConfig, *, client: object) -> CapabilityReport:
+    """Resolve dispatch capabilities from observed repository and CI state."""
+    capability_client = cast(_CapabilityClient, client)
+    repository = capability_client.get_repo()
+    has_issues_value = repository.get("has_issues")
+    has_issues = has_issues_value if isinstance(has_issues_value, bool) else False
+    reported_contexts = capability_client.list_required_contexts("HEAD")
+    transition = maybe_upgrade_ci_mode(
+        config.ci_evidence_mode,
+        reported_contexts=reported_contexts,
+    )
+    reasons: list[ReasonCode] = []
+    if not has_issues and config.issue_sink is not IssueSink.PR_COMMENT:
+        reasons.append(ReasonCode.CAPABILITY_UNAVAILABLE)
+    return CapabilityReport(
+        has_issues=has_issues,
+        ci_evidence_mode=transition.mode,
+        alert_source=config.alert_source.value,
+        auto_merge_enabled=(
+            config.auto_merge_enabled and transition.mode is CiEvidenceMode.GITHUB and not reasons
+        ),
+        reasons=tuple(reasons),
+        token_login=None,
+        token_scopes=(),
+    )
+
+
+def maybe_upgrade_ci_mode(
+    current: CiEvidenceMode,
+    *,
+    reported_contexts: Sequence[str],
+    awaiting_workflow_approval: bool = False,
+    already_upgraded: bool = False,
+) -> CiModeTransition:
+    """Perform the one-way upgrade only from an observed required context."""
+    if (
+        current is CiEvidenceMode.LOCAL
+        and not already_upgraded
+        and not awaiting_workflow_approval
+        and any(context in REQUIRED_CONTEXTS for context in reported_contexts)
+    ):
+        return CiModeTransition(CiEvidenceMode.GITHUB, True)
+    if awaiting_workflow_approval:
+        return CiModeTransition(CiEvidenceMode.LOCAL, False, ReasonCode.AWAITING_WORKFLOW_APPROVAL)
+    return CiModeTransition(current, False)
+
+
+def wait_for_required_contexts(
+    config: PipelineConfig,
+    *,
+    client: object,
+    elapsed_s: int,
+    reported_contexts: Sequence[str] = (),
+) -> CiWaitResult:
+    """Resolve generated-PR CI evidence without treating missing reports as green."""
+    contexts = tuple(reported_contexts)
+    if not contexts:
+        capability_client = cast(_CapabilityClient, client)
+        contexts = tuple(capability_client.list_required_contexts("HEAD"))
+    if elapsed_s >= config.ci_wait_timeout_s:
+        return CiWaitResult(
+            CiEvidenceMode.LOCAL,
+            ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+            False,
+        )
+    complete = all(context in contexts for context in REQUIRED_CONTEXTS)
+    if complete:
+        return CiWaitResult(
+            CiEvidenceMode.GITHUB,
+            None,
+            config.auto_merge_enabled,
+        )
+    return CiWaitResult(CiEvidenceMode.LOCAL, ReasonCode.CI_EVIDENCE_UNAVAILABLE, False)
+
+
+def request_with_backoff(
+    call: Callable[[], object],
+    *,
+    sleep: Callable[[float], None],
+    now: Callable[[], float],
+    max_retries: int = 3,
+) -> object:
+    """Retry rate-limited response objects using server-provided timing."""
+    for attempt in range(max_retries + 1):
+        response = call()
+        result = cast(_BackoffResponse, response)
+        if result.status_code not in {403, 429}:
+            return response
+        if attempt >= max_retries:
+            raise GitHubRateLimitError("GitHub rate-limit retry budget exhausted")
+        retry_after = next(
+            (
+                float(value)
+                for key, value in result.headers.items()
+                if key.casefold() == "retry-after"
+            ),
+            None,
+        )
+        reset_at = next(
+            (
+                float(value)
+                for key, value in result.headers.items()
+                if key.casefold() == "x-ratelimit-reset"
+            ),
+            None,
+        )
+        delay = retry_after
+        if delay is None and reset_at is not None:
+            delay = max(reset_at - now(), 0.0)
+        sleep(1.0 if delay is None else delay)
+    raise AssertionError("GitHub rate-limit retry loop exhausted")
 
 
 class SimulationWriteError(RuntimeError):
@@ -268,10 +590,21 @@ def publish_degraded(
 __all__ = [
     "ArtifactLinks",
     "ArtifactUnavailableError",
+    "CapabilityReport",
+    "CiModeTransition",
+    "CiWaitResult",
     "GitHubClient",
     "GitHubRateLimitError",
     "GitHubTransport",
+    "LivePreflight",
+    "PreflightError",
+    "REQUIRED_CONTEXTS",
     "SimulationWriteError",
+    "maybe_upgrade_ci_mode",
+    "probe_capabilities",
     "publish_artifacts",
     "publish_degraded",
+    "request_with_backoff",
+    "run_live_preflight",
+    "wait_for_required_contexts",
 ]

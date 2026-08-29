@@ -49,7 +49,6 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 
 [tool.coverage.run]
-source = ["src/pipeline"]
 include = [
   "src/pipeline/gate.py",
   "src/pipeline/score.py",

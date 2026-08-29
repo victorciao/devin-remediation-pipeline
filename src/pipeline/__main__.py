@@ -36,12 +36,18 @@ from pipeline.config import (
 )
 from pipeline.dispatch import dispatch_candidates
 from pipeline.gate import evaluate_gates
-from pipeline.github_client import GitHubClient, publish_artifacts, publish_degraded
+from pipeline.github_client import (
+    GitHubClient,
+    LivePreflight,
+    PreflightError,
+    publish_artifacts,
+    publish_degraded,
+    run_live_preflight,
+)
 from pipeline.http_transport import HttpTransportError, UrllibDevinTransport, UrllibGitHubTransport
 from pipeline.lanes.codeql import enumerate_from_config, read_alert_fixture
 from pipeline.lanes.deprecations import enumerate_deprecations, is_eol
 from pipeline.lanes.skipped_tests import enumerate_skipped_tests
-from pipeline.preflight import LivePreflight, PreflightError, run_live_preflight
 from pipeline.review_loop import apply_review_result
 from pipeline.rubric import load_rubrics
 from pipeline.schemas import Action, Candidate, CandidateState, DefinitionKind, Lane, ReasonCode
@@ -59,6 +65,7 @@ from pipeline.templates.render import (
     render_issue_body,
     render_issue_title,
     render_pr_body,
+    render_pr_title,
     validate_issue_body,
     validate_pr_body,
 )
@@ -150,7 +157,7 @@ def _publish_live(
             automation_metadata={"mode": "live", "would_write": False},
         )
         validate_pr_body(pr_body)
-        pr_title = f"fix: remediate {candidate.stable_locator}"
+        pr_title = render_pr_title(candidate)
         if config.has_issues:
             links = publish_artifacts(
                 client,
@@ -503,7 +510,9 @@ def run_once(
             result = orchestrator.run_candidate(
                 candidate.candidate_id,
                 f"Plan remediation for {candidate.stable_locator}.",
-                f"Implement production changes for {candidate.stable_locator}; do not edit tests.",
+                f"Implement production changes for {candidate.stable_locator}; do not edit tests. "
+                "Commit the implementation with `git commit --signoff` and report the verified "
+                "Signed-off-by trailer.",
                 f"Author independent regression tests for {candidate.stable_locator}.",
             )
         except SessionCeilingError as exc:
