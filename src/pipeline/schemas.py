@@ -202,6 +202,8 @@ class Candidate(StrictModel):
     enclosing_skip_nodeid: str | None = None
     related_candidate_id: str | None = None
     skip_reason: str | None = None
+    decorator: str | None = None
+    resolved_decorator: str | None = None
 
     # LANE 3 locator and deprecation payload.
     module: str | None = None

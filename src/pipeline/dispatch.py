@@ -29,9 +29,6 @@ DROPPED_REASONS = frozenset(
         ReasonCode.TRIGGER_MISSING,
         ReasonCode.AUTOMATABILITY_LOW,
         ReasonCode.VERIFIABILITY_MISSING,
-        ReasonCode.CONDITIONAL_ENVIRONMENT_GUARD,
-        ReasonCode.EXPECTED_FAILURE_XFAIL,
-        ReasonCode.STALE_SKIP,
     }
 )
 
