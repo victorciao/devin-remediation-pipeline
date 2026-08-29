@@ -195,7 +195,7 @@ def enumerate_deprecations(
                     caller_count=callers,
                     override_count=overrides,
                     targeted_test_signal="targeted",
-                    transformation_scope="single_symbol",
+                    transformation_scope="isolated_removal",
                     public_api_surface=public,
                     internal_caller=callers > 0,
                     override_surface=overrides > 0,

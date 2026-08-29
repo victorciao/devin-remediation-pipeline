@@ -9,9 +9,16 @@ from pathlib import Path
 from pipeline.schemas import Action, Candidate, CandidateState
 
 
-def render_run_report(candidates: Iterable[Candidate], *, run_id: str) -> str:
+def render_run_report(
+    candidates: Iterable[Candidate],
+    *,
+    run_id: str,
+    capability_notes: Iterable[str] = (),
+) -> str:
     """Render a deterministic per-run summary in Markdown."""
     rows = list(candidates)
+    notes = list(capability_notes)
+    note_lines = [f"- {note}" for note in notes] if notes else ["- None"]
     gated = Counter(
         candidate.reason.value
         for candidate in rows
@@ -39,6 +46,9 @@ def render_run_report(candidates: Iterable[Candidate], *, run_id: str) -> str:
             f"- Scored: {sum(candidate.score is not None for candidate in rows)}",
             f"- Deferred by budget: {deferred}",
             "",
+            "## Capability notes",
+            *note_lines,
+            "",
             "## Gated out",
             *(gated_lines or ["- None"]),
             "",
@@ -57,10 +67,14 @@ def write_run_report(
     candidates: Iterable[Candidate],
     *,
     run_id: str,
+    capability_notes: Iterable[str] = (),
 ) -> None:
     """Write a Layer 2 report."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_run_report(candidates, run_id=run_id), encoding="utf-8")
+    path.write_text(
+        render_run_report(candidates, run_id=run_id, capability_notes=capability_notes),
+        encoding="utf-8",
+    )
 
 
 __all__ = ["render_run_report", "write_run_report"]

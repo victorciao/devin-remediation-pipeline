@@ -1,1 +1,18 @@
-# Docker packaging is implemented in T11.
+services:
+  remediation:
+    build:
+      context: .
+    user: "${PIPELINE_UID:-1000}:${PIPELINE_GID:-1000}"
+    network_mode: none
+    environment:
+      PIPELINE_MODE: simulate
+      PIPELINE_ALERT_SOURCE: sarif_file
+    command:
+      - --repo-path
+      - /target-repo
+      - --output-dir
+      - /output
+      - --baseline
+      - /app/fixtures/baseline.json
+    volumes:
+      - ./docker-output:/output

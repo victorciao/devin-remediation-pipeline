@@ -278,6 +278,10 @@ def _parse_cli(args: Sequence[str]) -> tuple[dict[str, object], bool]:
 
 def _env_values(env: Mapping[str, str]) -> dict[str, object]:
     values: dict[str, object] = {}
+    if "DEVIN_API_KEY" in env:
+        values["devin_api_key"] = SecretStr(env["DEVIN_API_KEY"])
+    if "GITHUB_PAT_REMEDIATION" in env:
+        values["github_token"] = SecretStr(env["GITHUB_PAT_REMEDIATION"])
     field_names = {
         "ITERATION_CAP": "iteration_cap",
         "COVERAGE_BAR": "coverage_bar",

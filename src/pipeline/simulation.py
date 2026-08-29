@@ -29,6 +29,7 @@ def simulate_run(
     config: PipelineConfig,
     planner_outputs: Mapping[str, Mapping[str, object]] | None = None,
     reviewer_outputs: Mapping[str, Mapping[str, object]] | None = None,
+    capability_notes: Sequence[str] = (),
 ) -> tuple[Path, ...]:
     """Render a complete run without invoking a remote write transport."""
     state_path = output_dir / "state" / "candidates.jsonl"
@@ -84,7 +85,12 @@ def simulate_run(
     event_log = EventLog(events_path)
     append_candidate_events(event_log, candidates, run_id=run_id)
     run_path = output_dir / "reports" / f"run-{run_id}.md"
-    write_run_report(run_path, candidates, run_id=run_id)
+    write_run_report(
+        run_path,
+        candidates,
+        run_id=run_id,
+        capability_notes=capability_notes,
+    )
     if not config.has_issues and config.issue_sink.value == "pr_comment":
         run_path.write_text(
             run_path.read_text(encoding="utf-8") + "\n- **Artifact mode:** `artifact_degraded`\n",
