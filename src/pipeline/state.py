@@ -57,19 +57,30 @@ class CandidateStateStore:
         self._path = path
         self._marker_search = marker_search
         self.marker_search_failed = False
+        self.quarantined_rows = 0
+        self._quarantine_seen: set[str] | None = None
 
     def _read_rows(self) -> list[Candidate]:
         if not self._path.exists():
             return []
         rows: list[Candidate] = []
         quarantine = self._path.with_suffix(self._path.suffix + ".corrupt")
+        if self._quarantine_seen is None:
+            self._quarantine_seen = (
+                set(quarantine.read_text(encoding="utf-8").splitlines())
+                if quarantine.exists()
+                else set()
+            )
         for line in self._path.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 try:
                     rows.append(Candidate.model_validate(json.loads(line), strict=False))
                 except (json.JSONDecodeError, TypeError, ValueError):
-                    with quarantine.open("a", encoding="utf-8") as handle:
-                        handle.write(line + "\n")
+                    if line not in self._quarantine_seen:
+                        with quarantine.open("a", encoding="utf-8") as handle:
+                            handle.write(line + "\n")
+                        self._quarantine_seen.add(line)
+                        self.quarantined_rows += 1
         return rows
 
     def rows(self) -> list[Candidate]:

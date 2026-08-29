@@ -51,6 +51,7 @@ class ReasonCode(str, Enum):
     TOKEN_CAPABILITY_MISSING = "token_capability_missing"
     CI_EVIDENCE_UNAVAILABLE = "ci_evidence_unavailable"
     CI_CHECK_FAILED = "ci_check_failed"
+    DCO_TRAILER_MISSING = "dco_trailer_missing"
     AWAITING_WORKFLOW_APPROVAL = "awaiting_workflow_approval"
     ARTIFACT_DEGRADED = "artifact_degraded"
     GUARDRAIL_CLAMPED = "guardrail_clamped"

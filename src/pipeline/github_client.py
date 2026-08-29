@@ -407,6 +407,10 @@ class ArtifactUnavailableError(RuntimeError):
     """Raised when the configured GitHub artifact sink is unavailable."""
 
 
+class ClosedPullRequestError(ArtifactUnavailableError):
+    """Raised when only a closed PR exists for a candidate branch."""
+
+
 @dataclass(frozen=True)
 class ArtifactLinks:
     """Links created by the mandated issue/PR ordering."""
@@ -474,9 +478,8 @@ class GitHubClient:
                 waited += delay
         raise AssertionError("GitHub write loop exhausted")
 
-    def _read(self, method: str, path: str) -> object:
+    def _read(self, path: str) -> object:
         """Issue one guarded read request through the configured transport."""
-        del method
         if self._transport is None:
             raise ValueError("GitHub transport is unavailable")
         return self._transport.get(path)
@@ -517,8 +520,7 @@ class GitHubClient:
     def branch_sha(self, branch: str) -> str | None:
         """Read the current SHA for a candidate branch."""
         response = self._read(
-            "get",
-            f"/repos/{self._config.target_owner}/{self._config.target_repo}/git/ref/heads/{branch}",
+            f"/repos/{self._config.target_owner}/{self._config.target_repo}/git/ref/heads/{branch}"
         )
         if isinstance(response, Mapping):
             obj = response.get("object")
@@ -529,8 +531,7 @@ class GitHubClient:
     def pull_request_head_sha(self, number: int) -> str | None:
         """Read the actual head SHA from a pull request."""
         response = self._read(
-            "get",
-            f"/repos/{self._config.target_owner}/{self._config.target_repo}/pulls/{number}",
+            f"/repos/{self._config.target_owner}/{self._config.target_repo}/pulls/{number}"
         )
         if isinstance(response, Mapping):
             head = response.get("head")
@@ -541,8 +542,7 @@ class GitHubClient:
     def commit_message(self, sha: str) -> str | None:
         """Read a commit message from the target repository."""
         response = self._read(
-            "get",
-            f"/repos/{self._config.target_owner}/{self._config.target_repo}/commits/{sha}",
+            f"/repos/{self._config.target_owner}/{self._config.target_repo}/commits/{sha}"
         )
         if isinstance(response, Mapping):
             commit = response.get("commit")
@@ -578,9 +578,8 @@ class GitHubClient:
     def get_pr_for_head(self, head: str) -> tuple[int, str] | None:
         """Find an existing open PR for a candidate branch."""
         response = self._read(
-            "get",
             f"/repos/{self._config.target_owner}/{self._config.target_repo}/pulls?"
-            + urlencode({"head": f"{self._config.target_owner}:{head}", "state": "all"}),
+            + urlencode({"head": f"{self._config.target_owner}:{head}", "state": "all"})
         )
         if not isinstance(response, list):
             return None
@@ -588,9 +587,22 @@ class GitHubClient:
             if isinstance(item, Mapping):
                 number = item.get("number")
                 url = item.get("html_url")
-                if isinstance(number, int) and isinstance(url, str):
+                if item.get("state") == "open" and isinstance(number, int) and isinstance(url, str):
                     return number, url
         return None
+
+    def has_closed_pr_for_head(self, head: str) -> bool:
+        """Report whether a non-open PR exists for a candidate branch."""
+        response = self._read(
+            f"/repos/{self._config.target_owner}/{self._config.target_repo}/pulls?"
+            + urlencode({"head": f"{self._config.target_owner}:{head}", "state": "all"})
+        )
+        if not isinstance(response, list):
+            return False
+        return any(
+            isinstance(item, Mapping) and item.get("state") in {"closed", "merged"}
+            for item in response
+        )
 
     def patch_pr_body(self, number: int, body: str) -> None:
         """Update a PR body after retrieving its commit provenance."""
@@ -623,7 +635,7 @@ class GitHubClient:
             return self._ensured_labels[label]
         path = f"/repos/{self._config.target_owner}/{self._config.target_repo}/labels/{label}"
         try:
-            self._read("get", path)
+            self._read(path)
             self._ensured_labels[label] = True
             return True
         except HttpTransportError as exc:
@@ -709,6 +721,10 @@ def publish_artifacts(
             raise
         existing = client.get_pr_for_head(head)
         if existing is None:
+            if client.has_closed_pr_for_head(head):
+                raise ClosedPullRequestError(
+                    f"only a closed pull request exists for head {head}"
+                ) from exc
             raise
         pr_number, pr_url = existing
     if after_pr_created is not None:

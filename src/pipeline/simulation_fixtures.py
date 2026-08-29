@@ -82,9 +82,11 @@ def simulation_result(
         "red_baseline": {"observed": observed},
         "green_result": {"passed": True},
         "diff_reviewed": {
-            "base_sha": "simulate-base",
-            "head_sha": "simulate-head",
-            "files_read": ["tests/test_simulated.py"],
+            "base_sha": candidate.base_sha or "simulate-base",
+            "head_sha": candidate.head_sha or "simulate-head",
+            "files_read": (
+                ["src/simulated_remediation.py"] if kind != 2 else ["tests/test_simulated.py"]
+            ),
         },
         "committed_diff": (
             "diff --git a/tests/test_simulated.py b/tests/test_simulated.py\n"

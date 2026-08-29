@@ -41,6 +41,7 @@ from pipeline.dispatch import dispatch_candidates
 from pipeline.gate import evaluate_gates
 from pipeline.github_client import (
     CiWaitResult,
+    ClosedPullRequestError,
     GitHubClient,
     LivePreflight,
     PreflightError,
@@ -179,14 +180,24 @@ def _publish_live(
                 "base_sha": persisted.base_sha or resolved_base_sha,
                 "issue_number": persisted.issue_number,
                 "issue_url": persisted.issue_url,
+                "comment_url": persisted.comment_url,
             }
         )
         issue_template = templates[candidate.lane].read_text(encoding="utf-8")
         summary = f"Remediation tracking for {candidate.stable_locator}."
-        labels = list(candidate.labels)
-        if config.ci_evidence_mode is CiEvidenceMode.LOCAL and "needs-human-review" not in labels:
-            labels.append("needs-human-review")
-        labels = [label for label in labels if client.ensure_label(label)]
+        requested_labels = list(candidate.labels)
+        if (
+            config.ci_evidence_mode is CiEvidenceMode.LOCAL
+            and "needs-human-review" not in requested_labels
+        ):
+            requested_labels.append("needs-human-review")
+        labels: list[str] = []
+        label_failures: list[str] = []
+        for label in requested_labels:
+            if client.ensure_label(label):
+                labels.append(label)
+            else:
+                label_failures.append(label)
         if config.has_issues:
             issue_body = render_issue_body(
                 issue_template,
@@ -288,6 +299,7 @@ def _publish_live(
             reviewer_for_probe: Mapping[str, object] = reviewer_outputs.get(
                 candidate.candidate_id, {}
             ),
+            wait_for_ci: bool = True,
         ) -> CiWaitResult:
             nonlocal ci_reason, head_sha_value
             head_sha = client.pull_request_head_sha(pr_number)
@@ -297,7 +309,7 @@ def _publish_live(
                 return CiWaitResult(CiEvidenceMode.LOCAL, ci_reason, False)
             commit_message = client.commit_message(head_sha)
             if commit_message is None or _SIGNOFF_TRAILER.search(commit_message) is None:
-                ci_reason = ReasonCode.CI_EVIDENCE_UNAVAILABLE
+                ci_reason = ReasonCode.DCO_TRAILER_MISSING
                 return CiWaitResult(CiEvidenceMode.LOCAL, ci_reason, False)
             rendered = render_pr_body(
                 (config.templates_dir / "superset/PULL_REQUEST_TEMPLATE.md").read_text(
@@ -309,7 +321,10 @@ def _publish_live(
                 automation_metadata={"mode": "live", "would_write": False},
                 commit_message=commit_message,
             )
+            validate_pr_body(rendered)
             client.patch_pr_body(pr_number, rendered)
+            if not wait_for_ci:
+                return CiWaitResult(CiEvidenceMode.LOCAL, None, False)
             wait_result = wait_for_required_contexts(
                 config,
                 client=transport,
@@ -350,44 +365,80 @@ def _publish_live(
                 )
             )
 
-        if config.has_issues:
-            links = publish_artifacts(
-                client,
-                candidate,
-                issue_title=issue_title,
-                issue_body=issue_body,
-                pr_title=pr_title,
-                pr_body=pr_body,
-                head=branch,
-                base=base_branch,
-                labels=labels,
-                ci_probe=ci_probe,
-                existing_issue_number=candidate.issue_number,
-                existing_issue_url=candidate.issue_url,
-                after_issue=after_issue,
-                after_pr_created=after_pr_created,
-                after_issue_patched=after_issue_patched,
+        try:
+            if config.has_issues:
+                links = publish_artifacts(
+                    client,
+                    candidate,
+                    issue_title=issue_title,
+                    issue_body=issue_body,
+                    pr_title=pr_title,
+                    pr_body=pr_body,
+                    head=branch,
+                    base=base_branch,
+                    labels=labels,
+                    ci_probe=ci_probe,
+                    existing_issue_number=candidate.issue_number,
+                    existing_issue_url=candidate.issue_url,
+                    after_issue=after_issue,
+                    after_pr_created=after_pr_created,
+                    after_issue_patched=after_issue_patched,
+                )
+            else:
+                links = publish_degraded(
+                    client,
+                    candidate,
+                    pr_title=pr_title,
+                    pr_body=pr_body,
+                    comment_body=issue_body,
+                    head=branch,
+                    base=base_branch,
+                    after_pr_created=after_pr_created,
+                    after_comment_created=after_comment_created,
+                )
+                if links.pr_number is not None:
+                    ci_probe(links.pr_number, wait_for_ci=False)
+        except ClosedPullRequestError:
+            deferred = candidate.model_copy(
+                update={
+                    "state": CandidateState.DEFERRED,
+                    "reason": ReasonCode.CAPABILITY_UNAVAILABLE,
+                }
             )
-        else:
-            links = publish_degraded(
-                client,
-                candidate,
-                pr_title=pr_title,
-                pr_body=pr_body,
-                comment_body=issue_body,
-                head=branch,
-                base=base_branch,
-                after_pr_created=after_pr_created,
-                after_comment_created=after_comment_created,
-            )
+            state_store.append(deferred)
+            published.append(deferred)
+            continue
+        if ci_reason is not None and "needs-human-review" not in labels:
+            if client.ensure_label("needs-human-review"):
+                labels.append("needs-human-review")
+            else:
+                label_failures.append("needs-human-review")
         if links.pr_number is not None and labels:
-            client.add_labels(links.pr_number, labels)
-        if links.pr_number is not None and ci_reason is not None:
-            if "needs-human-review" not in labels:
-                client.add_labels(links.pr_number, [*labels, "needs-human-review"])
+            try:
+                client.add_labels(links.pr_number, labels)
+            except HttpTransportError:
+                label_failures.extend(label for label in labels if label not in label_failures)
+        comment_url_value: str | None = candidate.comment_url
+        if label_failures and links.pr_number is not None:
+            try:
+                comment_url_value = client.comment_pr(
+                    links.pr_number,
+                    "Label publication was unavailable for: "
+                    + ", ".join(sorted(set(label_failures)))
+                    + ". Human review is required.",
+                )
+            except HttpTransportError:
+                pass
         if ci_reason is not None:
             candidate = candidate.model_copy(
                 update={"reason": ci_reason, "auto_merge_eligible": False}
+            )
+        elif label_failures:
+            candidate = candidate.model_copy(
+                update={
+                    "reason": ReasonCode.CAPABILITY_UNAVAILABLE,
+                    "auto_merge_eligible": False,
+                }
             )
         published_candidate = candidate.model_copy(
             update={
@@ -402,6 +453,7 @@ def _publish_live(
                 "pr_url": links.pr_url,
                 "head_branch": branch,
                 "head_sha": head_sha_value,
+                "comment_url": comment_url_value,
             }
         )
         state_store.append(published_candidate)
@@ -859,6 +911,16 @@ def run_once(
         session_candidates = [
             candidate for candidate in dispatched if candidate.action is Action.OPEN_PR
         ]
+        if config.mode is Mode.SIMULATE:
+            session_candidates = [
+                candidate.model_copy(
+                    update={
+                        "base_sha": candidate.base_sha or "simulate-base",
+                        "head_sha": candidate.head_sha or "simulate-head",
+                    }
+                )
+                for candidate in session_candidates
+            ]
         reviewed.extend(
             candidate.model_copy(update={"state": CandidateState.ISSUE_CREATED})
             if candidate.action is Action.OPEN_ISSUE
@@ -974,6 +1036,8 @@ def run_once(
         f"enumeration failure: {failure.get('path', '<unknown>')}"
         for failure in [*skipped_failures, *deprecation_failures]
     )
+    if state_store.quarantined_rows:
+        notes.append(f"state rows quarantined: {state_store.quarantined_rows}")
     if config.mode is Mode.LIVE:
         if preflight is None:
             raise RunAbort("LIVE preflight did not produce a capability result")
