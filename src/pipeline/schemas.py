@@ -53,6 +53,7 @@ class ReasonCode(str, Enum):
     CI_CHECK_FAILED = "ci_check_failed"
     DCO_TRAILER_MISSING = "dco_trailer_missing"
     CLOSED_PULL_REQUEST = "closed_pull_request"
+    MERGED_EXTERNALLY_UNVERIFIED = "merged_externally_unverified"
     AWAITING_WORKFLOW_APPROVAL = "awaiting_workflow_approval"
     ARTIFACT_DEGRADED = "artifact_degraded"
     GUARDRAIL_CLAMPED = "guardrail_clamped"
@@ -246,10 +247,12 @@ class Candidate(StrictModel):
     action: Action | None = None
     state: CandidateState = CandidateState.ENUMERATED
     reason: ReasonCode | None = None
+    reason_detail: str | None = None
     pr_url: str | None = None
     issue_url: str | None = None
     comment_url: str | None = None
     merged_at: str | None = None
+    merge_verified: bool = False
     artifact_degraded: bool = False
     issue_number: int | None = Field(default=None, ge=1)
     pr_number: int | None = Field(default=None, ge=1)
@@ -297,6 +300,7 @@ class EventRecord(StrictModel):
     issue_url: str | None = None
     comment_url: str | None = None
     merged_at: str | None = None
+    merge_verified: bool = False
     artifact_degraded: bool = False
     test_added: bool | None = None
     test_paths: list[str] = Field(default_factory=list)
@@ -304,6 +308,7 @@ class EventRecord(StrictModel):
     test_exempt_reason: ReasonCode | None = None
     terminal_outcome: CandidateState | None = None
     reason: ReasonCode | None = None
+    reason_detail: str | None = None
     red_baseline: RedBaselineResult | None = None
     enclosed_tests: int | None = Field(default=None, ge=0)
     parametrized: bool | None = None
@@ -318,10 +323,13 @@ class EventRecord(StrictModel):
 class RunEventRecord(StrictModel):
     """Layer 1 run-level capability evidence."""
 
-    event_type: Literal["run_capabilities"] = "run_capabilities"
+    event_type: Literal["run_capabilities", "ci_mode_transition"] = "run_capabilities"
     run_id: str = Field(min_length=1)
     token_login: str | None = None
     token_scopes: list[str] = Field(default_factory=list)
+    mode_from: str | None = None
+    mode_to: str | None = None
+    transition_reason: ReasonCode | None = None
 
 
 NEEDS_HUMAN_REVIEW_LABEL = "needs-human-review"

@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import Protocol
 from urllib.parse import urlencode
 
 from pipeline.config import CiEvidenceMode, IssueSink, Mode, PipelineConfig
@@ -66,11 +66,7 @@ class CiWaitResult:
     mode: CiEvidenceMode
     reason: ReasonCode | None
     auto_merge_eligible: bool
-
-
-class _BackoffResponse(Protocol):
-    status_code: int
-    headers: Mapping[str, str]
+    detail: str | None = None
 
 
 class GitHubTransport(Protocol):
@@ -88,21 +84,6 @@ class GitHubTransport(Protocol):
 
     def patch(self, path: str, payload: Mapping[str, object]) -> Mapping[str, object]:
         """Patch an existing issue or pull request."""
-
-
-class GitHubRateLimitError(RuntimeError):
-    """Rate-limit response with server-provided retry timing."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        retry_after: float | None = None,
-        reset_at: float | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.retry_after = retry_after
-        self.reset_at = reset_at
 
 
 def _mapping(value: object, description: str) -> dict[str, object]:
@@ -291,10 +272,13 @@ def wait_for_required_contexts(
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
     poll_interval_s: float = 15.0,
+    on_mode_transition: Callable[[CiModeTransition], None] | None = None,
 ) -> CiWaitResult:
     """Resolve generated-PR CI evidence without treating missing reports as green."""
     started = clock()
     deadline = started + max(config.ci_wait_timeout_s - elapsed_s, 0)
+    current_mode = config.ci_evidence_mode
+    already_upgraded = current_mode is CiEvidenceMode.GITHUB
     while True:
         statuses = (
             _required_context_statuses(config, client, sha)
@@ -302,58 +286,43 @@ def wait_for_required_contexts(
             else dict(reported_contexts)
         )
         complete = all(statuses.get(context) == "success" for context in REQUIRED_CONTEXTS)
+        awaiting_approval = any(
+            statuses.get(context)
+            in {"action_required", "awaiting_approval", "waiting", "queued", "pending"}
+            for context in REQUIRED_CONTEXTS
+        )
+        transition = maybe_upgrade_ci_mode(
+            current_mode,
+            reported_contexts=tuple(statuses),
+            awaiting_workflow_approval=awaiting_approval,
+            already_upgraded=already_upgraded,
+        )
+        if transition.transitioned:
+            current_mode = transition.mode
+            already_upgraded = True
+            if on_mode_transition is not None:
+                on_mode_transition(transition)
         if complete:
-            return CiWaitResult(CiEvidenceMode.GITHUB, None, config.auto_merge_enabled)
+            return CiWaitResult(current_mode, None, config.auto_merge_enabled)
         if any(
             statuses.get(context) in {"failure", "cancelled", "timed_out", "error"}
             for context in REQUIRED_CONTEXTS
         ):
-            return CiWaitResult(CiEvidenceMode.GITHUB, ReasonCode.CI_CHECK_FAILED, False)
+            return CiWaitResult(current_mode, ReasonCode.CI_CHECK_FAILED, False)
+        if awaiting_approval:
+            return CiWaitResult(
+                current_mode,
+                ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+                False,
+                "awaiting_workflow_approval",
+            )
         if not poll:
             break
         remaining = deadline - clock()
         if remaining <= 0:
             break
         sleep(min(poll_interval_s, remaining))
-    return CiWaitResult(CiEvidenceMode.LOCAL, ReasonCode.CI_EVIDENCE_UNAVAILABLE, False)
-
-
-def request_with_backoff(
-    call: Callable[[], object],
-    *,
-    sleep: Callable[[float], None],
-    now: Callable[[], float],
-    max_retries: int = 3,
-) -> object:
-    """Retry rate-limited response objects using server-provided timing."""
-    for attempt in range(max_retries + 1):
-        response = call()
-        result = cast(_BackoffResponse, response)
-        if result.status_code not in {403, 429}:
-            return response
-        if attempt >= max_retries:
-            raise GitHubRateLimitError("GitHub rate-limit retry budget exhausted")
-        retry_after = next(
-            (
-                float(value)
-                for key, value in result.headers.items()
-                if key.casefold() == "retry-after"
-            ),
-            None,
-        )
-        reset_at = next(
-            (
-                float(value)
-                for key, value in result.headers.items()
-                if key.casefold() == "x-ratelimit-reset"
-            ),
-            None,
-        )
-        delay = retry_after
-        if delay is None and reset_at is not None:
-            delay = max(reset_at - now(), 0.0)
-        sleep(1.0 if delay is None else delay)
-    raise AssertionError("GitHub rate-limit retry loop exhausted")
+    return CiWaitResult(current_mode, ReasonCode.CI_EVIDENCE_UNAVAILABLE, False)
 
 
 class SimulationWriteError(RuntimeError):
@@ -389,6 +358,7 @@ class ArtifactLinks:
     comment_url: str | None = None
     issue_number: int | None = None
     pr_number: int | None = None
+    merged_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -409,19 +379,11 @@ class GitHubClient:
         config: PipelineConfig,
         *,
         transport: GitHubTransport | None = None,
-        clock: Callable[[], float],
-        sleeper: Callable[[float], None],
         write_guard: Callable[[], None] | None = None,
-        max_wait_s: float = 300.0,
-        max_attempts: int = 4,
     ) -> None:
         self._config = config
         self._transport = transport
-        self._clock = clock
-        self._sleeper = sleeper
         self._write_guard = write_guard
-        self._max_wait_s = max_wait_s
-        self._max_attempts = max_attempts
         self._ensured_labels: dict[str, bool] = {}
         if config.mode is Mode.LIVE and transport is None:
             raise ValueError("live GitHub writes require a transport")
@@ -438,24 +400,9 @@ class GitHubClient:
         if self._transport is None:
             raise ValueError("GitHub transport is unavailable")
         operation = self._transport.post if method == "post" else self._transport.patch
-        waited = 0.0
-        for attempt in range(self._max_attempts):
-            try:
-                if self._write_guard is not None:
-                    self._write_guard()
-                return operation(path, payload)
-            except GitHubRateLimitError as exc:
-                if attempt + 1 >= self._max_attempts:
-                    raise
-                delay = exc.retry_after
-                if delay is None and exc.reset_at is not None:
-                    delay = max(exc.reset_at - self._clock(), 0.0)
-                delay = min(delay if delay is not None else 1.0, self._max_wait_s - waited)
-                if delay <= 0:
-                    raise
-                self._sleeper(delay)
-                waited += delay
-        raise AssertionError("GitHub write loop exhausted")
+        if self._write_guard is not None:
+            self._write_guard()
+        return operation(path, payload)
 
     def _read(self, path: str) -> object:
         """Issue one guarded read request through the configured transport."""
@@ -516,17 +463,6 @@ class GitHubClient:
             head = response.get("head")
             if isinstance(head, Mapping) and isinstance(head.get("sha"), str):
                 return str(head["sha"])
-        return None
-
-    def commit_message(self, sha: str) -> str | None:
-        """Read a commit message from the target repository."""
-        response = self._read(
-            f"/repos/{self._config.target_owner}/{self._config.target_repo}/commits/{sha}"
-        )
-        if isinstance(response, Mapping):
-            commit = response.get("commit")
-            if isinstance(commit, Mapping) and isinstance(commit.get("message"), str):
-                return str(commit["message"])
         return None
 
     def commit_messages_between(self, base_sha: str, head_sha: str) -> list[str]:
@@ -605,12 +541,24 @@ class GitHubClient:
                         closed = match
         return merged or closed
 
-    def get_pr_for_head(self, head: str) -> tuple[int, str] | None:
-        """Find an existing open PR for a candidate branch."""
-        match = self.pull_request_for_head(head)
-        if match is not None and match.state == "open":
-            return match.number, match.url
-        return None
+    def pull_request(self, number: int) -> PullRequestMatch | None:
+        """Read one PR's current lifecycle state."""
+        response = self._read(
+            f"/repos/{self._config.target_owner}/{self._config.target_repo}/pulls/{number}"
+        )
+        if not isinstance(response, Mapping):
+            return None
+        url = response.get("html_url")
+        state = response.get("state")
+        merged_at = response.get("merged_at")
+        if not isinstance(url, str) or not isinstance(state, str):
+            return None
+        return PullRequestMatch(
+            number,
+            url,
+            state,
+            merged_at if isinstance(merged_at, str) else None,
+        )
 
     def patch_pr_body(self, number: int, body: str) -> None:
         """Update a PR body after retrieving its commit provenance."""
@@ -662,15 +610,17 @@ class GitHubClient:
         self._ensured_labels[label] = True
         return True
 
-    def enable_auto_merge(self, number: int) -> None:
+    def enable_auto_merge(self, number: int, *, ci_mode: CiEvidenceMode) -> str | None:
         """Request auto-merge only after the caller has checked all gates."""
-        if not self._config.auto_merge_enabled or self._config.ci_evidence_mode.value != "github":
+        if not self._config.auto_merge_enabled or ci_mode is not CiEvidenceMode.GITHUB:
             raise ValueError("auto-merge requires enabled GitHub CI evidence")
         self._write(
             "post",
             f"/repos/{self._config.target_owner}/{self._config.target_repo}/pulls/{number}/auto-merge",
             {"merge_method": "squash"},
         )
+        match = self.pull_request(number)
+        return match.merged_at if match is not None else None
 
 
 def publish_artifacts(
@@ -720,8 +670,12 @@ def publish_artifacts(
         raise ValueError("PR publication requires an observed CI probe")
     if preflight is not None:
         preflight()
+    created_pr = False
     if existing_pr_number is not None and existing_pr_url is not None:
         pr_number, pr_url = existing_pr_number, existing_pr_url
+        existing_match = client.pull_request(pr_number)
+        if existing_match is not None and existing_match.merged_at is not None:
+            raise MergedPullRequestError(existing_match)
     else:
         try:
             pr_number, pr_url = client.create_pr(
@@ -730,6 +684,7 @@ def publish_artifacts(
                 head=head,
                 base=base,
             )
+            created_pr = True
         except HttpTransportError as exc:
             if exc.status_code != 422:
                 raise
@@ -742,7 +697,7 @@ def publish_artifacts(
                 raise MergedPullRequestError(existing) from exc
             else:
                 raise ClosedPullRequestError(head, existing) from exc
-    if after_pr_created is not None:
+    if after_pr_created is not None and created_pr:
         after_pr_created(pr_number, pr_url)
     ci_result = ci_probe(pr_number)
     if preflight is not None:
@@ -755,14 +710,22 @@ def publish_artifacts(
     if (
         candidate.auto_merge_eligible
         and client._config.auto_merge_enabled
-        and client._config.ci_evidence_mode.value == "github"
         and ci_result is not None
+        and ci_result.mode is CiEvidenceMode.GITHUB
         and ci_result.auto_merge_eligible
         and ci_result.reason is None
         and (candidate.test_added is True or candidate.test_exempt_reason is not None)
     ):
-        client.enable_auto_merge(pr_number)
-    return ArtifactLinks(issue_url, pr_url, issue_number=issue_number, pr_number=pr_number)
+        merged_at = client.enable_auto_merge(pr_number, ci_mode=ci_result.mode)
+    else:
+        merged_at = None
+    return ArtifactLinks(
+        issue_url,
+        pr_url,
+        issue_number=issue_number,
+        pr_number=pr_number,
+        merged_at=merged_at,
+    )
 
 
 def publish_degraded(
@@ -806,7 +769,6 @@ __all__ = [
     "CiWaitResult",
     "ClosedPullRequestError",
     "GitHubClient",
-    "GitHubRateLimitError",
     "GitHubTransport",
     "LivePreflight",
     "MergedPullRequestError",
@@ -817,7 +779,6 @@ __all__ = [
     "maybe_upgrade_ci_mode",
     "publish_artifacts",
     "publish_degraded",
-    "request_with_backoff",
     "run_live_preflight",
     "wait_for_required_contexts",
 ]

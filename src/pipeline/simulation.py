@@ -9,7 +9,7 @@ from pipeline.config import PipelineConfig
 from pipeline.observability.events import EventLog, append_candidate_events
 from pipeline.observability.kpis import write_kpi_report
 from pipeline.observability.report import write_run_report
-from pipeline.schemas import Action, Candidate, Lane
+from pipeline.schemas import Action, Candidate, Lane, RunEventRecord
 from pipeline.state import CandidateStateStore
 from pipeline.templates.render import (
     render_degraded_comment_body,
@@ -32,6 +32,7 @@ def simulate_run(
     capability_notes: Sequence[str] = (),
     token_login: str | None = None,
     token_scopes: Sequence[str] = (),
+    run_events: Sequence[RunEventRecord] = (),
 ) -> tuple[Path, ...]:
     """Render a complete run without invoking a remote write transport."""
     state_path = output_dir / "state" / "candidates.jsonl"
@@ -94,6 +95,7 @@ def simulate_run(
         run_id=run_id,
         token_login=token_login,
         token_scopes=token_scopes,
+        run_events=run_events,
     )
     run_path = output_dir / "reports" / f"run-{run_id}.md"
     write_run_report(

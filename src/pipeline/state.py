@@ -5,10 +5,49 @@ from __future__ import annotations
 import fcntl
 import json
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from pipeline.dedupe import find_drift_match
-from pipeline.schemas import Candidate
+from pipeline.schemas import Candidate, CandidateState
+
+
+class ResumeAction(str, Enum):
+    """Action selected by the pure lifecycle-resume decision."""
+
+    SKIP = "skip"
+    RESUME_AT_STEP = "resume_at_step"
+    DEFER = "defer"
+
+
+@dataclass(frozen=True)
+class ResumeDecision:
+    """Pure decision for resuming one persisted candidate."""
+
+    action: ResumeAction
+    step: str | None = None
+
+
+def decide_resume(
+    persisted: Candidate | None,
+    *,
+    artifacts_present: bool,
+) -> ResumeDecision:
+    """Resolve lifecycle resume behavior without consulting external state."""
+    if persisted is None:
+        return ResumeDecision(ResumeAction.RESUME_AT_STEP, "publication")
+    if persisted.state in {
+        CandidateState.ISSUE_PATCHED,
+        CandidateState.COMMENT_CREATED,
+        CandidateState.TERMINAL,
+    }:
+        return ResumeDecision(ResumeAction.SKIP)
+    if persisted.state is CandidateState.CONVERGED and artifacts_present:
+        return ResumeDecision(ResumeAction.SKIP)
+    if not CandidateStateStore._has_local_artifact(persisted) and artifacts_present:
+        return ResumeDecision(ResumeAction.DEFER)
+    return ResumeDecision(ResumeAction.RESUME_AT_STEP, "publication")
 
 
 def github_marker_search(
@@ -59,6 +98,7 @@ class CandidateStateStore:
         self.marker_search_failed = False
         self.quarantined_rows = 0
         self._quarantine_seen: set[str] | None = None
+        self._marker_results: dict[str, bool | None] = {}
 
     def _read_rows(self) -> list[Candidate]:
         if not self._path.exists():
@@ -121,13 +161,25 @@ class CandidateStateStore:
 
     def marker_exists(self, candidate_id: str) -> bool:
         """Search the target repository for one candidate's stable marker."""
+        if candidate_id in self._marker_results:
+            return self._marker_results[candidate_id] is True
         if self._marker_search is None:
+            self._marker_results[candidate_id] = None
             return False
         try:
-            return self._marker_search(f"<!-- devin-remediation-id: {candidate_id} -->")
+            result = self._marker_search(f"<!-- devin-remediation-id: {candidate_id} -->")
+            self._marker_results[candidate_id] = result
+            return result
         except Exception:
             self.marker_search_failed = True
+            self._marker_results[candidate_id] = None
             return False
+
+    def marker_search_unavailable(self, candidate_id: str) -> bool:
+        """Return whether the memoized marker lookup failed for one candidate."""
+        if candidate_id not in self._marker_results:
+            self.marker_exists(candidate_id)
+        return self._marker_results.get(candidate_id) is None
 
     def append(self, candidate: Candidate) -> None:
         """Append one candidate lifecycle row after rereading current state."""
@@ -140,6 +192,10 @@ class CandidateStateStore:
         """Atomically reserve a candidate before the first artifact write."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         marker_exists = self.marker_exists(candidate.candidate_id)
+        if self.marker_search_unavailable(candidate.candidate_id) and not self._has_local_artifact(
+            self.latest().get(candidate.candidate_id)
+        ):
+            return False
         lock_path = self._path.with_suffix(self._path.suffix + ".lock")
         with lock_path.open("a", encoding="utf-8") as lock_handle:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
@@ -170,4 +226,11 @@ class CandidateStateStore:
         )
 
 
-__all__ = ["CandidateStateStore", "github_marker_search", "repository_marker_search"]
+__all__ = [
+    "CandidateStateStore",
+    "ResumeAction",
+    "ResumeDecision",
+    "decide_resume",
+    "github_marker_search",
+    "repository_marker_search",
+]

@@ -10,6 +10,10 @@ from pipeline.config import SECURITY_ISSUE_MODE
 from pipeline.schemas import Candidate, Lane
 
 
+class ArtifactValidationError(ValueError):
+    """Raised when a rendered artifact violates its vendored contract."""
+
+
 def candidate_marker(candidate_id: str) -> str:
     """Return the stable marker used to resume one candidate's artifacts."""
     return f"<!-- devin-remediation-id: {candidate_id} -->"
@@ -25,7 +29,7 @@ def _section_body(template: str, heading: str) -> str:
                     next_heading = next_index
                     break
             return "\n".join(lines[index + 1 : next_heading]).strip()
-    raise ValueError(f"template lacks required heading: {heading}")
+    raise ArtifactValidationError(f"template lacks required heading: {heading}")
 
 
 def _planner_text(planner_output: Mapping[str, object]) -> str:
@@ -159,7 +163,7 @@ def render_issue_body(
     marker = candidate_marker(candidate.candidate_id)
     if candidate.lane is Lane.CODEQL:
         if SECURITY_ISSUE_MODE != "generic_tracking":
-            raise ValueError("unsupported security issue mode")
+            raise ArtifactValidationError("unsupported security issue mode")
         values = {
             "### SUMMARY (no exploit detail)": generated_summary,
             "### SCOPE (files or modules only)": candidate.file_path or "<module>",
@@ -233,19 +237,19 @@ def validate_pr_body(body: str) -> None:
     ]
     positions = [body.index(heading) for heading in headings]
     if positions != sorted(positions):
-        raise ValueError("PR headings are out of order")
+        raise ArtifactValidationError("PR headings are out of order")
     if "### CHECKLIST" in body:
-        raise ValueError("PR body must not add a CHECKLIST heading")
+        raise ArtifactValidationError("PR body must not add a CHECKLIST heading")
     if "- [ ] Has associated issue:" not in body:
-        raise ValueError("PR body lost the Superset checkbox block")
+        raise ArtifactValidationError("PR body lost the Superset checkbox block")
     if "### AUTOMATION METADATA" in body and body.index("### AUTOMATION METADATA") < positions[-1]:
-        raise ValueError("automation metadata must be last")
+        raise ArtifactValidationError("automation metadata must be last")
 
 
 def validate_issue_body(body: str, candidate: Candidate) -> None:
     """Validate the lane-specific issue body used by issues and comments."""
     if candidate_marker(candidate.candidate_id) not in body:
-        raise ValueError("issue body lacks candidate marker")
+        raise ArtifactValidationError("issue body lacks candidate marker")
     headings: tuple[str, ...]
     if candidate.lane is Lane.CODEQL:
         headings = (
@@ -272,7 +276,7 @@ def validate_template_sections(body: str, required_headings: tuple[str, ...]) ->
     """Validate heading presence and order for a rendered artifact."""
     positions = [body.index(heading) for heading in required_headings]
     if positions != sorted(positions):
-        raise ValueError("artifact headings are out of order")
+        raise ArtifactValidationError("artifact headings are out of order")
 
 
 def validate_pr_title(title: str, regex_text: str) -> bool:
@@ -292,6 +296,7 @@ def compare_template_files(vendored_path: Path, live_path: Path) -> bool:
 
 __all__ = [
     "candidate_marker",
+    "ArtifactValidationError",
     "compare_template_files",
     "render_degraded_comment_body",
     "render_issue_body",

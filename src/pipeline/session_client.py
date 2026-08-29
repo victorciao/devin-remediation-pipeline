@@ -534,10 +534,6 @@ class RuntimeOrchestrator:
             if self._client.config.mode is Mode.SIMULATE and candidate is not None
             else concurrent_roles(attempt)
         )
-        if candidate is not None and head_sha_resolver is not None:
-            resolved_head_sha = head_sha_resolver()
-            if resolved_head_sha is not None:
-                candidate = candidate.model_copy(update={"head_sha": resolved_head_sha})
 
         def output(run: RoleRun) -> Mapping[str, object]:
             structured = run.snapshot.payload.get("structured_output")
@@ -546,6 +542,11 @@ class RuntimeOrchestrator:
             return {}
 
         def iteration_from(result: OrchestrationResult) -> ReviewIteration:
+            nonlocal candidate
+            if candidate is not None and head_sha_resolver is not None:
+                resolved_head_sha = head_sha_resolver()
+                if resolved_head_sha is not None:
+                    candidate = candidate.model_copy(update={"head_sha": resolved_head_sha})
             iteration = review_iteration_from_payload(
                 output(result.planner),
                 output(result.reviewer),
@@ -584,6 +585,28 @@ class RuntimeOrchestrator:
                             FindingSeverity.BLOCKING,
                             None,
                             "implementer files_changed does not match committed_diff",
+                            ReasonCode.DISAGREEMENT_UNRESOLVED,
+                        )
+                    )
+                raw_criteria = implementer_payload.get("criteria_addressed")
+                raw_commands = implementer_payload.get("commands_run")
+                if not implementer_diff.strip() and (
+                    (
+                        isinstance(raw_criteria, Sequence)
+                        and not isinstance(raw_criteria, str)
+                        and bool(raw_criteria)
+                    )
+                    or (
+                        isinstance(raw_commands, Sequence)
+                        and not isinstance(raw_commands, str)
+                        and bool(raw_commands)
+                    )
+                ):
+                    findings.append(
+                        ReviewFinding(
+                            FindingSeverity.BLOCKING,
+                            None,
+                            "implementer claims work without a committed diff",
                             ReasonCode.DISAGREEMENT_UNRESOLVED,
                         )
                     )
@@ -635,6 +658,20 @@ class RuntimeOrchestrator:
                 )
             else:
                 diff_reviewed = False
+            if (
+                candidate is not None
+                and candidate.base_sha is not None
+                and candidate.head_sha is not None
+                and candidate.base_sha == candidate.head_sha
+            ):
+                findings.append(
+                    ReviewFinding(
+                        FindingSeverity.BLOCKING,
+                        None,
+                        "candidate branch has no commits beyond base",
+                        ReasonCode.DISAGREEMENT_UNRESOLVED,
+                    )
+                )
             if findings != list(iteration.findings) or diff_reviewed != iteration.diff_reviewed:
                 iteration = ReviewIteration(
                     red_baseline=iteration.red_baseline,

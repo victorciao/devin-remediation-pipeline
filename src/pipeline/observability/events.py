@@ -30,7 +30,10 @@ class EventLog:
             if not line.strip():
                 continue
             payload = json.loads(line)
-            if isinstance(payload, dict) and payload.get("event_type") == "run_capabilities":
+            if isinstance(payload, dict) and payload.get("event_type") in {
+                "run_capabilities",
+                "ci_mode_transition",
+            }:
                 continue
             events.append(EventRecord.model_validate(payload, strict=False))
         return events
@@ -44,7 +47,10 @@ class EventLog:
             if not line.strip():
                 continue
             payload = json.loads(line)
-            if isinstance(payload, dict) and payload.get("event_type") == "run_capabilities":
+            if isinstance(payload, dict) and payload.get("event_type") in {
+                "run_capabilities",
+                "ci_mode_transition",
+            }:
                 events.append(RunEventRecord.model_validate(payload, strict=False))
         return events
 
@@ -75,6 +81,7 @@ def event_from_candidate(candidate: Candidate, *, run_id: str) -> EventRecord:
         issue_url=candidate.issue_url,
         comment_url=candidate.comment_url,
         merged_at=candidate.merged_at,
+        merge_verified=candidate.merge_verified,
         artifact_degraded=candidate.artifact_degraded,
         test_added=candidate.test_added,
         test_paths=candidate.test_paths,
@@ -86,6 +93,7 @@ def event_from_candidate(candidate: Candidate, *, run_id: str) -> EventRecord:
             else None
         ),
         reason=candidate.reason,
+        reason_detail=candidate.reason_detail,
         red_baseline=candidate.red_baseline,
         enclosed_tests=candidate.enclosed_tests,
         parametrized=candidate.parametrized,
@@ -102,6 +110,7 @@ def append_candidate_events(
     run_id: str,
     token_login: str | None = None,
     token_scopes: Iterable[str] = (),
+    run_events: Iterable[RunEventRecord] = (),
 ) -> None:
     """Append candidate events and optional run-level capability evidence."""
     if token_login is not None or token_scopes:
@@ -112,6 +121,8 @@ def append_candidate_events(
                 token_scopes=list(token_scopes),
             )
         )
+    for event in run_events:
+        log.append(event)
     for candidate in candidates:
         log.append(event_from_candidate(candidate, run_id=run_id))
 
