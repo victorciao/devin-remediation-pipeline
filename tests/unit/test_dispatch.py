@@ -81,12 +81,21 @@ class ArtifactTransport:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, Mapping[str, object]]] = []
+        self.reads: list[str] = []
 
     def _respond(
         self, method: str, path: str, payload: Mapping[str, object]
     ) -> Mapping[str, object]:
         self.calls.append((method, path, payload))
         return {"number": len(self.calls), "html_url": f"https://example.invalid{path}"}
+
+    @property
+    def response_headers(self) -> Mapping[str, str]:
+        return {}
+
+    def get(self, path: str) -> object:
+        self.reads.append(path)
+        return {}
 
     def post(self, path: str, payload: Mapping[str, object]) -> Mapping[str, object]:
         return self._respond("post", path, payload)

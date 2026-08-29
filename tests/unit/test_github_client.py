@@ -50,6 +50,7 @@ class RecordingTransport:
         retry_after: float | None = None,
     ) -> None:
         self.calls: list[tuple[str, str, Mapping[str, object]]] = []
+        self.reads: list[str] = []
         self._responses = list(responses)
         self._rate_limited = rate_limited
         self._reset_at = reset_at
@@ -71,6 +72,14 @@ class RecordingTransport:
         if self._responses:
             return self._responses.pop(0)
         return {"number": len(self.calls), "html_url": f"https://example.invalid{path}"}
+
+    @property
+    def response_headers(self) -> Mapping[str, str]:
+        return {}
+
+    def get(self, path: str) -> object:
+        self.reads.append(path)
+        return {}
 
     def post(self, path: str, payload: Mapping[str, object]) -> Mapping[str, object]:
         return self._respond("post", path, payload)

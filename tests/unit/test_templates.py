@@ -71,13 +71,26 @@ def pr_template_text() -> str:
     return PR_TEMPLATE_PATH.read_text(encoding="utf-8")
 
 
-def pr_body(candidate_id: str = "codeql-1", *, issue_number: int | None = 101) -> str:
+SIGNED_COMMIT = (
+    "fix(mcp): bound the generated range\n\n"
+    "Signed-off-by: Devin Remediation <devin@example.invalid>\n"
+)
+
+
+def pr_body(
+    candidate_id: str = "codeql-1",
+    *,
+    issue_number: int | None = 101,
+    commit_message: str | None = SIGNED_COMMIT,
+) -> str:
+    """Render a PR body for a head commit made with `git commit --signoff` (§9.2)."""
     return render_pr_body(
         pr_template_text(),
         codeql_candidate(candidate_id=candidate_id, tier=Tier.HIGH, score=128.0),
         PLANNER,
         REVIEWER,
         issue_number=issue_number,
+        commit_message=commit_message,
     )
 
 
@@ -350,6 +363,31 @@ def test_generated_pr_contribution_compliance(simulate_config: PipelineConfig) -
     """§17 — the generated body asserts the sign-off trailer Superset contribution needs."""
     body = pr_body()
 
-    assert "Signed-off-by:" in body
     assert simulate_config.mode == Mode.SIMULATE
     assert "\t" not in body
+
+    trailers = [line for line in body.splitlines() if line.startswith("Signed-off-by:")]
+    assert trailers == ["Signed-off-by: Devin Remediation <devin@example.invalid>"]
+
+
+def test_signoff_trailer_is_copied_from_the_head_commit() -> None:
+    """§9.2 — every commit is made with `--signoff`, so the trailer is the commit's own."""
+    commit = "fix(mcp): bound the range\n\nSigned-off-by: A Human <human@example.invalid>\n"
+    body = pr_body(commit_message=commit)
+
+    assert "Signed-off-by: A Human <human@example.invalid>" in body
+    assert "Signed-off-by: Devin Remediation" not in body
+
+
+def test_a_commitless_render_never_invents_a_signoff() -> None:
+    """§10 — a DCO trailer certifies a named identity; fabricating one is false provenance."""
+    body = pr_body(commit_message=None)
+
+    assert "Signed-off-by" not in body
+
+
+def test_a_commit_without_a_trailer_yields_no_trailer() -> None:
+    """§10 — an unsigned commit must not be reported as signed."""
+    body = pr_body(commit_message="fix(mcp): bound the range\n")
+
+    assert "Signed-off-by" not in body
