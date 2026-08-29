@@ -9,6 +9,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout Superset baseline
+        uses: actions/checkout@v4
+        with:
+          repository: victorciao/superset
+          ref: a140e74f5f54b2ada25e7558d884812facd3375d
+          path: superset
+          fetch-depth: 1
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
