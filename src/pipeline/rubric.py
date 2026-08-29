@@ -32,6 +32,7 @@ class RubricFactor(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     observable: str = Field(min_length=1)
+    definition: str | None = None
     rows: dict[str, int]
     default: int = Field(ge=1, le=5)
 
@@ -102,8 +103,10 @@ def load_rubrics(path: str | Path = Path("config/rubrics.yaml")) -> RubricTables
                 raise RubricError(f"{lane.value}.{factor_name}.observable is required")
             if not isinstance(default, int) or not 1 <= default <= 5:
                 raise RubricError(f"{lane.value}.{factor_name}.default must be an integer in 1..5")
+            definition = factor_data.get("definition")
             factors[factor_name] = RubricFactor(
                 observable=observable,
+                definition=definition if isinstance(definition, str) else None,
                 rows=_int_rows(factor_data.get("rows"), f"{lane.value}.{factor_name}.rows"),
                 default=default,
             )

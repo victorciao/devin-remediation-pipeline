@@ -37,6 +37,7 @@ codeql:
     default: 3
   risk:
     observable: blast_radius
+    definition: "Count distinct AST-detected importers under superset/; bucket 0-1 local, 2-5 bounded, 6-20 shared, over 20 broad. Security and views paths are critical surfaces."
     rows:
       local_module: 1
       bounded_module: 2

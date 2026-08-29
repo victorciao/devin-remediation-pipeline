@@ -92,6 +92,7 @@ class Action(str, Enum):
     LOG_ONLY = "log_only"
     DEFERRED = "deferred"
     HUMAN_REVIEW = "human_review"
+    REVIEWER_ONLY_DIFF = "reviewer_only_diff"
 
 
 class GateName(str, Enum):
@@ -186,7 +187,9 @@ class Candidate(StrictModel):
     updated_at: datetime | None = None
     position_digest: str | None = None
     region_digest: str | None = None
+    region_source: str | None = None
     symbol_relative_offset: int | None = None
+    symbol_source: str | None = None
     base_sha: str | None = None
     superseded_by: str | None = None
     supersedes: str | None = None
@@ -241,6 +244,7 @@ class Candidate(StrictModel):
     labels: list[str] = Field(default_factory=list)
     expected_failure: ExpectedFailure | None = None
     red_baseline: RedBaselineResult | None = None
+    lifted_markers: list[str] = Field(default_factory=list)
 
 
 class EventRecord(StrictModel):

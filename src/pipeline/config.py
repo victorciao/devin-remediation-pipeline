@@ -98,6 +98,7 @@ class PipelineConfig(BaseModel):
     kpi_sink: KpiSink = KpiSink.LOCAL
     major_only_requires_human: bool = True
     alert_source: AlertSource = AlertSource.API
+    alert_fixture_path: Path = Path("fixtures/codeql_alerts.json")
     ci_evidence_mode: CiEvidenceMode = CiEvidenceMode.LOCAL
     ci_wait_timeout_s: int = Field(default=5400, gt=0, strict=True)
     auto_merge_enabled: bool = False
@@ -163,7 +164,7 @@ class PipelineConfig(BaseModel):
             return SecretStr(value)
         raise TypeError("credential must be a string")
 
-    @field_validator("rubrics_path", "templates_dir", mode="before")
+    @field_validator("rubrics_path", "templates_dir", "alert_fixture_path", mode="before")
     @classmethod
     def normalize_path(cls, value: object) -> object:
         """Accept path strings from file and environment sources."""
@@ -288,6 +289,7 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
         "LANE2_CLASS_BREADTH_MAX": "lane2_class_breadth_max",
         "KPI_SINK": "kpi_sink",
         "ALERT_SOURCE": "alert_source",
+        "ALERT_FIXTURE_PATH": "alert_fixture_path",
         "CI_EVIDENCE_MODE": "ci_evidence_mode",
         "ISSUE_SINK": "issue_sink",
         "VERSION_SOURCE": "version_source",

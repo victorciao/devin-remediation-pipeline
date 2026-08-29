@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
@@ -63,6 +64,87 @@ def _default_region_reader(
     except (OSError, UnicodeDecodeError):
         return ""
     return "\n".join(lines[max(start_line - 1, 0) : end_line])
+
+
+def _module_name(path: str) -> str:
+    module = path.removesuffix(".py").replace("/", ".")
+    return module.removesuffix(".__init__")
+
+
+def _enclosing_symbol(
+    repo_path: Path | None,
+    path: str,
+    start_line: int,
+) -> tuple[str, int, str]:
+    """Return ``qualname``, definition line, and derivation source for an alert."""
+    if repo_path is None:
+        return "<module>", 1, "module_fallback"
+    source_path = repo_path / path
+    try:
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return "<module>", 1, "module_fallback"
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    enclosing: list[ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        end_line = node.end_lineno or node.lineno
+        if node.lineno <= start_line <= end_line:
+            enclosing.append(node)
+    if not enclosing:
+        return "<module>", 1, "module_fallback"
+    node = max(enclosing, key=lambda item: item.lineno)
+    names: list[str] = []
+    current: ast.AST | None = node
+    while current is not None:
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.append(current.name)
+        current = parents.get(current)
+    return ".".join(reversed(names)), node.lineno, "ast"
+
+
+def _blast_radius(repo_path: Path | None, path: str) -> str:
+    """Bucket importer count, with security/view areas as critical tie-breakers.
+
+    Importers are counted by distinct Python files under ``superset/`` that
+    import the touched module directly or by a submodule. Critical security and
+    routed-view areas take precedence over importer-count buckets.
+    """
+    critical = path.startswith(("superset/security/", "superset/views/"))
+    if repo_path is None:
+        return "critical_surface" if critical else "local_module"
+    target = _module_name(path)
+    importers = 0
+    for candidate in (repo_path / "superset").rglob("*.py"):
+        if str(candidate.relative_to(repo_path)) == path:
+            continue
+        try:
+            tree = ast.parse(candidate.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, UnicodeDecodeError):
+            continue
+        imported = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported = imported or any(
+                    alias.name == target or alias.name.startswith(f"{target}.")
+                    for alias in node.names
+                )
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                imported = imported or (
+                    node.module == target or node.module.startswith(f"{target}.")
+                )
+        if imported:
+            importers += 1
+    if critical:
+        return "critical_surface"
+    if importers <= 1:
+        return "local_module"
+    if importers <= 5:
+        return "bounded_module"
+    if importers <= 20:
+        return "shared_module"
+    return "broad_module"
 
 
 def _alert_list(payload: object) -> Sequence[object]:
@@ -174,9 +256,12 @@ def enumerate_codeql_candidates(
         start_line = _integer(location.get("start_line")) or 0
         end_line = _integer(location.get("end_line")) or start_line
         digest = position_digest(location)
-        normalized_symbol = _text(location.get("symbol")) or ""
+        normalized_symbol, symbol_start_line, symbol_source = _enclosing_symbol(
+            repo_path, path, start_line
+        )
         stable_locator = "|".join((rule_id, path, normalized_symbol, digest))
         message = _mapping(instance.get("message"))
+        region_source = "source_region"
         region = (
             region_reader(path, start_line, end_line)
             if region_reader is not None
@@ -184,6 +269,7 @@ def enumerate_codeql_candidates(
         )
         if not region:
             region = _text(message.get("text")) or ""
+            region_source = "alert_message"
         updated_at_raw = _text(alert.get("updated_at"))
         updated_at = (
             datetime.fromisoformat(updated_at_raw.replace("Z", "+00:00"))
@@ -201,7 +287,6 @@ def enumerate_codeql_candidates(
             repo=repo,
             stable_locator=stable_locator,
             trigger_exists=True,
-            verifiability_exists=path.startswith("superset/") and path.endswith(".py"),
             rule_id=rule_id,
             file_path=path,
             normalized_symbol=normalized_symbol,
@@ -209,12 +294,16 @@ def enumerate_codeql_candidates(
             security_severity_level=_text(rule.get("security_severity_level"))
             or _text(rule.get("severity")),
             rule_precision=_text(rule.get("precision")) or "medium",
-            blast_radius="module",
+            blast_radius=_blast_radius(repo_path, path),
             updated_at_fresh=fresh,
             updated_at=updated_at,
             position_digest=digest,
             region_digest=_digest(" ".join(region.split())),
-            symbol_relative_offset=_integer(location.get("start_column")),
+            region_source=region_source,
+            symbol_relative_offset=(
+                max(start_line - symbol_start_line, 0) if symbol_source == "ast" else 0
+            ),
+            symbol_source=symbol_source,
             base_sha=base_sha,
             line=start_line,
         )
@@ -252,7 +341,7 @@ def enumerate_from_config(
     target_repo = repo or f"{config.target_owner}/{config.target_repo}"
     source = payload
     if source is None and config.alert_source is AlertSource.SARIF_FILE:
-        source = read_alert_fixture(Path("fixtures/codeql_alerts.json"))
+        source = read_alert_fixture(config.alert_fixture_path)
     if source is None and api_reader is not None:
         source = fetch_alerts(config.target_owner, config.target_repo, api_reader)
     if source is None:
