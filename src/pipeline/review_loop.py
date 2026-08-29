@@ -36,6 +36,7 @@ class ReviewFinding:
     severity: FindingSeverity
     criterion_id: str | None
     note: str
+    reason: ReasonCode | None = None
 
 
 @dataclass(frozen=True)
@@ -97,18 +98,18 @@ def _disagreement_summary(iteration: ReviewIteration) -> str:
     failing_test = iteration.failing_test or "<unknown test>"
     signature = iteration.pre_fix_signature or "<unknown signature>"
     rationale = iteration.fix_rationale or "<no fix rationale supplied>"
-    return (
+    summary = (
         f"failing test: {failing_test}; mapped criterion: "
         f"{', '.join(sorted(iteration.reviewer_criteria)) or '<none>'}; "
         f"pre-fix signature: {signature}; fix rationale: {rationale}"
     )
+    if not iteration.diff_reviewed:
+        summary += "; reviewer diff review incomplete"
+    return summary
 
 
 def _terminal_reason(iteration: ReviewIteration) -> ReasonCode:
-    if any(
-        "implementer diff violates production-only policy" in finding.note
-        for finding in iteration.findings
-    ):
+    if any(finding.reason is ReasonCode.IMPLEMENTER_TEST_EDIT for finding in iteration.findings):
         return ReasonCode.IMPLEMENTER_TEST_EDIT
     return ReasonCode.DISAGREEMENT_UNRESOLVED
 
@@ -174,6 +175,7 @@ def run_review_loop(
     """Iterate implementer/reviewer decisions until convergence or the cap."""
     iteration = initial
     reauthor_attempts = 0
+    incomplete_attempts = 0
     ordinal = 1
     while ordinal <= config.iteration_cap:
         if not iteration.diff_reviewed:
@@ -187,6 +189,17 @@ def run_review_loop(
                     needs_human_review=True,
                     red_result=iteration.red_result,
                 )
+            if incomplete_attempts >= 1:
+                return ReviewLoopResult(
+                    converged=False,
+                    iterations=ordinal - 1,
+                    state=CandidateState.TERMINAL,
+                    reason=ReasonCode.DISAGREEMENT_UNRESOLVED,
+                    disagreement_summary=_disagreement_summary(iteration),
+                    needs_human_review=True,
+                    red_result=iteration.red_result,
+                )
+            incomplete_attempts += 1
             iteration = rerun(ordinal)
             continue
         if iteration.red_baseline is BaselineStatus.INVALID_RED_BASELINE:
@@ -287,11 +300,17 @@ def review_iteration_from_payload(
             except ValueError:
                 parsed_severity = FindingSeverity.BLOCKING
             criterion_id = raw.get("criterion_id")
+            raw_reason = raw.get("reason")
+            try:
+                reason = ReasonCode(raw_reason) if isinstance(raw_reason, str) else None
+            except ValueError:
+                reason = None
             findings.append(
                 ReviewFinding(
                     parsed_severity,
                     criterion_id if isinstance(criterion_id, str) else None,
                     note,
+                    reason,
                 )
             )
 
@@ -325,13 +344,13 @@ def review_iteration_from_payload(
                         continue
                     try:
                         observed_items.append(
-                            PerItemOutcome.model_validate(raw_outcome, strict=True)
+                            PerItemOutcome.model_validate(raw_outcome, strict=False)
                         )
                     except (TypeError, ValueError):
                         continue
             else:
                 try:
-                    observed_items.append(PerItemOutcome.model_validate(raw_observed, strict=True))
+                    observed_items.append(PerItemOutcome.model_validate(raw_observed, strict=False))
                 except (TypeError, ValueError):
                     pass
         if observed_items:
