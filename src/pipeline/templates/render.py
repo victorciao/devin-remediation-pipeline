@@ -181,12 +181,14 @@ def render_degraded_comment_body(
     verification: str = "Pending reviewer verification.",
 ) -> str:
     """Render the degraded issue artifact as a validated PR comment body."""
-    return render_issue_body(
+    body = render_issue_body(
         template,
         candidate,
         generated_summary=generated_summary,
         verification=verification,
     )
+    validate_issue_body(body, candidate)
+    return body
 
 
 def validate_pr_body(body: str) -> None:
@@ -208,6 +210,32 @@ def validate_pr_body(body: str) -> None:
         raise ValueError("PR body lost the Superset checkbox block")
     if "### AUTOMATION METADATA" in body and body.index("### AUTOMATION METADATA") < positions[-1]:
         raise ValueError("automation metadata must be last")
+
+
+def validate_issue_body(body: str, candidate: Candidate) -> None:
+    """Validate the lane-specific issue body used by issues and comments."""
+    if candidate_marker(candidate.candidate_id) not in body:
+        raise ValueError("issue body lacks candidate marker")
+    headings: tuple[str, ...]
+    if candidate.lane is Lane.CODEQL:
+        headings = (
+            "### SUMMARY (no exploit detail)",
+            "### SCOPE (files or modules only)",
+            "### REMEDIATION STATUS",
+            "### VERIFICATION",
+            "### REFERENCES (rule ID only)",
+        )
+    elif candidate.lane is Lane.DEPRECATIONS:
+        headings = ("### Motivation", "### Proposed Change")
+    else:
+        headings = (
+            "### Bug description",
+            "### Screenshots/recordings",
+            "### Environment",
+            "### Additional context",
+            "### Checklist",
+        )
+    validate_template_sections(body, headings)
 
 
 def validate_template_sections(body: str, required_headings: tuple[str, ...]) -> None:
@@ -241,6 +269,7 @@ __all__ = [
     "render_pr_body",
     "templates_match",
     "validate_pr_body",
+    "validate_issue_body",
     "validate_pr_title",
     "validate_template_sections",
 ]

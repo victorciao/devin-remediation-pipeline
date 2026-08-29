@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Sequence
 
 from pipeline.schemas import Candidate, Lane
@@ -28,8 +29,8 @@ def can_link_drift(previous: Candidate, current: Candidate) -> bool:
         return False
     if weak_key(previous) != weak_key(current):
         return False
-    if previous.region_digest is not None and previous.region_digest == current.region_digest:
-        return True
+    if previous.region_digest is not None:
+        return previous.region_digest == current.region_digest
     return (
         previous.symbol_relative_offset is not None
         and previous.symbol_relative_offset == current.symbol_relative_offset
@@ -39,9 +40,32 @@ def can_link_drift(previous: Candidate, current: Candidate) -> bool:
 def find_drift_match(
     previous: Sequence[Candidate],
     current: Candidate,
+    *,
+    current_scan: Sequence[Candidate] | None = None,
 ) -> Candidate | None:
-    """Find a unique prior LANE 1 candidate with an equivalent drift anchor."""
-    matches = [candidate for candidate in previous if can_link_drift(candidate, current)]
+    """Find a unique prior LANE 1 candidate with an equivalent drift anchor.
+
+    The weak key is eligible only when it occurs once in the current scan and once
+    among active persisted rows.  Callers that have the complete scan should pass
+    it as ``current_scan``; the single-candidate form remains useful for callers
+    that have already established current-scan uniqueness.
+    """
+    active = [candidate for candidate in previous if candidate.superseded_by is None]
+    key = weak_key(current)
+    if key is None:
+        return None
+    scan = (current,) if current_scan is None else current_scan
+    current_counts = Counter(
+        candidate_key for candidate in scan if (candidate_key := weak_key(candidate)) is not None
+    )
+    if current_counts[key] != 1:
+        return None
+    active_counts = Counter(
+        candidate_key for candidate in active if (candidate_key := weak_key(candidate)) is not None
+    )
+    if active_counts[key] != 1:
+        return None
+    matches = [candidate for candidate in active if can_link_drift(candidate, current)]
     return matches[0] if len(matches) == 1 else None
 
 

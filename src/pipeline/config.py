@@ -104,6 +104,7 @@ class PipelineConfig(BaseModel):
     ci_evidence_mode: CiEvidenceMode = CiEvidenceMode.LOCAL
     ci_wait_timeout_s: int = Field(default=5400, gt=0, strict=True)
     auto_merge_enabled: bool = False
+    has_issues: bool = True
     issue_sink: IssueSink = IssueSink.ISSUES
     version_source: str = ".github/ISSUE_TEMPLATE/bug-report.yml"
     lane2_class_breadth_max: int = Field(default=5, ge=1, strict=True)
@@ -289,6 +290,7 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
         "SESSION_FAILURE_CEILING": "session_failure_ceiling",
         "MAJOR_ONLY_REQUIRES_HUMAN": "major_only_requires_human",
         "AUTO_MERGE_ENABLED": "auto_merge_enabled",
+        "HAS_ISSUES": "has_issues",
         "CI_WAIT_TIMEOUT_S": "ci_wait_timeout_s",
         "LANE2_CLASS_BREADTH_MAX": "lane2_class_breadth_max",
         "MAX_SESSIONS": "max_sessions",
@@ -333,7 +335,7 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
             "MAX_TOTAL_ACU",
         }:
             values[field_name] = _parse_float(field_name, raw_value)
-        elif name in {"MAJOR_ONLY_REQUIRES_HUMAN", "AUTO_MERGE_ENABLED"}:
+        elif name in {"MAJOR_ONLY_REQUIRES_HUMAN", "AUTO_MERGE_ENABLED", "HAS_ISSUES"}:
             values[field_name] = _parse_bool(raw_value)
         else:
             values[field_name] = (

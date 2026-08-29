@@ -239,9 +239,19 @@ class Candidate(StrictModel):
     action: Action | None = None
     state: CandidateState = CandidateState.ENUMERATED
     reason: ReasonCode | None = None
+    pr_url: str | None = None
+    issue_url: str | None = None
     unresolved_major: bool = False
     auto_merge_eligible: bool | None = None
     labels: list[str] = Field(default_factory=list)
+    planner_session_id: str | None = None
+    implementer_session_id: str | None = None
+    reviewer_session_id: str | None = None
+    iterations: int = Field(default=0, ge=0)
+    test_added: bool | None = None
+    test_paths: list[str] = Field(default_factory=list)
+    test_author: str | None = None
+    test_exempt_reason: ReasonCode | None = None
     expected_failure: ExpectedFailure | None = None
     red_baseline: RedBaselineResult | None = None
     lifted_markers: list[str] = Field(default_factory=list)
