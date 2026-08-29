@@ -7,7 +7,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
 
@@ -32,6 +32,7 @@ from pipeline.schemas import (
     ReasonCode,
     RetryDecision,
 )
+from pipeline.simulation_fixtures import simulation_result
 
 
 class SessionRole(str, Enum):
@@ -506,108 +507,11 @@ class RuntimeOrchestrator:
                 reviewer = reviewer_future.result()
             return OrchestrationResult(planner, implementer, reviewer)
 
-        def simulation_result(result: OrchestrationResult) -> OrchestrationResult:
-            if self._client.config.mode is not Mode.SIMULATE or candidate is None:
-                return result
-            expected = candidate.expected_failure or {
-                "nodeid": candidate.nodeid or candidate.stable_locator,
-                "exception_type": "AssertionError",
-                "message_pattern": "simulated failure",
-            }
-            if hasattr(expected, "model_dump"):
-                expected_payload = expected.model_dump(mode="json")
-            else:
-                expected_payload = expected
-            kind = hashlib.sha256(candidate.candidate_id.encode()).digest()[0] % 3
-            if kind == 0:
-                observed = {
-                    "nodeid": expected_payload["nodeid"],
-                    "outcome": "FAILED",
-                    "exception_type": expected_payload["exception_type"],
-                    "message": "simulated failure",
-                    "assert_location": expected_payload.get("assert_location"),
-                }
-            elif kind == 1:
-                observed = {
-                    "nodeid": expected_payload["nodeid"],
-                    "outcome": "FAILED",
-                    "exception_type": "TypeError",
-                    "message": "different simulated failure",
-                }
-            else:
-                observed = {
-                    "nodeid": expected_payload["nodeid"],
-                    "outcome": "PASSED",
-                }
-            planner_payload = {
-                "criteria": [
-                    {
-                        "id": "AC-1",
-                        "statement": "Apply the remediation.",
-                        "expected_failure": expected_payload,
-                        "verify_command": "pytest fixtures/simulated_test.py",
-                    }
-                ],
-                "files_in_scope": ["src/simulated_remediation.py"],
-                "out_of_scope": ["tests/"],
-            }
-            implementer_payload = {
-                "files_changed": [],
-                "criteria_addressed": ["AC-1"],
-                "commands_run": ["pytest fixtures/simulated_test.py"],
-            }
-            reviewer_payload = {
-                "tests": [
-                    {
-                        "path": "fixtures/simulated_test.py",
-                        "nodeid": expected_payload["nodeid"],
-                        "criterion_id": "AC-1",
-                    }
-                ],
-                "red_baseline": {"observed": observed},
-                "green_result": {"passed": True},
-                "diff_reviewed": {
-                    "base_sha": "simulate-base",
-                    "head_sha": "simulate-head",
-                    "files_read": ["fixtures/simulated_test.py"],
-                },
-                "findings": [],
-            }
-            snapshots = (
-                replace(
-                    result.planner,
-                    snapshot=replace(
-                        result.planner.snapshot,
-                        payload={
-                            **result.planner.snapshot.payload,
-                            "structured_output": planner_payload,
-                        },
-                    ),
-                ),
-                replace(
-                    result.implementer,
-                    snapshot=replace(
-                        result.implementer.snapshot,
-                        payload={
-                            **result.implementer.snapshot.payload,
-                            "structured_output": implementer_payload,
-                        },
-                    ),
-                ),
-                replace(
-                    result.reviewer,
-                    snapshot=replace(
-                        result.reviewer.snapshot,
-                        payload={
-                            **result.reviewer.snapshot.payload,
-                            "structured_output": reviewer_payload,
-                        },
-                    ),
-                ),
-            )
-            return OrchestrationResult(*snapshots)
-
-        current = simulation_result(concurrent_roles(attempt))
+        current = (
+            simulation_result(concurrent_roles(attempt), candidate)
+            if self._client.config.mode is Mode.SIMULATE and candidate is not None
+            else concurrent_roles(attempt)
+        )
 
         def output(run: RoleRun) -> Mapping[str, object]:
             structured = run.snapshot.payload.get("structured_output")
@@ -671,7 +575,11 @@ class RuntimeOrchestrator:
 
         def rerun(role_attempt: int) -> ReviewIteration:
             nonlocal current
-            current = simulation_result(concurrent_roles(role_attempt))
+            current = (
+                simulation_result(concurrent_roles(role_attempt), candidate)
+                if self._client.config.mode is Mode.SIMULATE and candidate is not None
+                else concurrent_roles(role_attempt)
+            )
             return iteration_from(current)
 
         review = run_review_loop(self._client.config, iteration_from(current), rerun)

@@ -14,6 +14,7 @@ from pipeline.schemas import (
     Candidate,
     CandidateState,
     ExpectedFailure,
+    ItemOutcome,
     PerItemOutcome,
     ReasonCode,
     RedBaselineResult,
@@ -112,6 +113,21 @@ def _terminal_reason(iteration: ReviewIteration) -> ReasonCode:
     if any(finding.reason is ReasonCode.IMPLEMENTER_TEST_EDIT for finding in iteration.findings):
         return ReasonCode.IMPLEMENTER_TEST_EDIT
     return ReasonCode.DISAGREEMENT_UNRESOLVED
+
+
+def _parse_observed_outcome(raw: Mapping[str, object]) -> PerItemOutcome | None:
+    """Normalize wire enum text before validating the strict outcome model."""
+    payload = dict(raw)
+    raw_outcome = payload.get("outcome")
+    if isinstance(raw_outcome, str):
+        try:
+            payload["outcome"] = ItemOutcome(raw_outcome)
+        except ValueError:
+            return None
+    try:
+        return PerItemOutcome.model_validate(payload, strict=True)
+    except (TypeError, ValueError):
+        return None
 
 
 def evaluate_review_iteration(
@@ -343,17 +359,13 @@ def review_iteration_from_payload(
                 for raw_outcome in raw_outcomes:
                     if not isinstance(raw_outcome, Mapping):
                         continue
-                    try:
-                        observed_items.append(
-                            PerItemOutcome.model_validate(raw_outcome, strict=False)
-                        )
-                    except (TypeError, ValueError):
-                        continue
+                    parsed = _parse_observed_outcome(raw_outcome)
+                    if parsed is not None:
+                        observed_items.append(parsed)
             else:
-                try:
-                    observed_items.append(PerItemOutcome.model_validate(raw_observed, strict=False))
-                except (TypeError, ValueError):
-                    pass
+                parsed = _parse_observed_outcome(raw_observed)
+                if parsed is not None:
+                    observed_items.append(parsed)
         if observed_items:
             red_result = classify_red_baseline(expected, observed_items)
             baseline_status = red_result.status

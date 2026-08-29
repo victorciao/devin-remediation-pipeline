@@ -778,7 +778,12 @@ def run_once(
             candidate for candidate in dispatched if candidate.action is Action.OPEN_PR
         ]
         reviewed.extend(
-            candidate for candidate in dispatched if candidate.action is not Action.OPEN_PR
+            candidate.model_copy(update={"state": CandidateState.ISSUE_CREATED})
+            if candidate.action is Action.OPEN_ISSUE
+            and candidate.state is CandidateState.DISPATCHING
+            else candidate
+            for candidate in dispatched
+            if candidate.action is not Action.OPEN_PR
         )
     planner_outputs: dict[str, Mapping[str, object]] = {}
     reviewer_outputs: dict[str, Mapping[str, object]] = {}
@@ -825,6 +830,15 @@ def run_once(
         )
         if result.review is not None:
             reviewed_candidate = apply_review_result(reviewed_candidate, result.review)
+        else:
+            reviewed_candidate = reviewed_candidate.model_copy(
+                update={
+                    "state": CandidateState.TERMINAL,
+                    "reason": ReasonCode.DISAGREEMENT_UNRESOLVED,
+                    "action": Action.HUMAN_REVIEW,
+                    "auto_merge_eligible": False,
+                }
+            )
         reviewed.append(reviewed_candidate)
 
     notes = _capability_notes(

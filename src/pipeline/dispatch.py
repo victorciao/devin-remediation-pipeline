@@ -206,6 +206,7 @@ def dispatch_candidates(candidates: Sequence[Candidate], config: PipelineConfig)
                     "tier": tier,
                     "action": Action.DEFERRED,
                     "state": CandidateState.DEFERRED,
+                    "reason": ReasonCode.BUDGET_OVERFLOW,
                     "auto_merge_eligible": False,
                 }
             )

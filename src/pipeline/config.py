@@ -25,6 +25,9 @@ from pydantic import (
 logger = logging.getLogger(__name__)
 BUDGET_HARD_MAX = 25
 SECURITY_ISSUE_MODE = "generic_tracking"
+DEFAULT_BUDGET_N = 10
+DEFAULT_ITERATION_CAP = 5
+DEFAULT_MAX_SESSIONS = DEFAULT_BUDGET_N * (3 + 2 * DEFAULT_ITERATION_CAP)
 
 
 class ConfigError(ValueError):
@@ -86,16 +89,16 @@ class PipelineConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True)
 
     mode: Mode = Mode.SIMULATE
-    iteration_cap: int = Field(default=5, ge=1, le=10, strict=True)
+    iteration_cap: int = Field(default=DEFAULT_ITERATION_CAP, ge=1, le=10, strict=True)
     coverage_bar: float = Field(default=0.80, ge=0.0, le=1.0, strict=True)
-    budget_N: int = Field(default=10, ge=1, le=BUDGET_HARD_MAX, strict=True)
+    budget_N: int = Field(default=DEFAULT_BUDGET_N, ge=1, le=BUDGET_HARD_MAX, strict=True)
     score_cap: float = Field(default=200, gt=0, strict=True)
     tier_high_min: float = Field(default=60, gt=0, strict=True)
     tier_medium_min: float = Field(default=20, gt=0, strict=True)
     eol_major_lag: int = Field(default=2, ge=1, strict=True)
     merge_rate_floor: float = Field(default=0.50, ge=0.0, le=1.0, strict=True)
     session_failure_ceiling: float = Field(default=0.30, ge=0.0, le=1.0, strict=True)
-    max_sessions: int = Field(default=130, ge=1, strict=True)
+    max_sessions: int = Field(default=DEFAULT_MAX_SESSIONS, ge=1, strict=True)
     max_total_acu: float = Field(default=500.0, gt=0, strict=True)
     kpi_sink: KpiSink = KpiSink.LOCAL
     major_only_requires_human: bool = True
@@ -181,8 +184,8 @@ class PipelineConfig(BaseModel):
         """Derive the session ceiling when callers omit it."""
         if not isinstance(value, dict) or "max_sessions" in value:
             return value
-        raw_budget = value.get("budget_N", 10)
-        raw_iteration_cap = value.get("iteration_cap", 5)
+        raw_budget = value.get("budget_N", DEFAULT_BUDGET_N)
+        raw_iteration_cap = value.get("iteration_cap", DEFAULT_ITERATION_CAP)
         try:
             budget = int(raw_budget)
             iteration_cap = int(raw_iteration_cap)
