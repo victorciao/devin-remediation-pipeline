@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol, cast
@@ -228,8 +229,6 @@ def run_live_preflight(config: PipelineConfig, transport: GitHubTransport) -> Li
         notes.append("ci_evidence_mode: local (no completed pull_request/workflow_dispatch run)")
     else:
         notes.append("ci_evidence_mode: github (completed Actions history observed)")
-    notes.append(f"token_identity: {login}")
-    notes.append(f"token_scopes: {', '.join(scopes) if scopes else 'none reported'}")
     if not has_issues:
         notes.append("artifact_degraded: issues disabled; PR comments selected")
     return LivePreflight(
@@ -282,7 +281,7 @@ def probe_capabilities(config: PipelineConfig, *, client: GitHubTransport) -> Ca
     reported_contexts = tuple(
         name
         for name, conclusion in _required_context_statuses(config, client, "HEAD").items()
-        if conclusion in {"success", "successful"}
+        if conclusion == "success"
     )
     transition = maybe_upgrade_ci_mode(
         config.ci_evidence_mode,
@@ -329,30 +328,36 @@ def wait_for_required_contexts(
     *,
     client: GitHubTransport,
     elapsed_s: int,
-    reported_contexts: Sequence[str] = (),
+    reported_contexts: Mapping[str, str] | None = None,
     sha: str = "HEAD",
+    poll: bool = True,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    poll_interval_s: float = 15.0,
 ) -> CiWaitResult:
     """Resolve generated-PR CI evidence without treating missing reports as green."""
-    statuses = (
-        _required_context_statuses(config, client, sha)
-        if not reported_contexts
-        else {context: "success" for context in reported_contexts}
-    )
-    if elapsed_s >= config.ci_wait_timeout_s:
-        return CiWaitResult(
-            CiEvidenceMode.LOCAL,
-            ReasonCode.CI_EVIDENCE_UNAVAILABLE,
-            False,
+    started = clock()
+    deadline = started + max(config.ci_wait_timeout_s - elapsed_s, 0)
+    while True:
+        statuses = (
+            _required_context_statuses(config, client, sha)
+            if reported_contexts is None
+            else dict(reported_contexts)
         )
-    complete = all(
-        statuses.get(context) in {"success", "successful"} for context in REQUIRED_CONTEXTS
-    )
-    if complete:
-        return CiWaitResult(
-            CiEvidenceMode.GITHUB,
-            None,
-            config.auto_merge_enabled,
-        )
+        complete = all(statuses.get(context) == "success" for context in REQUIRED_CONTEXTS)
+        if complete:
+            return CiWaitResult(CiEvidenceMode.GITHUB, None, config.auto_merge_enabled)
+        if any(
+            statuses.get(context) in {"failure", "cancelled", "timed_out", "error"}
+            for context in REQUIRED_CONTEXTS
+        ):
+            return CiWaitResult(CiEvidenceMode.GITHUB, None, False)
+        if not poll:
+            break
+        remaining = deadline - clock()
+        if remaining <= 0:
+            break
+        sleep(min(poll_interval_s, remaining))
     return CiWaitResult(CiEvidenceMode.LOCAL, ReasonCode.CI_EVIDENCE_UNAVAILABLE, False)
 
 
@@ -567,6 +572,10 @@ def publish_artifacts(
     labels: Sequence[str] = (),
     preflight: Callable[[], None] | None = None,
     ci_green: bool = False,
+    existing_issue_number: int | None = None,
+    existing_issue_url: str | None = None,
+    after_issue: Callable[[int, str], None] | None = None,
+    after_pr: Callable[[int], bool] | None = None,
 ) -> ArtifactLinks:
     """Publish artifacts in the mandated issue → PR → issue-patch order."""
     if not client._config.has_issues:
@@ -575,7 +584,18 @@ def publish_artifacts(
         raise ArtifactUnavailableError("use publish_degraded for PR comments")
     if preflight is not None:
         preflight()
-    issue_number, issue_url = client.create_issue(issue_title, issue_body, labels)
+    issue_url: str | None
+    if existing_issue_number is None:
+        issue_number, issue_url = client.create_issue(issue_title, issue_body, labels)
+    else:
+        issue_number, issue_url = existing_issue_number, existing_issue_url
+    if (
+        after_issue is not None
+        and existing_issue_number is None
+        and issue_number is not None
+        and issue_url is not None
+    ):
+        after_issue(issue_number, issue_url)
     if candidate.tier is Tier.MEDIUM or pr_title is None or pr_body is None or head is None:
         return ArtifactLinks(issue_url, None, issue_number=issue_number)
     if preflight is not None:
@@ -586,6 +606,8 @@ def publish_artifacts(
         head=head,
         base=base,
     )
+    if after_pr is not None:
+        ci_green = after_pr(pr_number)
     if preflight is not None:
         preflight()
     client.patch_issue(issue_number, f"{issue_body.rstrip()}\n\nPR: {pr_url}\n")
