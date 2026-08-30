@@ -185,6 +185,8 @@ def render_issue_body(
     if candidate.lane is Lane.CODEQL:
         if SECURITY_ISSUE_MODE != "generic_tracking":
             raise ArtifactValidationError("unsupported security issue mode")
+        if template:
+            raise ArtifactValidationError("CodeQL issue rendering does not consume a template")
         values = {
             "### SUMMARY (no exploit detail)": generated_summary,
             "### SCOPE (files or modules only)": candidate.file_path or "<module>",
@@ -275,6 +277,19 @@ def validate_pr_body(body: str) -> None:
         )
         if any(item not in body for item in required_evidence):
             raise ArtifactValidationError("local PR body lacks automation evidence block")
+        for field in (
+            "implementer_commands_run",
+            "reviewer_pre_fix_failure",
+            "reviewer_post_fix_result",
+            "diff_range",
+        ):
+            prefix = f"- **{field}**:"
+            values = [
+                line[len(prefix) :].strip() for line in body.splitlines() if line.startswith(prefix)
+            ]
+            value = values[-1] if values else ""
+            if not value or value.lower() in {"n/a", "none", "null"}:
+                raise ArtifactValidationError(f"local PR body lacks value for {field}")
 
 
 def validate_issue_body(body: str, candidate: Candidate) -> None:

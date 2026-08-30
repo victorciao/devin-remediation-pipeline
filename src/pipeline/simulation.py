@@ -28,6 +28,7 @@ def render_run_artifacts(
     baseline: dict[str, object],
     config: PipelineConfig,
     planner_outputs: Mapping[str, Mapping[str, object]] | None = None,
+    implementer_outputs: Mapping[str, Mapping[str, object]] | None = None,
     reviewer_outputs: Mapping[str, Mapping[str, object]] | None = None,
     capability_notes: Sequence[str] = (),
     token_login: str | None = None,
@@ -42,6 +43,7 @@ def render_run_artifacts(
         store.append(candidate)
 
     planner = planner_outputs or {}
+    implementer = implementer_outputs or {}
     reviewer = reviewer_outputs or {}
     pr_template = (config.templates_dir / "superset/PULL_REQUEST_TEMPLATE.md").read_text(
         encoding="utf-8"
@@ -84,33 +86,31 @@ def render_run_artifacts(
         issue_path.write_text(issue_body, encoding="utf-8")
         produced.append(issue_path)
         if candidate.action in {Action.OPEN_PR, Action.REVIEWER_ONLY_DIFF}:
+            implementer_output = implementer.get(candidate.candidate_id)
+            reviewer_output = reviewer.get(candidate.candidate_id)
+            automation_metadata: dict[str, object] | None = None
+            if implementer_output is not None and reviewer_output is not None:
+                automation_metadata = {
+                    "mode": config.mode.value,
+                    "would_write": config.mode is Mode.SIMULATE,
+                    "ci_evidence_mode": config.ci_evidence_mode.value,
+                    "implementer_commands_run": (
+                        "simulated: " + str(implementer_output.get("commands_run", "n/a"))
+                    ),
+                    "reviewer_pre_fix_failure": (
+                        "simulated: " + str(reviewer_output.get("red_baseline", "n/a"))
+                    ),
+                    "reviewer_post_fix_result": (
+                        "simulated: " + str(reviewer_output.get("green_result", "n/a"))
+                    ),
+                    "diff_range": (f"{candidate.base_sha or 'n/a'}..{candidate.head_sha or 'n/a'}"),
+                }
             pr_body = render_pr_body(
                 pr_template,
                 candidate,
                 planner.get(candidate.candidate_id, {}),
                 reviewer.get(candidate.candidate_id, {}),
-                automation_metadata={
-                    "mode": config.mode.value,
-                    "would_write": config.mode is Mode.SIMULATE,
-                    "ci_evidence_mode": config.ci_evidence_mode.value,
-                    "implementer_commands_run": (
-                        "simulated: "
-                        + str(planner.get(candidate.candidate_id, {}).get("commands_run", "n/a"))
-                    ),
-                    "reviewer_pre_fix_failure": (
-                        "simulated: "
-                        + str(
-                            reviewer.get(candidate.candidate_id, {}).get("pre_fix_failure", "n/a")
-                        )
-                    ),
-                    "reviewer_post_fix_result": (
-                        "simulated: "
-                        + str(
-                            reviewer.get(candidate.candidate_id, {}).get("post_fix_result", "n/a")
-                        )
-                    ),
-                    "diff_range": (f"{candidate.base_sha or 'n/a'}..{candidate.head_sha or 'n/a'}"),
-                },
+                automation_metadata=automation_metadata,
             )
             validate_pr_body(pr_body)
             pr_path = output_dir / "reports" / "prs" / f"{candidate.candidate_id}.md"

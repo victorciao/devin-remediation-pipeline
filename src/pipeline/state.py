@@ -57,10 +57,11 @@ def decide_resume(
     *,
     artifacts_present: bool,
     marker_search_available: bool = True,
+    marker_search_orphaned: bool = False,
 ) -> ResumeDecision:
     """Resolve lifecycle resume behavior without consulting external state."""
     if persisted is None:
-        if not marker_search_available and not artifacts_present:
+        if (not marker_search_available or marker_search_orphaned) and not artifacts_present:
             return ResumeDecision(ResumeAction.DEFER)
         return ResumeDecision(ResumeAction.RESUME_AT_STEP, "publication")
     if persisted.state in {
@@ -71,7 +72,9 @@ def decide_resume(
         return ResumeDecision(ResumeAction.SKIP)
     if persisted.state is CandidateState.CONVERGED and artifacts_present:
         return ResumeDecision(ResumeAction.SKIP)
-    if not has_local_artifact(persisted) and (artifacts_present or not marker_search_available):
+    if not has_local_artifact(persisted) and (
+        artifacts_present or not marker_search_available or marker_search_orphaned
+    ):
         return ResumeDecision(ResumeAction.DEFER)
     return ResumeDecision(ResumeAction.RESUME_AT_STEP, "publication")
 
@@ -188,6 +191,7 @@ class CandidateStateStore:
             persisted,
             artifacts_present=artifacts_present,
             marker_search_available=marker_search_available,
+            marker_search_orphaned=self.marker_search_orphaned(candidate_id),
         )
 
     def marker_artifact(self, candidate_id: str) -> MarkerArtifact | None:
@@ -250,9 +254,10 @@ class CandidateStateStore:
         """Atomically reserve a candidate before the first artifact write."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         marker_exists = self.marker_exists(candidate.candidate_id)
-        if self.marker_search_unavailable(candidate.candidate_id) and not has_local_artifact(
-            self.latest().get(candidate.candidate_id)
-        ):
+        if (
+            self.marker_search_unavailable(candidate.candidate_id)
+            or self.marker_search_orphaned(candidate.candidate_id)
+        ) and not has_local_artifact(self.latest().get(candidate.candidate_id)):
             return False
         lock_path = self._path.with_suffix(self._path.suffix + ".lock")
         with lock_path.open("a", encoding="utf-8") as lock_handle:

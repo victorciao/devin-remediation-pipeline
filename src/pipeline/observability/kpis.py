@@ -18,6 +18,7 @@ class NotApplicable:
 
 
 BurnDownValue: TypeAlias = int | NotApplicable
+KpiValue: TypeAlias = float | int | None | NotApplicable | dict[str, int]
 
 
 @dataclass(frozen=True)
@@ -77,7 +78,7 @@ def compute_kpis(
     events: list[EventRecord],
     baseline: dict[str, object],
     config: PipelineConfig,
-) -> dict[str, float | int | None | NotApplicable]:
+) -> dict[str, KpiValue]:
     """Compute the §11 KPI set from candidate and event evidence."""
     dispatched_pr = sum(
         candidate.pr_url is not None and candidate.state is not CandidateState.DEFERRED
@@ -142,9 +143,7 @@ def compute_kpis(
         "dispatched_pr": dispatched_pr,
         "dispatched_issue": dispatched_issue,
         "deferred": sum(candidate.state is CandidateState.DEFERRED for candidate in candidates),
-        **{
-            f"deferred_{reason}": count for reason, count in _deferred_by_reason(candidates).items()
-        },
+        "deferred_by_reason": _deferred_by_reason(candidates),
         "verification_pass_rate": (
             verification_passes / len(role_loop_events) if role_loop_events else None
         ),
@@ -265,6 +264,8 @@ def render_kpi_report(
     metrics = compute_kpis(candidates, events, baseline, config)
     lines = ["# Remediation KPI rollup", "", f"- mode: {config.mode.value}", ""]
     for name, metric_value in metrics.items():
+        if name == "deferred_by_reason":
+            continue
         label = name.replace("_", " ").title()
         if name.endswith("_alert") and metric_value:
             lines.append(f"> **ALERT: {label}**")
@@ -272,6 +273,14 @@ def render_kpi_report(
             continue
         else:
             lines.append(f"- **{label}:** {'n/a' if metric_value is None else metric_value}")
+    lines.extend(["", "## Deferred by reason", ""])
+    deferred_by_reason = metrics["deferred_by_reason"]
+    if isinstance(deferred_by_reason, dict):
+        lines.extend(
+            f"- **{reason}:** {count}" for reason, count in sorted(deferred_by_reason.items())
+        )
+    else:
+        lines.append("- None")
     lines.extend(["", "## Burn-down", ""])
     for lane, value in compute_burndown(candidates, baseline).items():
         if isinstance(value.denominator, NotApplicable):

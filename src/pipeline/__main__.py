@@ -140,6 +140,7 @@ def _publish_live(
     output_dir: Path,
     repo_path: Path,
     planner_outputs: Mapping[str, Mapping[str, object]],
+    implementer_outputs: Mapping[str, Mapping[str, object]],
     reviewer_outputs: Mapping[str, Mapping[str, object]],
     base_sha: str | None,
     head_branch: str,
@@ -345,14 +346,14 @@ def _publish_live(
                 "mode": "live",
                 "would_write": False,
                 "ci_evidence_mode": config.ci_evidence_mode.value,
-                "implementer_commands_run": planner_outputs.get(candidate.candidate_id, {}).get(
+                "implementer_commands_run": implementer_outputs.get(candidate.candidate_id, {}).get(
                     "commands_run", "n/a"
                 ),
                 "reviewer_pre_fix_failure": reviewer_outputs.get(candidate.candidate_id, {}).get(
-                    "pre_fix_failure", "n/a"
+                    "red_baseline", "n/a"
                 ),
                 "reviewer_post_fix_result": reviewer_outputs.get(candidate.candidate_id, {}).get(
-                    "post_fix_result", "n/a"
+                    "green_result", "n/a"
                 ),
                 "diff_range": f"{candidate.base_sha or 'n/a'}..{candidate.head_sha or 'n/a'}",
             },
@@ -485,6 +486,9 @@ def _publish_live(
             planner_for_body: Mapping[str, object] = planner_outputs.get(
                 candidate.candidate_id, {}
             ),
+            implementer_for_body: Mapping[str, object] = implementer_outputs.get(
+                candidate.candidate_id, {}
+            ),
             reviewer_for_body: Mapping[str, object] = reviewer_outputs.get(
                 candidate.candidate_id, {}
             ),
@@ -504,9 +508,9 @@ def _publish_live(
                     "mode": "live",
                     "would_write": False,
                     "ci_evidence_mode": config.ci_evidence_mode.value,
-                    "implementer_commands_run": planner_for_body.get("commands_run", "n/a"),
-                    "reviewer_pre_fix_failure": reviewer_for_body.get("pre_fix_failure", "n/a"),
-                    "reviewer_post_fix_result": reviewer_for_body.get("post_fix_result", "n/a"),
+                    "implementer_commands_run": implementer_for_body.get("commands_run", "n/a"),
+                    "reviewer_pre_fix_failure": reviewer_for_body.get("red_baseline", "n/a"),
+                    "reviewer_post_fix_result": reviewer_for_body.get("green_result", "n/a"),
                     "diff_range": (
                         f"{candidate_for_body.base_sha or 'n/a'}.."
                         f"{candidate_for_body.head_sha or 'n/a'}"
@@ -927,13 +931,26 @@ def _prepare_live_candidate(
         state_store.append(orphaned)
         return orphaned
     if marker is not None:
-        adopted = candidate.model_copy(
-            update={
+        adoption = (
+            {
+                "state": CandidateState.PR_CREATED,
+                "pr_number": marker.number,
+                "pr_url": marker.url,
+                "issue_number": None,
+                "issue_url": None,
+            }
+            if marker.is_pull_request
+            else {
                 "state": CandidateState.ISSUE_CREATED,
                 "issue_number": marker.number,
                 "issue_url": marker.url,
-                "pr_number": marker.number if marker.is_pull_request else None,
-                "pr_url": marker.url if marker.is_pull_request else None,
+                "pr_number": None,
+                "pr_url": None,
+            }
+        )
+        adopted = candidate.model_copy(
+            update={
+                **adoption,
                 "reason": None,
                 "reason_detail": None,
             }
@@ -1259,6 +1276,7 @@ def run_once(
             if candidate.action is not Action.OPEN_PR
         )
     planner_outputs: dict[str, Mapping[str, object]] = {}
+    implementer_outputs: dict[str, Mapping[str, object]] = {}
     reviewer_outputs: dict[str, Mapping[str, object]] = {}
     for candidate in session_candidates:
         head_sha_resolver = None
@@ -1455,6 +1473,9 @@ def run_once(
             )
         if isinstance(reviewer_output, Mapping):
             reviewer_outputs[candidate.candidate_id] = reviewer_output
+        implementer_output = result.implementer.snapshot.payload.get("structured_output")
+        if isinstance(implementer_output, Mapping):
+            implementer_outputs[candidate.candidate_id] = implementer_output
         reviewed_candidate = candidate.model_copy(
             update={
                 "planner_session_id": result.planner.snapshot.session_id,
@@ -1562,6 +1583,7 @@ def run_once(
                 output_dir=output_dir,
                 repo_path=repo_path,
                 planner_outputs=planner_outputs,
+                implementer_outputs=implementer_outputs,
                 reviewer_outputs=reviewer_outputs,
                 base_sha=base_sha,
                 head_branch=head_branch,
@@ -1624,6 +1646,7 @@ def run_once(
         baseline=baseline,
         config=config,
         planner_outputs=planner_outputs,
+        implementer_outputs=implementer_outputs,
         reviewer_outputs=reviewer_outputs,
         capability_notes=notes,
         token_login=preflight.token_login if preflight is not None else None,
