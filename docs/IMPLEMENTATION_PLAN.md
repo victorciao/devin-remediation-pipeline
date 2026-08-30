@@ -68,9 +68,9 @@ test belongs in this repo's own CI, which §17 covers.
 | `scored` | tier and merge mode assigned | high tier: publish the tracking issue, then dispatch, if within `budget_N`; medium tier: publish an issue; low tier: report | none | no |
 | `issue_created` | issue exists (created or marker-adopted) and its number is recorded | high tier: create the branch and dispatch; medium tier: record KPIs | issue | medium tier: **yes** |
 | `dispatching` | branch created, session launched | poll the session | issue + branch | no |
-| `session_done` | session terminal with required output | evaluate the criterion (§10) | branch | no |
-| `verified` | criterion satisfied, evidence recorded | render + create the PR, `Closes #<issue_number>` | issue + branch | no |
-| `pr_created` | PR exists and its number is recorded | watch the head's check runs (§12) | issue + PR | no |
+| `session_done` | session terminal with required output | evaluate the criterion's pre-PR evidence (§10) | issue + branch | no |
+| `verified` | pre-PR evidence satisfied and recorded | render + create the PR, `Closes #<issue_number>` | issue + branch | no |
+| `pr_created` | PR exists and its number is recorded | watch the head's check runs and settle any post-PR criterion (§12) | issue + PR | no |
 | `awaiting_human_merge` | `merge_mode = manual`, §12 gate green | leave open, report it | PR | **yes** |
 | `merged` | `merge_mode = auto`, §12 gate green, merge succeeded | record KPIs | PR | **yes** |
 | `terminal` | any §13 failure | record reason; never merge | ≤1 issue, ≤1 PR | **yes** |
@@ -142,8 +142,10 @@ Required `structured_output_schema`:
 
 ## 10. Verification: per-lane success criteria
 
-Every candidate carries a **success criterion** declared by its lane at enumeration. The orchestrator evaluates it itself, before the PR is opened, by running commands in a real checkout or reading the fork; the session's own account is never the evidence. The criterion and its observed outcome go to the state row and the event
-log.
+Every candidate carries a **success criterion** declared by its lane at enumeration. The orchestrator always evaluates it from its own observation — the session's account is never the evidence — and *where* it is evaluated follows the evidence source. **Pre-PR**, in a local checkout, when the evidence is obtainable there: LANE
+2's red-at-base/green-at-head, LANE 3's symbol and caller re-check, suite-green under `ci_evidence_mode = local`, and LANE 1 under `codeql_cli`. **Post-PR**, from the fork, when the evidence exists only on the PR ref: LANE 1 under `pr_ref_alerts`, and suite-green under `ci_evidence_mode = actions`. A post-PR criterion gates the
+**merge**, never the PR: a candidate whose alert is still present at head holds an open PR and settles `terminal/alert_still_present` unmerged, and expiry of `alert_analysis_wait_s` settles `terminal/criterion_not_met` unmerged — never merged, never silently passed. The criterion and its observed outcome go to the state row and
+the event log.
 
 **LANE 2 — the re-enabled test goes red at base and green at head.**
 
@@ -154,7 +156,8 @@ log.
 **LANE 1 — the alert is gone at head and nothing regressed.** The normal path is `lane1_alert_check = pr_ref_alerts`: the fork's `codeql-analysis` runs on `pull_request`, so alert absence at the candidate head is read from the alerts for the PR ref once that analysis completes, bounded by `alert_analysis_wait_s`; expiry settles
 `terminal/criterion_not_met`, never a pass. `codeql_cli`, a local CodeQL run over the touched paths, is the documented offline alternative. Either way the alert's `stable_locator` must be absent → otherwise `terminal/alert_still_present`. The suite covering `suite_scope` must pass at head → otherwise `terminal/suite_regressed`.
 A regression test is required when the alert class admits one; when it does not — `py/overly-large-range` is such a class — `test_nodeid` is null, the row records why, and alert-absence plus suite-green is the whole criterion. Discovery reads the analysis at `base_sha` and verification reads the analysis at the candidate head;
-the orchestrator reads both itself and never accepts the session's account of either.
+the orchestrator reads both itself and never accepts the session's account of either. Under `pr_ref_alerts` the candidate therefore reaches a PR on the strength of the session's fix plus suite-green, with alert-absence confirmed afterwards — a deliberate consequence of GitHub owning the scan, and it costs nothing that matters
+because no merge happens without that confirmation.
 
 **LANE 3 — the symbol is gone and nothing references it.** At head the `module:qualname` must no longer resolve and the gate's `no_internal_callers_and_no_override_surface` check, re-run at head, must hold → otherwise `terminal/symbol_still_referenced`. The suite covering `suite_scope` must pass at head → otherwise
 `terminal/suite_regressed`. No new test is required; a deletion's evidence is that nothing broke.
@@ -189,9 +192,10 @@ The gate is the fork's own CI, read from the **check runs on the PR head**. Supe
 2. Every check run that reached a conclusion must be `success`. `skipped` and `neutral` are permitted and are named as such on the row and in the report. Any `failure`, `cancelled` or `timed_out` is `ci_check_failed`.
 3. Every context in `required_contexts_min` must be **present and successful** on the head, so an empty or all-skipped check list can never read as green. `pre-commit checks` is the expected member; the value is measured from a probe PR on the fork, and an empty value forces `auto_merge_enabled = false`.
 4. A PR held in pending workflow approval is `ci_evidence_unavailable`.
+5. Any post-PR criterion (§10) must be satisfied on the head, alongside the conclusion rule. `terminal/alert_still_present` and `alert_analysis_wait_s` expiry (`terminal/criterion_not_met`) block the merge exactly as `ci_evidence_unavailable` does.
 
-`docker`, `showtime-trigger` and `check-python-deps` need real repository secrets and are never members of `required_contexts_min`; if they run and conclude `failure` they are a genuine `ci_check_failed`. Nothing merges on `ci_evidence_unavailable` or `ci_check_failed`. There is **no** merge-time re-run of the suite — CI covers
-that. The pipeline merges only when `merge_mode = auto`, `auto_merge_enabled` and this gate all hold; the merge is then re-read from the fork and `merged_at` recorded.
+`docker`, `showtime-trigger` and `check-python-deps` need real repository secrets and are never members of `required_contexts_min`; if they run and conclude `failure` they are a genuine `ci_check_failed`. Nothing merges on `ci_evidence_unavailable`, `ci_check_failed` or an unsatisfied post-PR criterion. There is **no**
+merge-time re-run of the suite — CI covers that. The pipeline merges only when `merge_mode = auto`, `auto_merge_enabled` and this gate all hold; the merge is then re-read from the fork and `merged_at` recorded.
 
 ## 13. Failure and recovery
 
