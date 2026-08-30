@@ -125,14 +125,90 @@ def test_a_rerun_that_records_its_diff_review_converges() -> None:
 
 
 def test_two_iterations_without_a_diff_review_escalate() -> None:
-    """§12.1 — an incomplete diff review is never retried indefinitely."""
+    """§12.1 — an unreviewed diff escalates as `diff_review_incomplete`, not a disagreement.
+
+    A LIVE run terminated every candidate at `iterations=0` with `disagreement_unresolved`
+    when no review had happened at all: there was no disagreement to read, and the reason
+    code hid the fact that the reviewer never looked at the implementer's diff.
+    """
     incomplete = iteration(diff_reviewed=False)
 
     result = run_review_loop(PipelineConfig(), incomplete, lambda _ordinal: incomplete)
 
     assert result.converged is False
-    assert result.reason is ReasonCode.DISAGREEMENT_UNRESOLVED
+    assert result.reason is ReasonCode.DIFF_REVIEW_INCOMPLETE
     assert result.needs_human_review is True
+
+
+def test_an_implementer_test_edit_outranks_an_incomplete_diff_review() -> None:
+    """§9.2/§12.1 — the structural violation is reported ahead of the missing review."""
+    violation = iteration(
+        diff_reviewed=False,
+        findings=(
+            ReviewFinding(
+                FindingSeverity.BLOCKING,
+                None,
+                "implementer edited tests/x.py",
+                reason=ReasonCode.IMPLEMENTER_TEST_EDIT,
+            ),
+        ),
+    )
+
+    result = run_review_loop(PipelineConfig(), violation, lambda _ordinal: violation)
+
+    assert result.reason is ReasonCode.IMPLEMENTER_TEST_EDIT
+
+
+def test_an_incomplete_diff_review_outranks_an_unresolved_major() -> None:
+    """§12.1 — an unresolved major says nothing while the diff is still unreviewed."""
+    unreviewed_major = iteration(
+        diff_reviewed=False,
+        findings=(ReviewFinding(FindingSeverity.MAJOR, "AC-1", "still red"),),
+    )
+
+    result = run_review_loop(PipelineConfig(), unreviewed_major, lambda _ordinal: unreviewed_major)
+
+    assert result.reason is ReasonCode.DIFF_REVIEW_INCOMPLETE
+
+
+def test_a_reviewed_unresolved_major_still_reports_a_disagreement() -> None:
+    """§12.1 — with `diff_reviewed` true the reviewer really did disagree."""
+    reviewed_major = iteration(
+        diff_reviewed=True,
+        findings=(ReviewFinding(FindingSeverity.MAJOR, "AC-1", "unresolved"),),
+    )
+
+    result = run_review_loop(
+        PipelineConfig(iteration_cap=1), reviewed_major, lambda _ordinal: reviewed_major
+    )
+
+    assert result.converged is False
+    assert result.reason is ReasonCode.DISAGREEMENT_UNRESOLVED
+
+
+def test_an_incomplete_diff_review_counts_as_an_unresolved_major() -> None:
+    """§13 — an unreviewed diff is as blocking as a disagreement: nothing vouched for it."""
+    incomplete = iteration(diff_reviewed=False)
+
+    result = run_review_loop(PipelineConfig(), incomplete, lambda _ordinal: incomplete)
+    applied = apply_review_result(eligible_candidate(), result)
+
+    assert applied.reason is ReasonCode.DIFF_REVIEW_INCOMPLETE
+    assert applied.state is CandidateState.TERMINAL
+    assert applied.unresolved_major is True
+    assert applied.auto_merge_eligible is False
+
+
+def test_the_terminal_row_carries_the_disagreement_summary() -> None:
+    """§11 — the escalation report reads `disagreement_summary` off the candidate row."""
+    incomplete = iteration(diff_reviewed=False, failing_test="tests/x.py::a")
+
+    result = run_review_loop(PipelineConfig(), incomplete, lambda _ordinal: incomplete)
+    applied = apply_review_result(eligible_candidate(), result)
+
+    assert applied.disagreement_summary == result.disagreement_summary
+    assert applied.disagreement_summary is not None
+    assert "reviewer diff review incomplete" in applied.disagreement_summary
 
 
 def test_role_payloads_normalize_into_one_loop_input() -> None:

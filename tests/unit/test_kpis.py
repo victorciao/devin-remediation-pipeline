@@ -20,16 +20,19 @@ from pipeline.observability.kpis import (
 from pipeline.observability.report import render_run_report
 from pipeline.schemas import (
     Action,
+    BaselineStatus,
     Candidate,
     CandidateState,
     EventRecord,
     Lane,
     ReasonCode,
+    RedBaselineResult,
     RetryDecision,
     Tier,
 )
 from tests.factories import codeql_candidate, lane2_candidate
 
+VALID_RED_BASELINE = RedBaselineResult(status=BaselineStatus.VALID)
 MERGE_RATE_ALERT = "merge_rate_alert"
 SESSION_FAILURE_ALERT = "session_failure_alert"
 
@@ -334,11 +337,27 @@ def test_na_burndown_renders_as_na_in_the_report(
     assert ReasonCode.CAPABILITY_UNAVAILABLE.value in markdown
 
 
+def role_loop(candidate_id: str, **fields: Any) -> dict[str, Any]:  # noqa: ANN401
+    """The three session ids that mark a candidate as having entered the role loop."""
+    return {
+        "planner_session_id": f"devin-planner-{candidate_id}",
+        "implementer_session_id": f"devin-implementer-{candidate_id}",
+        "reviewer_session_id": f"devin-reviewer-{candidate_id}",
+        **fields,
+    }
+
+
 def test_rollup_reports_the_plan_mandated_rates(simulate_config: PipelineConfig) -> None:
     """§11 — the rollup exposes every §11 rate, not just the alerting ones."""
     events = [
-        merged("c1", action=Action.OPEN_PR, test_added=True),
-        event("c2", lane=Lane.SKIPPED_TESTS, action=Action.OPEN_PR, test_added=False),
+        merged("c1", action=Action.OPEN_PR, test_added=True, **role_loop("c1")),
+        event(
+            "c2",
+            lane=Lane.SKIPPED_TESTS,
+            action=Action.OPEN_PR,
+            test_added=False,
+            **role_loop("c2"),
+        ),
     ]
 
     rollup = compute_kpis([codeql_candidate()], events, {}, simulate_config)
@@ -356,6 +375,143 @@ def test_rollup_reports_the_plan_mandated_rates(simulate_config: PipelineConfig)
     ):
         assert key in rollup
     assert rollup["test_inclusion_rate"] == 0.5
+
+
+def test_role_loop_rates_are_denominated_over_candidates_that_entered_the_loop(
+    simulate_config: PipelineConfig,
+) -> None:
+    """§11 — a candidate gated or budget-deferred before the loop cannot dilute its rates.
+
+    The LIVE dry run entered the loop for exactly one of fifty candidates and reported
+    `criterion_coverage_rate: 0.023` and `test_inclusion_rate: 0.0`, describing the
+    forty-nine candidates that never had a planner at all.
+    """
+    events = [
+        event(
+            "codeql-1",
+            action=Action.OPEN_PR,
+            test_added=True,
+            red_baseline=VALID_RED_BASELINE,
+            **role_loop("codeql-1"),
+        ),
+        *(
+            event(
+                f"codeql-{index}",
+                action=Action.DEFERRED,
+                terminal_outcome=CandidateState.DEFERRED,
+                reason=ReasonCode.BUDGET_OVERFLOW,
+            )
+            for index in range(2, 51)
+        ),
+    ]
+
+    rollup = compute_kpis([], events, {}, simulate_config)
+
+    assert rollup["test_inclusion_rate"] == 1.0
+    assert rollup["criterion_coverage_rate"] == 1.0
+    assert rollup["verification_pass_rate"] == 1.0
+
+
+def test_role_loop_rates_are_none_when_no_candidate_entered_the_loop(
+    simulate_config: PipelineConfig,
+) -> None:
+    """§11 — an empty denominator is unknown, not a zero rate to be read as failure."""
+    events = [
+        event(
+            f"codeql-{index}",
+            action=Action.DEFERRED,
+            terminal_outcome=CandidateState.DEFERRED,
+            reason=ReasonCode.BUDGET_OVERFLOW,
+        )
+        for index in range(1, 4)
+    ]
+
+    rollup = compute_kpis([], events, {}, simulate_config)
+
+    assert rollup["test_inclusion_rate"] is None
+    assert rollup["verification_pass_rate"] is None
+
+
+def test_one_role_session_id_is_enough_to_enter_the_loop_denominator(
+    simulate_config: PipelineConfig,
+) -> None:
+    """§11 — a candidate whose planner ran but whose reviewer never did still counts."""
+    events = [
+        event(
+            "codeql-1",
+            action=Action.OPEN_PR,
+            test_added=False,
+            planner_session_id="devin-planner-codeql-1",
+        )
+    ]
+
+    rollup = compute_kpis([], events, {}, simulate_config)
+
+    assert rollup["test_inclusion_rate"] == 0.0
+
+
+def test_an_unknown_role_loop_rate_renders_as_na_not_zero(
+    simulate_config: PipelineConfig,
+) -> None:
+    """§11 — the markdown rollup distinguishes "no loop ran" from "the loop failed"."""
+    deferred = event(
+        "codeql-1",
+        action=Action.DEFERRED,
+        terminal_outcome=CandidateState.DEFERRED,
+        reason=ReasonCode.BUDGET_OVERFLOW,
+    )
+
+    markdown = render_kpi_report([], [deferred], {}, simulate_config)
+
+    assert "- **Test Inclusion Rate:** n/a" in markdown
+    assert "- **Verification Pass Rate:** n/a" in markdown
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "plan-vs-code: §11 requires an unmeasurable rate to read `n/a`, and the role-loop "
+        "denominator makes criterion coverage unmeasurable when no candidate entered the loop. "
+        "`_criterion_coverage` still returns 0.0 for an empty denominator, so a run that never "
+        "reached a planner reports zero criterion coverage as though the loop had failed."
+    ),
+)
+def test_criterion_coverage_is_unknown_when_no_candidate_entered_the_loop(
+    simulate_config: PipelineConfig,
+) -> None:
+    """§11 — criterion coverage shares the role-loop denominator with the other two rates."""
+    deferred = event(
+        "codeql-1",
+        action=Action.DEFERRED,
+        terminal_outcome=CandidateState.DEFERRED,
+        reason=ReasonCode.BUDGET_OVERFLOW,
+    )
+
+    rollup = compute_kpis([], [deferred], {}, simulate_config)
+    markdown = render_kpi_report([], [deferred], {}, simulate_config)
+
+    assert rollup["criterion_coverage_rate"] is None
+    assert "- **Criterion Coverage Rate:** n/a" in markdown
+
+
+def test_burn_down_denominators_stay_keyed_to_candidates_seen(
+    baseline: Mapping[str, Any], simulate_config: PipelineConfig
+) -> None:
+    """§11 — the role-loop denominator change does not touch burn-down accounting."""
+    candidates = [
+        codeql_candidate(candidate_id="codeql-1", state=CandidateState.PR_CREATED),
+        codeql_candidate(
+            candidate_id="codeql-2",
+            state=CandidateState.DEFERRED,
+            reason=ReasonCode.BUDGET_OVERFLOW,
+        ),
+    ]
+
+    burndown = compute_burndown(candidates, dict(baseline))
+
+    assert burndown[Lane.CODEQL].denominator == baseline["totals"]["codeql_open_alerts"]
+    assert burndown[Lane.CODEQL].completed == 0
+    assert burndown[Lane.CODEQL].remaining == baseline["totals"]["codeql_open_alerts"]
 
 
 def test_alerts_are_rendered_visibly_in_the_markdown_rollup(
@@ -588,3 +744,146 @@ def test_run_report_separates_ceiling_and_capability_deferrals() -> None:
     assert "Deferred by budget: 0" in report
     assert "Deferred by session ceiling: 1" in report
     assert "Deferred by capability/other: 1" in report
+
+
+def failed_loop_candidate(**fields: Any) -> Candidate:  # noqa: ANN401
+    """A candidate the three-session loop escalated instead of converging."""
+    return codeql_candidate(
+        candidate_id="codeql-1",
+        tier=Tier.HIGH,
+        score=70.0,
+        gate_passed=True,
+        action=Action.HUMAN_REVIEW,
+        state=CandidateState.TERMINAL,
+        reason=ReasonCode.DIFF_REVIEW_INCOMPLETE,
+        disagreement_summary="reviewer diff review incomplete",
+        head_branch="devin/codeql-1",
+        planner_session_id="devin-planner-1",
+        implementer_session_id="devin-implementer-1",
+        reviewer_session_id="devin-reviewer-1",
+        **fields,
+    )
+
+
+def test_escalated_counts_the_candidates_a_human_has_to_look_at(
+    simulate_config: PipelineConfig,
+) -> None:
+    """§11 — the rollup must say how much of the run needs a human."""
+    candidates = [
+        failed_loop_candidate(),
+        dispatched_pr_candidate(
+            "codeql-2",
+            state=CandidateState.PR_CREATED,
+            pr_number=2,
+            pr_url="https://example.invalid/pr/2",
+        ),
+    ]
+
+    rollup = compute_kpis(candidates, [], {}, simulate_config)
+
+    assert rollup["escalated"] == 1
+
+
+def test_the_escalation_section_carries_the_whole_failed_loop_trace() -> None:
+    """§11 Layer 2 — a reader must reach the three sessions from the report alone.
+
+    The LIVE dry run's report showed `Dispatched by tier: None` and `Artifact links: None`
+    with no trace at all that a three-session loop had run and escalated.
+    """
+    report = render_run_report([failed_loop_candidate()], run_id="run-1")
+
+    section = report.split("## Failed review escalation", 1)[1]
+    assert "codeql-1" in section
+    assert f"reason={ReasonCode.DIFF_REVIEW_INCOMPLETE.value}" in section
+    assert "disagreement_summary=reviewer diff review incomplete" in section
+    assert "head_branch=devin/codeql-1" in section
+    assert "planner=devin-planner-1" in section
+    assert "implementer=devin-implementer-1" in section
+    assert "reviewer=devin-reviewer-1" in section
+
+
+def test_a_converged_candidate_is_not_listed_as_escalated() -> None:
+    """§11 Layer 2 — the section is empty for a run that needed no human."""
+    candidates = [
+        dispatched_pr_candidate(
+            "codeql-1",
+            state=CandidateState.PR_CREATED,
+            pr_number=1,
+            pr_url="https://example.invalid/pr/1",
+        )
+    ]
+
+    report = render_run_report(candidates, run_id="run-1")
+
+    assert "## Failed review escalation\n- None\n" in report
+
+
+def test_an_escalated_candidate_is_accounted_for_in_the_report() -> None:
+    """§11 Layer 2 — `Unaccounted` is the report's own completeness check."""
+    report = render_run_report([failed_loop_candidate()], run_id="run-1")
+
+    assert "Unaccounted: 0" in report
+
+
+def test_a_candidate_routed_to_human_review_is_not_a_failed_loop() -> None:
+    """§11 Layer 2 — a needs-human-review PR converged; the section is for loops that did not.
+
+    Counting every `human_review` routing as an escalation made the section unreadable: a
+    high-risk PR that the loop actually agreed on looked identical to a terminated loop.
+    """
+    routed = dispatched_pr_candidate(
+        "codeql-1",
+        state=CandidateState.PR_CREATED,
+        pr_number=1,
+        pr_url="https://example.invalid/pr/1",
+        labels=["needs-human-review"],
+    )
+
+    report = render_run_report([routed], run_id="run-1")
+
+    assert "## Failed review escalation\n- None\n" in report
+    assert "Unaccounted: 0" in report
+
+
+def test_a_candidate_routed_to_human_review_is_not_counted_as_escalated(
+    simulate_config: PipelineConfig,
+) -> None:
+    """§11 — `escalated` counts terminated loops, which is what a human must pick up."""
+    routed = dispatched_pr_candidate(
+        "codeql-1",
+        state=CandidateState.PR_CREATED,
+        pr_number=1,
+        pr_url="https://example.invalid/pr/1",
+        labels=["needs-human-review"],
+    )
+
+    rollup = compute_kpis([routed], [], {}, simulate_config)
+
+    assert rollup["escalated"] == 0
+
+
+def test_the_rollup_reports_incomplete_diff_reviews_separately(
+    simulate_config: PipelineConfig,
+) -> None:
+    """§11 — a run whose reviewers never read a diff is a distinct failure from a disagreement."""
+    events = [
+        event(
+            "codeql-1",
+            action=Action.HUMAN_REVIEW,
+            terminal_outcome=CandidateState.TERMINAL,
+            reason=ReasonCode.DIFF_REVIEW_INCOMPLETE,
+            **role_loop("codeql-1"),
+        ),
+        event(
+            "codeql-2",
+            action=Action.HUMAN_REVIEW,
+            terminal_outcome=CandidateState.TERMINAL,
+            reason=ReasonCode.DISAGREEMENT_UNRESOLVED,
+            **role_loop("codeql-2"),
+        ),
+    ]
+
+    rollup = compute_kpis([], events, {}, simulate_config)
+
+    assert rollup["diff_review_incomplete_rate"] == 0.5
+    assert rollup["disagreement_unresolved_rate"] == 0.5
