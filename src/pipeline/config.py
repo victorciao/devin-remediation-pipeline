@@ -396,7 +396,7 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
             "RESERVATION_LEASE_S",
         }:
             values[field_name] = _parse_float(field_name, raw_value)
-        elif name in {"MAJOR_ONLY_REQUIRES_HUMAN", "AUTO_MERGE_ENABLED", "HAS_ISSUES"}:
+        elif name in {"AUTO_MERGE_ENABLED", "HAS_ISSUES"}:
             values[field_name] = _parse_bool(raw_value)
         else:
             values[field_name] = (

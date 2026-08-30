@@ -102,6 +102,7 @@ class OrchestrationResult:
     reviewer: RoleRun
     review: ReviewLoopResult | None = None
     phase_b_protocol_violation: str | None = None
+    phase_b_exchanges: int = 0
 
 
 def validated_diff_review(
@@ -149,6 +150,23 @@ def _candidate_diff_review_matches(
     )
 
 
+def _validated_diff_review_head(
+    result: OrchestrationResult,
+    candidate: Candidate | None,
+) -> str | None:
+    """Return the head from an already validated candidate diff review."""
+    if not _candidate_diff_review_matches(result, candidate):
+        return None
+    reviewer_payload = result.reviewer.snapshot.payload.get("structured_output")
+    if not isinstance(reviewer_payload, Mapping):
+        return None
+    value = reviewer_payload.get("diff_reviewed")
+    if not isinstance(value, Mapping):
+        return None
+    head_sha = value.get("head_sha")
+    return head_sha if isinstance(head_sha, str) else None
+
+
 class SessionCeilingError(RuntimeError):
     """Raised when a run exceeds its configured session or cost ceiling."""
 
@@ -179,6 +197,10 @@ class DiffReviewIncompleteError(SessionMessageError):
     """Raised when one reviewer session exhausts its phase-B exchange."""
 
     terminal = True
+
+    def __init__(self, message: str, *, iterations: int = 0) -> None:
+        super().__init__(message)
+        self.iterations = iterations
 
 
 class PhaseBCorrelationTimeoutError(TimeoutError):
@@ -882,12 +904,14 @@ class RuntimeOrchestrator:
 
         def iteration_from(result: OrchestrationResult) -> ReviewIteration:
             nonlocal candidate
+            reviewed_head_sha = _validated_diff_review_head(result, candidate)
             iteration = review_iteration_from_payload(
                 output(result.planner),
                 output(result.reviewer),
                 output(result.implementer),
                 diff_reviewed=_candidate_diff_review_matches(result, candidate),
             )
+            iteration = replace(iteration, reviewed_head_sha=reviewed_head_sha)
             if candidate is not None and candidate.head_sha is not None:
                 iteration = replace(iteration, prior_head_sha=candidate.head_sha)
             implementer_payload = output(result.implementer)
@@ -1040,6 +1064,9 @@ class RuntimeOrchestrator:
                     pre_fix_signature=iteration.pre_fix_signature,
                     fix_rationale=iteration.fix_rationale,
                     diff_reviewed=diff_reviewed,
+                    reviewed_head_sha=(
+                        _validated_diff_review_head(result, candidate) if diff_reviewed else None
+                    ),
                     red_result=iteration.red_result,
                     prior_head_sha=iteration.prior_head_sha,
                 )
@@ -1047,6 +1074,7 @@ class RuntimeOrchestrator:
 
         phase_b_attempted: set[str] = set()
         phase_b_protocol_violation: list[str | None] = [None]
+        phase_b_exchanges = [0]
 
         def phase_b(result: OrchestrationResult) -> OrchestrationResult:
             nonlocal candidate
@@ -1106,6 +1134,7 @@ class RuntimeOrchestrator:
                 raise PlannerOutputError("missing reviewer phase-B prompt factory")
             phase_b_attempted.add(reviewer_session_id)
             prompt = phase_b_renderer(committed_diff)
+            phase_b_exchanges[0] += 1
             if self._client.config.mode is Mode.SIMULATE:
                 self._client.send_message(reviewer_session_id, prompt)
                 return simulation_result(result, candidate) if candidate is not None else result
@@ -1144,6 +1173,7 @@ class RuntimeOrchestrator:
                 + ". Return the required object verbatim, including the exact head_sha and "
                 "every changed path in files_read."
             )
+            phase_b_exchanges[0] += 1
             corrective_response = self._client.send_message(reviewer_session_id, corrective)
             corrected = self._client.poll_session_after_message(
                 SessionRole.REVIEWER,
@@ -1155,7 +1185,8 @@ class RuntimeOrchestrator:
             if not _candidate_diff_review_matches(final, candidate):
                 raise DiffReviewIncompleteError(
                     f"reviewer phase-B response remained invalid after corrective exchange: "
-                    f"{reviewer_session_id}"
+                    f"{reviewer_session_id}",
+                    iterations=min(phase_b_exchanges[0], self._client.config.iteration_cap),
                 )
             return final
 
@@ -1201,6 +1232,7 @@ class RuntimeOrchestrator:
             current.reviewer,
             review,
             phase_b_protocol_violation[0],
+            min(phase_b_exchanges[0], self._client.config.iteration_cap),
         )
 
 

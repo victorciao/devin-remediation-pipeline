@@ -274,6 +274,7 @@ class Candidate(StrictModel):
     head_sha: str | None = None
     reviewed_head_sha: str | None = None
     reserved_at: float | None = Field(default=None, ge=0)
+    reserved_by_run_id: str | None = None
     artifact_simulated: bool = False
     marker_search_outcome: str | None = None
     unresolved_major: bool = False

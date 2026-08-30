@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from pipeline.config import Mode, PipelineConfig
+from pipeline.config import DEFAULT_SESSION_TIMEOUT_S, Mode, PipelineConfig
 from pipeline.observability.events import EventLog, append_candidate_events
 from pipeline.observability.kpis import write_kpi_report
 from pipeline.observability.report import write_run_report
@@ -44,7 +44,7 @@ def render_run_artifacts(
     events_path = output_dir / "reports" / "events.jsonl"
     store = CandidateStateStore(
         state_path,
-        reservation_lease_s=config.reservation_lease_s or 16_200.0,
+        reservation_lease_s=config.reservation_lease_s or 3 * DEFAULT_SESSION_TIMEOUT_S,
         artifact_simulated=config.mode is Mode.SIMULATE,
     )
     rendered_candidates = [

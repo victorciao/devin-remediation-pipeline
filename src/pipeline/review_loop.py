@@ -56,6 +56,7 @@ class ReviewIteration:
     pre_fix_signature: str | None = None
     fix_rationale: str | None = None
     diff_reviewed: bool = False
+    reviewed_head_sha: str | None = None
     red_result: RedBaselineResult | None = None
     prior_head_sha: str | None = None
 
@@ -73,6 +74,7 @@ class ReviewLoopResult:
     needs_human_review: bool = False
     red_result: RedBaselineResult | None = None
     diff_reviewed: bool = False
+    reviewed_head_sha: str | None = None
 
 
 def _criterion_findings(iteration: ReviewIteration) -> list[ReviewFinding]:
@@ -153,6 +155,7 @@ def evaluate_review_iteration(iteration: ReviewIteration) -> ReviewLoopResult | 
             reviewer_only=True,
             red_result=iteration.red_result,
             diff_reviewed=iteration.diff_reviewed,
+            reviewed_head_sha=iteration.reviewed_head_sha,
         )
     if iteration.red_baseline is BaselineStatus.STALE_SKIP:
         findings.append(
@@ -191,6 +194,7 @@ def evaluate_review_iteration(iteration: ReviewIteration) -> ReviewLoopResult | 
             state=CandidateState.CONVERGED,
             red_result=iteration.red_result,
             diff_reviewed=iteration.diff_reviewed,
+            reviewed_head_sha=iteration.reviewed_head_sha,
         )
     return None
 
@@ -217,6 +221,7 @@ def run_review_loop(
                     needs_human_review=True,
                     red_result=iteration.red_result,
                     diff_reviewed=iteration.diff_reviewed,
+                    reviewed_head_sha=iteration.reviewed_head_sha,
                 )
             if incomplete_attempts >= 1:
                 return ReviewLoopResult(
@@ -228,6 +233,7 @@ def run_review_loop(
                     needs_human_review=True,
                     red_result=iteration.red_result,
                     diff_reviewed=iteration.diff_reviewed,
+                    reviewed_head_sha=iteration.reviewed_head_sha,
                 )
             incomplete_attempts += 1
             iteration = rerun(ordinal)
@@ -243,6 +249,7 @@ def run_review_loop(
                     needs_human_review=True,
                     red_result=iteration.red_result,
                     diff_reviewed=iteration.diff_reviewed,
+                    reviewed_head_sha=iteration.reviewed_head_sha,
                 )
             reauthor_attempts += 1
         decision = evaluate_review_iteration(iteration)
@@ -256,6 +263,7 @@ def run_review_loop(
                 reviewer_only=decision.reviewer_only,
                 red_result=iteration.red_result,
                 diff_reviewed=iteration.diff_reviewed,
+                reviewed_head_sha=iteration.reviewed_head_sha,
             )
         if ordinal == config.iteration_cap or rerun is None:
             return ReviewLoopResult(
@@ -267,6 +275,7 @@ def run_review_loop(
                 needs_human_review=True,
                 red_result=iteration.red_result,
                 diff_reviewed=iteration.diff_reviewed,
+                reviewed_head_sha=iteration.reviewed_head_sha,
             )
         iteration = rerun(ordinal + 1)
         ordinal += 1

@@ -31,6 +31,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from pipeline.config import (
+    DEFAULT_SESSION_TIMEOUT_S,
     AlertSource,
     CiEvidenceMode,
     ConfigError,
@@ -244,17 +245,24 @@ def _publish_live(
             state_store.append(deferred)
             published.append(deferred)
             continue
-        if persisted is None:
-            reservation = candidate.model_copy(
-                update={"state": CandidateState.DISPATCHING, "base_sha": resolved_base_sha}
-            )
-            if state_store.append_if_new_artifact(reservation):
-                persisted = state_store.resume(candidate.candidate_id) or reservation
-            else:
-                persisted = state_store.resume(candidate.candidate_id)
+        reservation_holder: Candidate | None = None
+        reservation = candidate.model_copy(
+            update={
+                "state": CandidateState.DISPATCHING,
+                "base_sha": resolved_base_sha,
+                "reserved_by_run_id": run_id,
+            }
+        )
+        if state_store.append_if_new_artifact(reservation, run_id=run_id):
+            persisted = state_store.resume(candidate.candidate_id) or reservation
+        elif state_store.reservation_reason == "reservation_held":
+            reservation_holder = state_store.resume(candidate.candidate_id)
+            persisted = None
+        else:
+            persisted = state_store.resume(candidate.candidate_id)
         if persisted is None:
             reservation_reason = state_store.reservation_reason
-            deferred = candidate.model_copy(
+            deferred = (reservation_holder or candidate).model_copy(
                 update={
                     "state": CandidateState.DEFERRED,
                     "reason": (
@@ -284,6 +292,7 @@ def _publish_live(
                 "head_sha": candidate.head_sha or persisted.head_sha,
                 "reviewed_head_sha": persisted.reviewed_head_sha,
                 "reserved_at": persisted.reserved_at,
+                "reserved_by_run_id": persisted.reserved_by_run_id,
                 "reason": persisted.reason,
                 "reason_detail": persisted.reason_detail,
                 "artifact_degraded": persisted.artifact_degraded,
@@ -321,10 +330,8 @@ def _publish_live(
                 validate_issue_body(issue_body, candidate)
             if candidate.action is Action.OPEN_ISSUE:
                 for label in requested_labels:
-                    if client.ensure_label(label):
-                        labels.append(label)
-                    else:
-                        label_failures.append(label)
+                    client.ensure_label(label)
+                    labels.append(label)
         except (ArtifactValidationError, ArtifactUnavailableError, HttpTransportError) as exc:
             latest = state_store.resume(candidate.candidate_id) or candidate
             reason = getattr(exc, "reason", None)
@@ -427,10 +434,8 @@ def _publish_live(
             continue
         try:
             for label in requested_labels:
-                if client.ensure_label(label):
-                    labels.append(label)
-                else:
-                    label_failures.append(label)
+                client.ensure_label(label)
+                labels.append(label)
         except ArtifactUnavailableError as exc:
             deferred = candidate.model_copy(
                 update={
@@ -761,10 +766,8 @@ def _publish_live(
             continue
         if ci_reason_holder[0] is not None and "needs-human-review" not in labels:
             try:
-                if client.ensure_label("needs-human-review"):
-                    labels.append("needs-human-review")
-                else:
-                    label_failures.append("needs-human-review")
+                client.ensure_label("needs-human-review")
+                labels.append("needs-human-review")
             except ArtifactUnavailableError as exc:
                 label_reason_holder[0] = getattr(
                     exc, "reason", ReasonCode.LABEL_CAPABILITY_UNAVAILABLE
@@ -1040,6 +1043,7 @@ def _prepare_live_candidate(
     client: GitHubClient,
     base_sha: str,
     head_branch: str,
+    run_id: str,
 ) -> Candidate:
     """Reserve and create a candidate branch before any role session starts."""
     persisted = state_store.resume(candidate.candidate_id)
@@ -1120,32 +1124,35 @@ def _prepare_live_candidate(
             "head_branch": branch,
         }
     )
-    if persisted is None:
-        if not state_store.append_if_new_artifact(prepared):
-            resumed = state_store.resume(candidate.candidate_id)
-            if resumed is None:
-                deferred = candidate.model_copy(
-                    update={
-                        "state": CandidateState.DEFERRED,
-                        "reason": (
-                            ReasonCode.RESERVATION_HELD
-                            if state_store.reservation_reason == "reservation_held"
-                            else ReasonCode.CAPABILITY_UNAVAILABLE
-                        ),
-                        "reason_detail": state_store.reservation_reason,
-                    }
-                )
-                state_store.append(deferred)
-                return deferred
-            prepared = resumed.model_copy(
+    prepared = prepared.model_copy(update={"reserved_by_run_id": run_id})
+    reservation_holder = persisted
+    if state_store.append_if_new_artifact(prepared, run_id=run_id):
+        persisted = state_store.resume(candidate.candidate_id) or prepared
+        prepared = persisted
+    else:
+        resumed = state_store.resume(candidate.candidate_id)
+        if state_store.reservation_reason == "reservation_held":
+            resumed = None
+        if resumed is None:
+            deferred = (reservation_holder or candidate).model_copy(
                 update={
-                    "base_sha": resumed.base_sha or base_sha,
-                    "head_branch": resumed.head_branch or branch,
+                    "state": CandidateState.DEFERRED,
+                    "reason": (
+                        ReasonCode.RESERVATION_HELD
+                        if state_store.reservation_reason == "reservation_held"
+                        else ReasonCode.CAPABILITY_UNAVAILABLE
+                    ),
+                    "reason_detail": state_store.reservation_reason,
                 }
             )
-    else:
-        if persisted.model_dump(mode="json") != prepared.model_dump(mode="json"):
-            state_store.append(prepared)
+            state_store.append(deferred)
+            return deferred
+        prepared = resumed.model_copy(
+            update={
+                "base_sha": resumed.base_sha or base_sha,
+                "head_branch": resumed.head_branch or branch,
+            }
+        )
     try:
         client.create_branch(prepared.head_branch or branch, prepared.base_sha or base_sha)
     except HttpTransportError as exc:
@@ -1298,7 +1305,7 @@ def run_once(
         / ("candidates-live.jsonl" if config.mode is Mode.LIVE else "candidates.jsonl"),
         marker_search=marker_search,
         require_marker_proof=config.mode is Mode.LIVE,
-        reservation_lease_s=config.reservation_lease_s or 16_200.0,
+        reservation_lease_s=config.reservation_lease_s or 3 * DEFAULT_SESSION_TIMEOUT_S,
         artifact_simulated=config.mode is Mode.SIMULATE,
     )
     valid = baseline.get("baseline_valid_lanes")
@@ -1445,6 +1452,7 @@ def run_once(
                 client=live_client,
                 base_sha=resolved_base_sha,
                 head_branch=head_branch,
+                run_id=run_id,
             )
             if prepared.pr_url is not None or prepared.state is CandidateState.DEFERRED:
                 reviewed.append(prepared)
@@ -1617,6 +1625,10 @@ def run_once(
                         )
                         else None
                     ),
+                    "iterations": max(
+                        latest.iterations,
+                        getattr(exc, "iterations", latest.iterations),
+                    ),
                 }
             )
             state_store.append(updated)
@@ -1647,7 +1659,10 @@ def run_once(
                 "planner_session_id": result.planner.snapshot.session_id,
                 "implementer_session_id": result.implementer.snapshot.session_id,
                 "reviewer_session_id": result.reviewer.snapshot.session_id,
-                "iterations": result.review.iterations if result.review is not None else 0,
+                "iterations": max(
+                    result.review.iterations if result.review is not None else 0,
+                    result.phase_b_exchanges,
+                ),
                 "planner_criteria": planner_criteria_ids,
                 "head_sha": pinned_head_sha[0] or candidate.head_sha,
                 "phase_b_protocol_violation": result.phase_b_protocol_violation,
@@ -1683,11 +1698,8 @@ def run_once(
                     "reviewed_head_sha": (
                         candidate.reviewed_head_sha
                         or (
-                            reviewer_output.get("diff_reviewed", {}).get("head_sha")
-                            if isinstance(reviewer_output.get("diff_reviewed"), Mapping)
-                            and isinstance(
-                                reviewer_output.get("diff_reviewed", {}).get("head_sha"), str
-                            )
+                            result.review.reviewed_head_sha
+                            if result.review is not None and result.review.diff_reviewed
                             else None
                         )
                     ),

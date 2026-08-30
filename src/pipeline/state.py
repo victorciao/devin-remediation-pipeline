@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from pipeline.config import DEFAULT_SESSION_TIMEOUT_S
 from pipeline.dedupe import find_drift_match
 from pipeline.schemas import Candidate, CandidateState
 
@@ -129,7 +130,7 @@ class CandidateStateStore:
         *,
         marker_search: Callable[[str], MarkerArtifact | None] | None = None,
         require_marker_proof: bool = False,
-        reservation_lease_s: float = 16_200.0,
+        reservation_lease_s: float = 3 * DEFAULT_SESSION_TIMEOUT_S,
         artifact_simulated: bool = False,
     ) -> None:
         self._path = path
@@ -289,8 +290,13 @@ class CandidateStateStore:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
             self._append_locked(candidate)
 
-    def append_if_new_artifact(self, candidate: Candidate) -> bool:
-        """Atomically reserve a candidate before the first artifact write."""
+    def append_if_new_artifact(
+        self,
+        candidate: Candidate,
+        *,
+        run_id: str | None = None,
+    ) -> bool:
+        """Reserve a candidate unless an artifact or another live claim exists."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self.reservation_reason = None
         lock_path = self._path.with_suffix(self._path.suffix + ".lock")
@@ -317,13 +323,20 @@ class CandidateStateStore:
                 age = now - current.reserved_at
                 if age < 0:
                     # A future timestamp is treated as an unexpired lease.
-                    self.reservation_reason = "reservation_held"
-                    return False
-                if age < self._reservation_lease_s:
+                    if current.reserved_by_run_id != run_id or run_id is None:
+                        self.reservation_reason = "reservation_held"
+                        return False
+                elif age < self._reservation_lease_s and (
+                    current.reserved_by_run_id != run_id or run_id is None
+                ):
                     self.reservation_reason = "reservation_held"
                     return False
             reserved = candidate.model_copy(
-                update={"reserved_at": now, "state": CandidateState.DISPATCHING}
+                update={
+                    "reserved_at": now,
+                    "reserved_by_run_id": run_id,
+                    "state": CandidateState.DISPATCHING,
+                }
             )
             self._append_locked(reserved)
             return True
