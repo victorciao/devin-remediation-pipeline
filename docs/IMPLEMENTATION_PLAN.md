@@ -56,8 +56,7 @@ A run is triggered by an event on the fork, never by lane state. Every run enume
 - **Weekly cron.** A LANE 3 candidate can become eligible with no code change at all, because a `@deprecated` symbol crosses the EOL threshold when the release number moves. It is also the safety net for a missed event.
 - **`workflow_dispatch`** for a manual LIVE run.
 
-All three are LIVE entry points. **SIMULATE is a mode, not a trigger**: `docker compose run --rm pipeline`, locally, no credentials, no writes, `sarif_file` input, and never wired to `workflow_dispatch` — a manual button whose behaviour depends on a mode flag is how a LIVE run gets fired by accident. A scheduled SIMULATE smoke
-test belongs in this repo's own CI, which §17 covers.
+All three are LIVE entry points. SIMULATE is invoked as `docker compose run --rm pipeline`, locally, no credentials, no writes, `sarif_file` input. A scheduled SIMULATE smoke test belongs in this repo's own CI, which §17 covers.
 
 ## 6. Candidate lifecycle (single state table)
 
@@ -154,10 +153,10 @@ the event log.
 2. At the candidate head, run the same nodeid: not green → `terminal/green_not_reached`. Both per-item outcome vectors are recorded.
 
 **LANE 1 — the alert is gone at head and nothing regressed.** The normal path is `lane1_alert_check = pr_ref_alerts`: the fork's `codeql-analysis` runs on `pull_request`, so alert absence at the candidate head is read from the alerts for the PR ref once that analysis completes, bounded by `alert_analysis_wait_s`; expiry settles
-`terminal/criterion_not_met`, never a pass. `codeql_cli`, a local CodeQL run over the touched paths, is the documented offline alternative. Either way the alert's `stable_locator` must be absent → otherwise `terminal/alert_still_present`. The suite covering `suite_scope` must pass at head → otherwise `terminal/suite_regressed`.
-A regression test is required when the alert class admits one; when it does not — `py/overly-large-range` is such a class — `test_nodeid` is null, the row records why, and alert-absence plus suite-green is the whole criterion. Discovery reads the analysis at `base_sha` and verification reads the analysis at the candidate head;
-the orchestrator reads both itself and never accepts the session's account of either. Under `pr_ref_alerts` the candidate therefore reaches a PR on the strength of the session's fix plus suite-green, with alert-absence confirmed afterwards — a deliberate consequence of GitHub owning the scan, and it costs nothing that matters
-because no merge happens without that confirmation.
+`terminal/criterion_not_met`, never a pass. `codeql_cli` runs CodeQL over the touched paths locally instead, for when alerts cannot be read from the fork. Either way the alert's `stable_locator` must be absent → otherwise `terminal/alert_still_present`. The suite covering `suite_scope` must pass at head → otherwise
+`terminal/suite_regressed`. A regression test is required when the alert class admits one; when it does not — `py/overly-large-range` is such a class — `test_nodeid` is null, the row records why, and alert-absence plus suite-green is the whole criterion. Discovery reads the analysis at `base_sha` and verification reads the
+analysis at the candidate head; the orchestrator reads both itself and never accepts the session's account of either. Under `pr_ref_alerts` the candidate therefore reaches a PR on the strength of the session's fix plus suite-green, with alert-absence confirmed afterwards — a deliberate consequence of GitHub owning the scan, and
+it costs nothing that matters because no merge happens without that confirmation.
 
 **LANE 3 — the symbol is gone and nothing references it.** At head the `module:qualname` must no longer resolve and the gate's `no_internal_callers_and_no_override_surface` check, re-run at head, must hold → otherwise `terminal/symbol_still_referenced`. The suite covering `suite_scope` must pass at head → otherwise
 `terminal/suite_regressed`. No new test is required; a deletion's evidence is that nothing broke.
@@ -250,7 +249,7 @@ or a fork match — never by a state value alone. A per-candidate failure defers
 | `eol_major_lag` / `version_source` | `2` / `.github/ISSUE_TEMPLATE/bug-report.yml` | drift-tested; no concrete release → startup error |
 | `lane2_class_breadth_max` | `5` | **safety-relevant** — §7 breadth ceiling |
 | `alert_source` / `alert_fixture_path` | `code_scanning_api` / `fixtures/codeql_alerts.json` | §7 — `code_scanning_api` reads the fork's alerts for `master` and requires the latest analysis to sit on `base_sha`; a mismatch or missing analysis is a startup error under LIVE; `sarif_file` is the SIMULATE input |
-| `lane1_alert_check` / `alert_analysis_wait_s` / `ci_evidence_mode` | `pr_ref_alerts` / `2700` / `local` | §10 — how alert absence and suite-green are observed. `pr_ref_alerts` reads the alerts for the PR ref once the fork's `codeql-analysis` has analysed that head, bounded by the wait; expiry settles `terminal/criterion_not_met`. `codeql_cli` is the offline alternative, a local CodeQL run over the touched paths |
+| `lane1_alert_check` / `alert_analysis_wait_s` / `ci_evidence_mode` | `pr_ref_alerts` / `2700` / `local` | §10 — how alert absence and suite-green are observed. `pr_ref_alerts` reads the alerts for the PR ref once the fork's `codeql-analysis` has analysed that head, bounded by the wait; expiry settles `terminal/criterion_not_met`. `codeql_cli` runs CodeQL locally over the touched paths |
 | `required_contexts_min` / `ci_wait_timeout_s` | probe-measured (`pre-commit checks`) / `5400` | **safety-relevant** — §12; must be present and successful on the head; empty forces `auto_merge_enabled = false`; expiry → `ci_evidence_unavailable` |
 | `issue_sink` / `has_issues` / `marker_search_enabled` | `github` / probed / `true` | **safety-relevant** — issue publication for both tiers; issues disabled on the fork or search unavailable → defer, never write, and a high-tier candidate is deferred before its session is created |
 | `auto_merge_enabled` | `false` | **safety-relevant** — never sufficient alone: `merge_mode = auto` and the §12 gate must also hold |
