@@ -281,7 +281,8 @@ Also configurable: target `owner/repo`, GitHub token, Devin API key, rubrics, te
 
 ### 17.1 Working gate — the system is declared working here
 
-This gate is finite: no review round and no further finding widens it, and anything discovered after it is a listed follow-up, not a reason to reopen it.
+This is the acceptance gate for declaring the system working end to end, and its contents are fixed in advance: "finite" means only that no criterion may be added to it mid-flight, so reaching it cannot be deferred by widening it. It says nothing about code review. §3 is untouched and still binding: every task, including the
+ones that make up this gate, ships only on convergence plus green CI on this repo, and a blocking or major finding against code still in flight is resolved before that code ships. A finding that arrives after the gate has been met is a listed follow-up (§17.2) rather than a reason to reopen the gate.
 
 - One real Python candidate goes discovery → tracking issue → session → orchestrator-verified criterion → PR closing that issue → CI green → merged on `victorciao/superset`, with issue URL, PR URL, merge commit and `session_id` recorded on its state row and in `RESULTS.md`, and the issue closed by the merge.
 - Crash recovery is proven by **fault injection**, not inspection: the process is `SIGKILL`ed immediately before and immediately after the PR-creating write, each run is resumed to completion, and afterwards **exactly one PR exists for that candidate** on the fork.
