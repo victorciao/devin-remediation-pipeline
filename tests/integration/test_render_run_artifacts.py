@@ -27,11 +27,22 @@ from pipeline.state import CandidateStateStore
 from tests.conftest import FIXTURES_DIR, RUBRICS_PATH, TARGET_CHECKOUT, TEMPLATES_DIR
 from tests.factories import codeql_candidate
 from tests.fakes import FakeGitHubTransport
-from tests.known_defects import marker_absence
 
 RUN_ID = "run-1"
 SIMULATED_WORDING = "Simulated remediation for"
 LIVE_WORDING = "Remediation tracking for"
+LIVE_STATE_FILE = "candidates-live.jsonl"
+SIMULATE_STATE_FILE = "candidates.jsonl"
+ROLE_OUTPUTS: dict[str, Any] = {
+    "planner_outputs": {"codeql-pr": {"criteria": [{"id": "AC-1"}]}},
+    "implementer_outputs": {"codeql-pr": {"commands_run": ["pytest -q"]}},
+    "reviewer_outputs": {
+        "codeql-pr": {
+            "red_baseline": {"status": "valid"},
+            "green_result": {"passed": True},
+        }
+    },
+}
 
 
 def config_for(mode: Mode, **fields: Any) -> PipelineConfig:  # noqa: ANN401
@@ -57,6 +68,8 @@ def routed_pr() -> Candidate:
         pr_number=1,
         pr_url="https://example.invalid/pr/1",
         issue_url="https://example.invalid/issues/1",
+        base_sha="a" * 40,
+        head_sha="b" * 40,
     )
 
 
@@ -94,7 +107,7 @@ def budget_deferred() -> Candidate:
     )
 
 
-def render(mode: Mode, output_dir: Path) -> tuple[Path, ...]:
+def render(mode: Mode, output_dir: Path, **role_outputs: Any) -> tuple[Path, ...]:  # noqa: ANN401
     """Render one run over the same four candidates in `mode`."""
     return render_run_artifacts(
         [routed_pr(), routed_issue(), gated(), budget_deferred()],
@@ -102,6 +115,7 @@ def render(mode: Mode, output_dir: Path) -> tuple[Path, ...]:
         output_dir=output_dir,
         baseline={},
         config=config_for(mode),
+        **role_outputs,
     )
 
 
@@ -130,8 +144,12 @@ def test_live_does_not_describe_its_artifacts_as_simulated(tmp_path: Path) -> No
 
 
 def test_live_pr_bodies_do_not_claim_a_would_write_dry_run(tmp_path: Path) -> None:
-    """§14.1 — the PR body's automation metadata reports the mode that actually ran."""
-    render(Mode.LIVE, tmp_path / "out")
+    """§14.1 — the PR body's automation metadata reports the mode that actually ran.
+
+    The metadata block is the role loop's local evidence, so it is rendered from the
+    implementer and reviewer outputs the loop produced for this candidate.
+    """
+    render(Mode.LIVE, tmp_path / "out", **ROLE_OUTPUTS)
     body = (tmp_path / "out" / "reports" / "prs" / "codeql-pr.md").read_text(encoding="utf-8")
 
     assert "**mode**: live" in body
@@ -166,7 +184,7 @@ def test_simulate_run_is_still_the_same_callable(tmp_path: Path) -> None:
 def test_simulate_persists_every_candidate_it_rendered(tmp_path: Path) -> None:
     """§14.1 — SIMULATE's durable rows cover the whole enumerated set, unchanged."""
     render(Mode.SIMULATE, tmp_path / "out")
-    store = CandidateStateStore(tmp_path / "out" / "state" / "candidates.jsonl")
+    store = CandidateStateStore(tmp_path / "out" / "state" / SIMULATE_STATE_FILE)
 
     assert {row.candidate_id for row in store.rows()} == {
         "codeql-pr",
@@ -231,7 +249,7 @@ def test_a_live_run_records_a_durable_row_for_every_enumerated_candidate(
 
     events = EventLog(output_dir / "reports" / "events.jsonl").read()
     enumerated = {event.candidate_id for event in events}
-    store = CandidateStateStore(output_dir / "state" / "candidates.jsonl")
+    store = CandidateStateStore(output_dir / "state" / LIVE_STATE_FILE)
     persisted = {row.candidate_id for row in store.rows()}
 
     assert enumerated != set()
@@ -249,7 +267,7 @@ def test_live_persists_the_candidates_it_renders_no_artifact_for(tmp_path: Path)
     rediscovers it from scratch with no record of why this run declined it.
     """
     render(Mode.LIVE, tmp_path / "out")
-    store = CandidateStateStore(tmp_path / "out" / "state" / "candidates.jsonl")
+    store = CandidateStateStore(tmp_path / "out" / "state" / LIVE_STATE_FILE)
     rows = {row.candidate_id: row for row in store.rows()}
 
     assert set(rows) == {"codeql-pr", "codeql-issue", "codeql-gated", "codeql-budget"}

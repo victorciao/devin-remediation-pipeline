@@ -53,7 +53,6 @@ from pipeline.templates.render import (
 )
 from tests.conftest import RUBRICS_PATH, TEMPLATES_DIR
 from tests.factories import codeql_candidate, lane2_candidate, lane3_candidate
-from tests.known_defects import marker_absence
 
 PARENT_NODEID = "tests/integration_tests/charts/data/api_tests.py::TestPostChartDataApi"
 CHILD_NODEID = f"{PARENT_NODEID}::test_chart_data_get"

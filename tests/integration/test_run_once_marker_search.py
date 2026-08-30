@@ -31,6 +31,8 @@ from tests.conftest import FIXTURES_DIR, RUBRICS_PATH, TARGET_CHECKOUT, TEMPLATE
 from tests.fakes import FakeGitHubTransport, WriteRecord
 
 MARKER_SEARCH_FAILED = "marker_search_failed"
+LIVE_STATE_FILE = "candidates-live.jsonl"
+SIMULATE_STATE_FILE = "candidates.jsonl"
 CAPABILITY_NOTE = (
     "marker search failed; no candidate can be dispatched while dedupe capability is unavailable"
 )
@@ -62,13 +64,17 @@ class AbortedRun:
         )
 
     def rows(self) -> list[dict[str, Any]]:
-        """Every durable candidate row written before the abort."""
-        path = self.output_dir / "state" / "candidates.jsonl"
-        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+        """Every durable candidate row written before the abort, from the LIVE state file."""
+        return read_rows(self.output_dir / "state" / LIVE_STATE_FILE)
 
     def events(self) -> list[RunEventRecord]:
         """Every Layer 1 run-level event written before the abort."""
         return EventLog(self.output_dir / "reports" / "events.jsonl").read_run_events()
+
+
+def read_rows(path: Path) -> list[dict[str, Any]]:
+    """Every durable row in one state file."""
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
 
 def baseline_file(tmp_path: Path) -> Path:
@@ -101,19 +107,12 @@ def config_for(mode: Mode, **fields: Any) -> PipelineConfig:  # noqa: ANN401
     )
 
 
-@pytest.fixture(scope="module")
-def aborted_run(tmp_path_factory: pytest.TempPathFactory) -> Iterator[AbortedRun]:
-    """One LIVE run whose configured marker search fails on every lookup.
-
-    The run is executed once for the module: it is the assertions about what survived the
-    abort that differ, not the run.
-    """
-    tmp_path = tmp_path_factory.mktemp("marker-search-failure")
+def live_run(output_dir: Path, tmp_path: Path) -> AbortedRun:
+    """One LIVE `run_once` whose configured marker search fails on every lookup."""
     transport = FakeGitHubTransport(
         marker_search_error=HttpTransportError("Validation Failed", status_code=422),
         code_scanning_alerts=read_alert_fixture(FIXTURES_DIR / "codeql_alerts.json"),
     )
-    output_dir = tmp_path / "out"
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(entrypoint, "UrllibGitHubTransport", lambda: transport)
         patch.setattr(entrypoint, "UrllibDevinTransport", FakeDevinTransport)
@@ -127,7 +126,18 @@ def aborted_run(tmp_path_factory: pytest.TempPathFactory) -> Iterator[AbortedRun
                 head_branch="devin/marker-search",
                 base_branch="master",
             )
-    yield AbortedRun(output_dir, str(raised.value), transport.writes)
+    return AbortedRun(output_dir, str(raised.value), transport.writes)
+
+
+@pytest.fixture(scope="module")
+def aborted_run(tmp_path_factory: pytest.TempPathFactory) -> Iterator[AbortedRun]:
+    """One LIVE run whose configured marker search fails on every lookup.
+
+    The run is executed once for the module: it is the assertions about what survived the
+    abort that differ, not the run.
+    """
+    tmp_path = tmp_path_factory.mktemp("marker-search-failure")
+    yield live_run(tmp_path / "out", tmp_path)
 
 
 def test_a_failing_live_marker_search_aborts_the_run(aborted_run: AbortedRun) -> None:
@@ -198,6 +208,46 @@ def test_a_marker_search_failure_event_records_the_reason(aborted_run: AbortedRu
 def test_the_abort_publishes_nothing(aborted_run: AbortedRun) -> None:
     """§14.1 — fail-closed: an unavailable dedupe capability performs no remote write."""
     assert aborted_run.writes == []
+
+
+def test_a_live_run_keeps_its_durable_state_in_its_own_file(aborted_run: AbortedRun) -> None:
+    """§14.1 — LIVE state is a separate file, so it can never be read out of SIMULATE's."""
+    state = aborted_run.output_dir / "state"
+
+    assert read_rows(state / LIVE_STATE_FILE) != []
+    assert not (state / SIMULATE_STATE_FILE).exists()
+
+
+def test_simulated_rows_are_invisible_to_a_live_run(tmp_path: Path) -> None:
+    """§14.1 — a simulated publication must never satisfy a LIVE dedupe check.
+
+    Both modes share one output directory in practice, and SIMULATE stamps publication states
+    on rows for which nothing exists on the remote; reading those rows in LIVE would skip the
+    very first write of every candidate the simulation had already "published".
+    """
+    output_dir = tmp_path / "out"
+    entrypoint.run_once(
+        config=config_for(Mode.SIMULATE),
+        repo_path=TARGET_CHECKOUT,
+        output_dir=output_dir,
+        baseline_path=baseline_file(tmp_path),
+        base_sha="1" * 40,
+    )
+    simulated = read_rows(output_dir / "state" / SIMULATE_STATE_FILE)
+    dispatched_by_simulate = {
+        row["candidate_id"] for row in simulated if row["state"] == CandidateState.DISPATCHING.value
+    }
+
+    aborted = live_run(output_dir, tmp_path)
+    live_states = {row["candidate_id"]: row["state"] for row in aborted.rows()}
+
+    assert dispatched_by_simulate != set()
+    assert read_rows(output_dir / "state" / SIMULATE_STATE_FILE) == simulated
+    assert dispatched_by_simulate <= set(live_states)
+    assert all(
+        live_states[candidate_id] == CandidateState.DEFERRED.value
+        for candidate_id in dispatched_by_simulate
+    )
 
 
 def test_an_unconfigured_marker_search_completes_normally(tmp_path: Path) -> None:

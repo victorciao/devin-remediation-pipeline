@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import pytest
 
 from pipeline.config import PipelineConfig
@@ -21,6 +23,17 @@ from pipeline.schemas import (
     Candidate,
     CandidateState,
     ReasonCode,
+    RetryDecision,
+)
+from pipeline.session_client import (
+    OrchestrationResult,
+    RoleRun,
+    SessionAttempt,
+    SessionRole,
+    SessionSnapshot,
+)
+from pipeline.session_client import (
+    _candidate_diff_review_matches as candidate_diff_review,
 )
 from tests.factories import codeql_candidate, lane2_candidate
 
@@ -311,7 +324,11 @@ def test_the_terminal_row_carries_the_disagreement_summary() -> None:
 
 
 def test_role_payloads_normalize_into_one_loop_input() -> None:
-    """§12.1 — the loop consumes the three structured outputs, not free text."""
+    """§12.1 — the loop consumes the three structured outputs, not free text.
+
+    `diff_reviewed` is supplied by the caller because the authoritative, candidate-aware
+    validator owns that judgement; normalization never re-derives a weaker version of it.
+    """
     normalized = review_iteration_from_payload(
         {
             "criteria": [
@@ -334,6 +351,7 @@ def test_role_payloads_normalize_into_one_loop_input() -> None:
             },
         },
         {"files_changed": ["superset/x.py"], "criteria_addressed": ["AC-1"], "commands_run": []},
+        diff_reviewed=True,
     )
 
     assert normalized.planner_criteria == CRITERIA
@@ -343,6 +361,108 @@ def test_role_payloads_normalize_into_one_loop_input() -> None:
     assert normalized.green is True
     assert normalized.diff_reviewed is True
     assert normalized.findings[0].severity is FindingSeverity.MINOR
+
+
+REVIEW_BASE_SHA = "a" * 40
+REVIEW_HEAD_SHA = "b" * 40
+COMMITTED_DIFF = """\
+--- a/superset/x.py
++++ b/superset/x.py
+@@
+-    return None
++    return indexes
+"""
+
+
+def role_run(role: SessionRole, structured_output: Mapping[str, object]) -> RoleRun:
+    """A finished role run carrying one structured output, with no transport involved."""
+    session_id = f"{role.value}-1"
+    return RoleRun(
+        SessionAttempt(
+            role=role,
+            candidate_id="codeql-0",
+            attempt=1,
+            session_id=session_id,
+            is_new_session_raw=True,
+            retry_decision=RetryDecision.PROCEED,
+        ),
+        SessionSnapshot(session_id, "finished", {"structured_output": structured_output}),
+    )
+
+
+def diff_review(**overrides: object) -> Mapping[str, object]:
+    """A structurally complete diff-review block over the implementer's changed path."""
+    review: dict[str, object] = {
+        "base_sha": REVIEW_BASE_SHA,
+        "head_sha": REVIEW_HEAD_SHA,
+        "files_read": ["superset/x.py"],
+    }
+    review.update(overrides)
+    return review
+
+
+DIFF_REVIEW_CLAIMS: tuple[tuple[str, object], ...] = (
+    ("complete and on the candidate revision", diff_review()),
+    ("a stale head", diff_review(head_sha="c" * 40)),
+    ("a foreign base", diff_review(base_sha="d" * 40)),
+    ("a file it never read", diff_review(files_read=[])),
+    ("a blank head", diff_review(head_sha="")),
+    ("no shas at all", {"files_read": ["superset/x.py"]}),
+    ("a bare boolean", True),
+)
+
+
+@pytest.mark.parametrize(("description", "claim"), DIFF_REVIEW_CLAIMS)
+def test_the_loop_never_sees_a_diff_review_the_validator_rejects(
+    description: str,
+    claim: object,
+) -> None:
+    """§9.3/§12.1 — one validator decides, and normalization has no second opinion.
+
+    The loop's `diff_reviewed` comes from the authoritative candidate-aware validator and
+    from nowhere else: a reviewer payload the validator rejects cannot reach the loop as a
+    completed review, whatever the payload claims, and the default is fail-closed.
+    """
+    reviewer_output = {
+        "tests": [{"path": "tests/x.py", "nodeid": "tests/x.py::a", "criterion_id": "AC-1"}],
+        "red_baseline": {"observed": {"per_item_outcomes": [OBSERVED_FAILURE]}},
+        "green_result": {"passed": True},
+        "findings": [],
+        "diff_reviewed": claim,
+    }
+    implementer_output = {
+        "files_changed": ["superset/x.py"],
+        "criteria_addressed": ["AC-1"],
+        "commands_run": [],
+        "committed_diff": COMMITTED_DIFF,
+    }
+    planner_output = {"criteria": [{"id": "AC-1", "expected_failure": EXPECTED_FAILURE}]}
+    result = OrchestrationResult(
+        role_run(SessionRole.PLANNER, planner_output),
+        role_run(SessionRole.IMPLEMENTER, implementer_output),
+        role_run(SessionRole.REVIEWER, reviewer_output),
+    )
+    reviewed = codeql_candidate(base_sha=REVIEW_BASE_SHA, head_sha=REVIEW_HEAD_SHA)
+    authoritative = candidate_diff_review(result, reviewed)
+
+    assert authoritative is (claim == diff_review())
+    assert (
+        review_iteration_from_payload(
+            planner_output,
+            reviewer_output,
+            implementer_output,
+            diff_reviewed=authoritative,
+        ).diff_reviewed
+        is authoritative
+    )
+    assert (
+        review_iteration_from_payload(
+            planner_output,
+            reviewer_output,
+            implementer_output,
+        ).diff_reviewed
+        is False
+    )
 
 
 def test_a_reviewer_baseline_without_observed_items_is_invalid() -> None:

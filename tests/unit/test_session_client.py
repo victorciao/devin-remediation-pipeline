@@ -100,6 +100,17 @@ class FakeTransport:
         return self.get_responses.pop(0)
 
 
+def terminal_response(role: SessionRole, *, acu_used: float) -> Mapping[str, object]:
+    """A finished snapshot carrying the role's required output keys and its cost."""
+    required = ROLE_OUTPUT_SCHEMAS[role]["required"]
+    assert isinstance(required, list)
+    return {
+        "status_enum": "finished",
+        "acu_used": acu_used,
+        "structured_output": {str(key): [] for key in required},
+    }
+
+
 # -- §12.2 retry tri-state ---------------------------------------------------------------
 
 
@@ -345,8 +356,12 @@ def test_role_collision_raises_config_error() -> None:
     assert excinfo.value.reason is ReasonCode.ROLE_COLLISION
 
 
-def test_session_ceiling_aborts_run() -> None:
-    """§12.2 — exceeding the per-run session ceiling aborts rather than degrading silently."""
+def test_session_ceiling_refuses_the_creation_it_cannot_afford() -> None:
+    """§12.2/§13 — the ceiling is refused loudly at creation, never degraded silently.
+
+    The run-level handler turns this into one `deferred`/`session_ceiling` candidate; the
+    client's job is only to make the exhausted budget unmissable.
+    """
     client = SessionClient(PipelineConfig(), max_sessions=2)
 
     client.create_session(SessionRole.PLANNER, "cand-1", "prompt")
@@ -367,18 +382,30 @@ def test_session_ceiling_abort_is_recorded_as_a_terminal_event() -> None:
     assert recorded.terminal_outcome is not None
 
 
-def test_acu_ceiling_aborts_the_run() -> None:
-    """§12.2 — the per-run ACU ceiling is enforced on poll, not merely configured."""
-    transport = FakeTransport(get_responses=[{"status_enum": "finished", "acu_used": 40.0}])
+def test_the_acu_ceiling_defers_the_candidate_with_its_own_reason() -> None:
+    """§12.2/§13 — the per-run ACU ceiling is enforced on poll and carries `session_ceiling`.
+
+    The reason code is what makes the deferral accountable: the run-level handler appends the
+    in-flight candidate as `deferred`/`session_ceiling` and still reaches publication, so an
+    exhausted budget costs one candidate rather than the run's whole report.
+    """
+    transport = FakeTransport(
+        get_responses=[terminal_response(SessionRole.PLANNER, acu_used=40.0)],
+    )
     client = SessionClient(live_config(), transport=transport, max_total_acu=10.0)
     attempt = client.create_session(SessionRole.PLANNER, "cand-1", "prompt")
 
-    with pytest.raises(SessionCeilingError):
+    with pytest.raises(SessionCeilingError) as excinfo:
         client.poll_session(SessionRole.PLANNER, attempt.session_id)
+
+    assert excinfo.value.reason is ReasonCode.SESSION_CEILING
 
 
 def test_per_session_acu_limit_is_enforced() -> None:
-    transport = FakeTransport(get_responses=[{"status_enum": "finished", "acu_used": 90.0}])
+    """§12.2/§13 — one over-budget session defers its candidate with `session_ceiling`."""
+    transport = FakeTransport(
+        get_responses=[terminal_response(SessionRole.IMPLEMENTER, acu_used=90.0)],
+    )
     client = SessionClient(
         live_config(),
         transport=transport,
@@ -386,8 +413,10 @@ def test_per_session_acu_limit_is_enforced() -> None:
     )
     attempt = client.create_session(SessionRole.IMPLEMENTER, "cand-1", "prompt")
 
-    with pytest.raises(SessionCeilingError):
+    with pytest.raises(SessionCeilingError) as excinfo:
         client.poll_session(SessionRole.IMPLEMENTER, attempt.session_id)
+
+    assert excinfo.value.reason is ReasonCode.SESSION_CEILING
 
 
 def test_polling_times_out_instead_of_hanging() -> None:

@@ -33,6 +33,8 @@ from pipeline.schemas import (
 from tests.factories import codeql_candidate, lane2_candidate
 
 VALID_RED_BASELINE = RedBaselineResult(status=BaselineStatus.VALID)
+ISSUE_URL = "https://github.test/victorciao/superset/issues/1"
+PR_URL = "https://github.test/victorciao/superset/pull/2"
 MERGE_RATE_ALERT = "merge_rate_alert"
 SESSION_FAILURE_ALERT = "session_failure_alert"
 
@@ -270,10 +272,22 @@ def test_session_failure_at_the_ceiling_does_not_alert(simulate_config: Pipeline
 
 
 def test_burndown_vs_baseline(baseline: Mapping[str, Any], simulate_config: PipelineConfig) -> None:
-    """§11/§17 — burn-down is measured against the Phase 0c baseline totals."""
+    """§11/§17 — burn-down is measured against the Phase 0c baseline totals.
+
+    Progress is a published artifact, so each completed candidate carries the link that
+    proves the remediation reached the remote.
+    """
     candidates = [
-        codeql_candidate(candidate_id="codeql-1", state=CandidateState.CONVERGED),
-        lane2_candidate(candidate_id="lane2-1", state=CandidateState.CONVERGED),
+        codeql_candidate(
+            candidate_id="codeql-1",
+            state=CandidateState.CONVERGED,
+            issue_url=ISSUE_URL,
+        ),
+        lane2_candidate(
+            candidate_id="lane2-1",
+            state=CandidateState.CONVERGED,
+            pr_url=PR_URL,
+        ),
     ]
 
     burndown = compute_burndown(candidates, dict(baseline))
@@ -284,6 +298,23 @@ def test_burndown_vs_baseline(baseline: Mapping[str, Any], simulate_config: Pipe
     assert codeql.remaining == int(baseline["totals"]["codeql_open_alerts"]) - 1
     assert burndown[Lane.SKIPPED_TESTS].denominator == baseline["totals"]["skipped_tests"]
     assert burndown[Lane.DEPRECATIONS].denominator == baseline["totals"]["deprecations"]
+
+
+def test_a_converged_candidate_without_an_artifact_stays_remaining(
+    baseline: Mapping[str, Any],
+) -> None:
+    """§11 — convergence is not remediation; nothing burns down until an artifact exists.
+
+    A run that converged and then failed to publish (deferred dedupe, a failed write, a
+    SIMULATE row) leaves nothing on the remote, and reporting it as completed overstated
+    progress against the Phase 0c totals.
+    """
+    candidates = [codeql_candidate(candidate_id="codeql-1", state=CandidateState.CONVERGED)]
+
+    codeql = compute_burndown(candidates, dict(baseline))[Lane.CODEQL]
+
+    assert codeql.completed == 0
+    assert codeql.remaining == baseline["totals"]["codeql_open_alerts"]
 
 
 def test_suppressed_rows_count_only_in_the_denominator(
@@ -899,7 +930,7 @@ def test_the_rollup_reports_incomplete_diff_reviews_separately(
     rollup = compute_kpis([], events, {}, simulate_config)
 
     assert rollup["diff_review_incomplete_rate"] == 0.5
-    assert rollup["disagreement_unresolved_rate"] == 0.5
+    assert rollup["disagreement_unresolved_rate"] == 1.0
 
 
 def test_a_terminal_candidate_without_a_role_loop_is_not_an_escalation(

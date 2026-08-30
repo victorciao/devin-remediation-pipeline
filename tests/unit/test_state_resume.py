@@ -9,6 +9,7 @@ why the decision table is pinned directly here *and* asserted to be reached thro
 from __future__ import annotations
 
 import inspect
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -23,29 +24,33 @@ from pipeline.schemas import Candidate, CandidateState, ReasonCode
 from pipeline.state import (
     CandidateStateStore,
     MarkerArtifact,
+    MarkerSearchOutcome,
     ResumeAction,
     decide_resume,
     github_marker_search,
     has_local_artifact,
 )
-from tests.deadline import Deadlock, within_deadline
+from tests.deadline import within_deadline
 from tests.factories import codeql_candidate
 from tests.fakes import BASE_SHA, FakeGitHubTransport
-from tests.known_defects import (
-    RESERVATION_DEADLOCK_DEFECT,
-    local_resume_lookup,
-    marker_absence,
-)
+from tests.known_defects import local_resume_lookup
 
 ISSUE_URL = "https://github.test/victorciao/superset/issues/1"
 PR_URL = "https://github.test/victorciao/superset/pull/2"
 ISSUE_ARTIFACT = MarkerArtifact(number=1, url=ISSUE_URL, is_pull_request=False)
 PR_ARTIFACT = MarkerArtifact(number=2, url=PR_URL, is_pull_request=True)
+COMMENT_URL = "https://github.test/victorciao/superset/issues/1#issuecomment-3"
 ARTIFACT_STATES = (
     CandidateState.ISSUE_CREATED,
     CandidateState.PR_CREATED,
     CandidateState.ISSUE_PATCHED,
     CandidateState.COMMENT_CREATED,
+)
+ARTIFACT_STATE_LINKS = (
+    (CandidateState.ISSUE_CREATED, "issue_url"),
+    (CandidateState.PR_CREATED, "pr_url"),
+    (CandidateState.ISSUE_PATCHED, "issue_url"),
+    (CandidateState.COMMENT_CREATED, "comment_url"),
 )
 PRE_ARTIFACT_STATES = (
     CandidateState.ENUMERATED,
@@ -66,6 +71,11 @@ def persisted(state: CandidateState, **fields: Any) -> Candidate:  # noqa: ANN40
     return codeql_candidate(state=state, **fields)
 
 
+def link_value(field: str) -> str:
+    """The URL a given link field carries."""
+    return {"issue_url": ISSUE_URL, "pr_url": PR_URL, "comment_url": COMMENT_URL}[field]
+
+
 def no_marker(_marker: str) -> MarkerArtifact | None:
     """A marker search that verifies nothing exists on the target repository."""
     return None
@@ -84,10 +94,24 @@ def test_no_persisted_row_has_no_local_artifact() -> None:
     assert has_local_artifact(None) is False
 
 
+@pytest.mark.parametrize(("state", "link"), ARTIFACT_STATE_LINKS)
+def test_an_artifact_state_with_its_link_proves_a_local_artifact(
+    state: CandidateState,
+    link: str,
+) -> None:
+    """§14.1 — the recorded link is the proof; the state only says which link to expect."""
+    assert has_local_artifact(persisted(state, **{link: link_value(link)})) is True
+
+
 @pytest.mark.parametrize("state", ARTIFACT_STATES)
-def test_artifact_states_prove_a_local_artifact(state: CandidateState) -> None:
-    """§14.1 — the four artifact-bearing states each prove a durable write happened."""
-    assert has_local_artifact(persisted(state)) is True
+def test_an_artifact_state_without_any_link_proves_nothing(state: CandidateState) -> None:
+    """§14.1 — a lifecycle state is not evidence of a remote artifact.
+
+    A SIMULATE row or a run that crashed between stamping the state and recording the URL
+    leaves `issue_created` with no link at all; reading that as an existing artifact made a
+    later LIVE run skip the write that had never happened.
+    """
+    assert has_local_artifact(persisted(state)) is False
 
 
 @pytest.mark.parametrize("state", PRE_ARTIFACT_STATES)
@@ -185,23 +209,55 @@ def test_converged_with_artifacts_is_skipped_but_without_them_is_resumed() -> No
     assert without_artifacts.action is ResumeAction.RESUME_AT_STEP
 
 
-@pytest.mark.parametrize("state", [CandidateState.ISSUE_CREATED, CandidateState.PR_CREATED])
+@pytest.mark.parametrize(
+    ("state", "link"),
+    [(CandidateState.ISSUE_CREATED, "issue_url"), (CandidateState.PR_CREATED, "pr_url")],
+)
 @pytest.mark.parametrize("artifacts_present", [False, True])
 @pytest.mark.parametrize("marker_search_available", [False, True])
 def test_a_partial_publication_always_resumes_at_publication(
     state: CandidateState,
+    link: str,
     artifacts_present: bool,
     marker_search_available: bool,
 ) -> None:
-    """§14.1 — the crash windows resume; a half-published candidate is never abandoned."""
+    """§14.1 — the crash windows resume; a half-published candidate is never abandoned.
+
+    The row carries the link its state implies, which is what proves the partial publication
+    happened: resume is unconditional from there, whatever the marker search can see.
+    """
     decision = decide_resume(
-        persisted(state),
+        persisted(state, **{link: link_value(link)}),
         artifacts_present=artifacts_present,
         marker_search_available=marker_search_available,
     )
 
     assert decision.action is ResumeAction.RESUME_AT_STEP
     assert decision.step == "publication"
+
+
+@pytest.mark.parametrize("state", [CandidateState.ISSUE_CREATED, CandidateState.PR_CREATED])
+@pytest.mark.parametrize(
+    ("artifacts_present", "marker_search_available"),
+    [(True, True), (False, False)],
+)
+def test_a_linkless_artifact_state_defers_instead_of_resuming(
+    state: CandidateState,
+    artifacts_present: bool,
+    marker_search_available: bool,
+) -> None:
+    """§14.1 — with no link there is no partial publication to resume, so fail closed.
+
+    Either a marker says some other run owns the artifact, or the search cannot say; both
+    make a write unverifiable, and the state alone is no longer evidence to write against.
+    """
+    decision = decide_resume(
+        persisted(state),
+        artifacts_present=artifacts_present,
+        marker_search_available=marker_search_available,
+    )
+
+    assert decision.action is ResumeAction.DEFER
 
 
 @pytest.mark.parametrize("state", PRE_ARTIFACT_STATES)
@@ -375,14 +431,48 @@ def test_a_failed_marker_search_blocks_the_first_durable_reservation(tmp_path: P
     assert store.rows() == []
 
 
-def test_an_unconfigured_marker_search_is_not_a_failed_search(tmp_path: Path) -> None:
-    """§14.1 — SIMULATE and local runs have no search to fail; they are not fail-closed."""
+def test_an_unconfigured_marker_search_never_looked_so_it_fails_closed(tmp_path: Path) -> None:
+    """§14.1 — "never looked" is not "proven absent", so no first write is reserved.
+
+    The distinct outcomes are what keeps the polarity right: `absent` is the one state that
+    licences a first write, and `unconfigured` is as unverifiable as a search that raised.
+    """
     store = store_for(tmp_path)
     candidate = codeql_candidate()
 
+    assert store.marker_search_outcome("codeql-0") is MarkerSearchOutcome.UNCONFIGURED
+    assert store.marker_search_unavailable("codeql-0") is True
+    assert store.marker_search_failed is False
+    assert store.resume_decision("codeql-0").action is ResumeAction.DEFER
+    assert within_deadline(lambda: store.append_if_new_artifact(candidate)) is False
+    assert store.rows() == []
+
+
+@pytest.mark.parametrize(
+    ("marker_search", "outcome"),
+    [
+        (no_marker, MarkerSearchOutcome.ABSENT),
+        (issue_marker, MarkerSearchOutcome.FOUND),
+    ],
+)
+def test_each_marker_lookup_records_its_own_outcome(
+    tmp_path: Path,
+    marker_search: Callable[[str], MarkerArtifact | None],
+    outcome: MarkerSearchOutcome,
+) -> None:
+    """§14.1 — a successful lookup that found nothing is `absent`, never `failed`."""
+    store = store_for(tmp_path, marker_search=marker_search)
+
+    assert store.marker_search_outcome("codeql-0") is outcome
     assert store.marker_search_unavailable("codeql-0") is False
-    assert store.resume_decision("codeql-0").action is ResumeAction.RESUME_AT_STEP
-    assert within_deadline(lambda: store.append_if_new_artifact(candidate)) is True
+
+
+def test_a_reservation_completes_when_the_marker_is_proven_absent(tmp_path: Path) -> None:
+    """§14.1 — the atomic reservation returns rather than blocking on its own lock."""
+    store = store_for(tmp_path, marker_search=no_marker)
+
+    assert within_deadline(lambda: store.append_if_new_artifact(codeql_candidate())) is True
+    assert len(store.rows()) == 1
 
 
 def test_a_reserved_candidate_cannot_be_reserved_twice(tmp_path: Path) -> None:

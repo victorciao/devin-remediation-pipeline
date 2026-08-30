@@ -32,7 +32,6 @@ from tests.fakes import (
     WriteRecord,
     all_contexts,
 )
-from tests.known_defects import marker_absence
 
 PLANNER = {"criteria": [{"id": "AC-1", "statement": "Bound the range to the collection length."}]}
 REVIEWER = {

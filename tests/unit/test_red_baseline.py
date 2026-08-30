@@ -10,14 +10,17 @@ from pipeline.red_baseline import (
     should_reauthor_baseline,
     validate_nested_marker_lifts,
 )
+from pipeline.review_loop import ReviewLoopResult, apply_review_result
 from pipeline.schemas import (
     Action,
     BaselineStatus,
+    Candidate,
     CandidateState,
     ExpectedFailure,
     ItemOutcome,
     PerItemOutcome,
     ReasonCode,
+    RedBaselineResult,
 )
 from tests.factories import lane2_candidate
 
@@ -237,31 +240,62 @@ def test_unnested_candidate_needs_no_lifts() -> None:
 # -- applying the classification ---------------------------------------------------------
 
 
+def routed(candidate: Candidate, result: RedBaselineResult) -> Candidate:
+    """Route a candidate through the single routing owner, carrying the baseline result."""
+    return apply_review_result(
+        candidate,
+        ReviewLoopResult(
+            converged=False,
+            iterations=1,
+            state=CandidateState.DISPATCHING,
+            red_result=result,
+        ),
+    )
+
+
 def test_stale_skip_is_a_successful_reviewer_only_terminal_outcome() -> None:
-    """§9 (line 492) — `stale_skip` is remediated by a reviewer-only diff, not dropped."""
+    """§9 (line 492) — `stale_skip` is remediated by a reviewer-only diff, not dropped.
+
+    `apply_red_baseline` records the facts and nothing else; `apply_review_result` is the one
+    place a candidate is routed, so the terminal reviewer-only outcome is asserted there.
+    """
     candidate = lane2_candidate(nodeid=ITEM, gate_passed=True, score=128.0, risk=1)
     result = classify_red_baseline(EXPECTED, [outcome(ITEM, ItemOutcome.PASSED)])
 
     applied = apply_red_baseline(candidate, result, lifted_markers=[ITEM])
 
-    assert applied.action is Action.REVIEWER_ONLY_DIFF
-    assert applied.state is CandidateState.TERMINAL
-    assert applied.reason is ReasonCode.STALE_SKIP
-    assert applied.auto_merge_eligible is False
     assert applied.red_baseline is not None
     assert applied.red_baseline.status is BaselineStatus.STALE_SKIP
     assert list(applied.lifted_markers) == [ITEM]
+    assert applied.state is candidate.state
+    assert applied.reason is candidate.reason
+    assert applied.action == candidate.action
+
+    reviewed = routed(applied, result)
+
+    assert reviewed.action is Action.REVIEWER_ONLY_DIFF
+    assert reviewed.state is CandidateState.TERMINAL
+    assert reviewed.reason is ReasonCode.STALE_SKIP
+    assert reviewed.auto_merge_eligible is False
 
 
 def test_invalid_baseline_routes_back_to_the_gate_with_its_own_reason() -> None:
+    """§9.1 — an unusable baseline is re-gated, and only the routing owner may say so."""
     candidate = lane2_candidate(nodeid=ITEM, gate_passed=True, score=128.0, risk=1)
     result = classify_red_baseline(EXPECTED, [outcome(ITEM, ItemOutcome.SKIPPED)])
 
     applied = apply_red_baseline(candidate, result)
 
-    assert applied.reason is ReasonCode.INVALID_RED_BASELINE
-    assert applied.state is CandidateState.GATED
-    assert applied.auto_merge_eligible is False
+    assert applied.red_baseline is not None
+    assert applied.red_baseline.status is BaselineStatus.INVALID_RED_BASELINE
+    assert applied.state is candidate.state
+    assert applied.reason is candidate.reason
+
+    reviewed = routed(applied, result)
+
+    assert reviewed.reason is ReasonCode.INVALID_RED_BASELINE
+    assert reviewed.state is CandidateState.GATED
+    assert reviewed.auto_merge_eligible is False
 
 
 def test_valid_baseline_only_records_evidence() -> None:
@@ -274,6 +308,12 @@ def test_valid_baseline_only_records_evidence() -> None:
     assert applied.action == candidate.action
     assert applied.red_baseline is not None
     assert applied.red_baseline.status is BaselineStatus.VALID
+
+    reviewed = routed(applied, result)
+
+    assert reviewed.reason is None
+    assert reviewed.state is CandidateState.DISPATCHING
+    assert reviewed.action == candidate.action
 
 
 def test_invalid_baseline_is_reauthored_exactly_once() -> None:

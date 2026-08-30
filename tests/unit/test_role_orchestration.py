@@ -679,14 +679,15 @@ def test_only_finished_is_accepted_as_a_terminal_status() -> None:
         run(transport)
 
 
-# -- the session ceiling aborts rather than deferring ----------------------------------
+# -- the session ceiling refuses the candidate it cannot afford ------------------------
 
 
-def test_the_session_ceiling_aborts_the_candidate_instead_of_deferring_it() -> None:
-    """§13 — the ceiling is a run-scoped budget, so it stops the run, not one candidate.
+def test_the_session_ceiling_stops_the_candidate_it_cannot_afford() -> None:
+    """§13 — the orchestrator refuses the creation loudly; the run defers that candidate.
 
-    Deferring each remaining candidate turned one exhausted budget into fifty deferrals
-    and hid the single fact worth reporting: the run ran out of sessions.
+    The error never reaches the operator: `run_once` catches it, appends the in-flight
+    candidate as `deferred`/`session_ceiling` and carries on, so an exhausted budget costs
+    exactly the candidates it could not pay for and none of the §11 accounting.
     """
     transport = ScriptedDevinTransport()
 
@@ -705,8 +706,8 @@ def test_a_ceiling_reached_mid_candidate_leaves_the_later_roles_uncreated() -> N
     assert transport.messaged == []
 
 
-def test_the_acu_ceiling_is_also_an_abort() -> None:
-    """§13 — an ACU budget exhausted by a running session ends the run the same way."""
+def test_the_acu_ceiling_stops_the_candidate_the_same_way() -> None:
+    """§13 — an ACU budget exhausted by a running session refuses the same way."""
     transport = ScriptedDevinTransport()
 
     with pytest.raises(SessionCeilingError, match="ACU"):
