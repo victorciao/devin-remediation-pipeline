@@ -25,7 +25,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -84,6 +84,7 @@ from pipeline.session_client import (
     SessionCeilingError,
     SessionClient,
     SessionDedupeError,
+    SessionMessageError,
 )
 from pipeline.simulation import simulate_run
 from pipeline.state import (
@@ -1206,7 +1207,24 @@ def run_once(
             target_repo: str = target_repo,
             prompt_base_sha: str = prompt_base_sha,
             prompt_head_branch: str = prompt_head_branch,
-        ) -> tuple[str, str, str]:
+        ) -> tuple[str, str, Callable[[str], str]]:
+            def phase_b_prompt(
+                committed_diff: str,
+                candidate: Candidate = candidate,
+                target_repo: str = target_repo,
+                prompt_base_sha: str = prompt_base_sha,
+                prompt_head_branch: str = prompt_head_branch,
+                planner_output: Mapping[str, object] = planner_output,
+            ) -> str:
+                return render_reviewer_phase_b_prompt(
+                    candidate,
+                    target_repo=target_repo,
+                    base_sha=prompt_base_sha,
+                    head_branch=prompt_head_branch,
+                    planner_output=planner_output,
+                    committed_diff=committed_diff,
+                )
+
             return (
                 render_implementer_prompt(
                     candidate,
@@ -1222,14 +1240,7 @@ def run_once(
                     head_branch=prompt_head_branch,
                     planner_output=planner_output,
                 ),
-                render_reviewer_phase_b_prompt(
-                    candidate,
-                    target_repo=target_repo,
-                    base_sha=prompt_base_sha,
-                    head_branch=prompt_head_branch,
-                    planner_output=planner_output,
-                    committed_diff="",
-                ),
+                phase_b_prompt,
             )
 
         try:
@@ -1241,17 +1252,18 @@ def run_once(
                     base_sha=prompt_base_sha,
                     head_branch=prompt_head_branch,
                 ),
-                "planner context is supplied after the planner session",
-                "planner context is supplied after the planner session",
+                "" if config.mode is Mode.SIMULATE else None,
+                "" if config.mode is Mode.SIMULATE else None,
                 candidate=candidate,
                 head_sha_resolver=head_sha_resolver,
-                prompt_factory=make_prompts,
+                prompt_factory=make_prompts if config.mode is Mode.LIVE else None,
             )
         except (
             PlannerOutputError,
             SessionCeilingError,
             SessionDedupeError,
             RoleCollisionError,
+            SessionMessageError,
             TimeoutError,
             HttpTransportError,
         ) as exc:
@@ -1267,7 +1279,11 @@ def run_once(
                 update={
                     "state": CandidateState.DEFERRED,
                     "reason": reason,
-                    "reason_detail": str(exc) if isinstance(exc, PlannerOutputError) else None,
+                    "reason_detail": (
+                        str(exc)
+                        if isinstance(exc, (PlannerOutputError, SessionMessageError))
+                        else None
+                    ),
                 }
             )
             state_store.append(deferred)

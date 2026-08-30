@@ -121,6 +121,10 @@ class PlannerOutputError(ValueError):
     """Raised when planner output cannot be shared with the other roles."""
 
 
+class SessionMessageError(RuntimeError):
+    """Raised when a follow-up message cannot be processed by a role session."""
+
+
 KNOWN_STATUSES = frozenset(
     {
         "working",
@@ -204,6 +208,7 @@ class SessionClient:
         self._total_acu = 0.0
         self._previous: dict[tuple[str, SessionRole], str] = {}
         self._issued_roles: dict[str, SessionRole] = {}
+        self._accounted_sessions: set[str] = set()
         self._lock = threading.Lock()
 
     @property
@@ -332,18 +337,30 @@ class SessionClient:
                 status = "unknown"
             snapshot = SessionSnapshot(session_id, status, response)
             if status in TERMINAL_STATUSES:
-                acu = response.get("acu_used", response.get("acu"))
-                used = float(acu) if isinstance(acu, (int, float)) else 0.0
-                with self._lock:
-                    self._total_acu += used
-                    if used > self._limit(role).max_acu_limit:
-                        raise SessionCeilingError(f"{role.value} session exceeded max_acu_limit")
-                    if self._total_acu > self._max_total_acu:
-                        raise SessionCeilingError("per-run ACU ceiling exceeded")
+                self._record_terminal_usage(role, session_id, response)
                 return snapshot
             if self._clock() >= deadline:
                 raise TimeoutError(f"{role.value} session timed out: {session_id}")
             self._sleeper(1.0)
+
+    def _record_terminal_usage(
+        self,
+        role: SessionRole,
+        session_id: str,
+        response: Mapping[str, object],
+    ) -> None:
+        """Account terminal-session ACU exactly once for a returned snapshot."""
+        acu = response.get("acu_used", response.get("acu"))
+        used = float(acu) if isinstance(acu, (int, float)) else 0.0
+        with self._lock:
+            if session_id in self._accounted_sessions:
+                return
+            self._accounted_sessions.add(session_id)
+            self._total_acu += used
+            if used > self._limit(role).max_acu_limit:
+                raise SessionCeilingError(f"{role.value} session exceeded max_acu_limit")
+            if self._total_acu > self._max_total_acu:
+                raise SessionCeilingError("per-run ACU ceiling exceeded")
 
     def send_message(self, session_id: str, message: str) -> Mapping[str, object]:
         """Send a follow-up message to an existing role session."""
@@ -351,7 +368,48 @@ class SessionClient:
             return {"detail": "simulation message suppressed"}
         if self._transport is None:
             raise ConfigError("live session orchestration requires a transport")
-        return self._transport.post(f"/v1/sessions/{session_id}/message", {"message": message})
+        response = self._transport.post(f"/v1/sessions/{session_id}/message", {"message": message})
+        detail = response.get("detail")
+        if isinstance(detail, str) and (
+            "not running" in detail.casefold() or "not_running" in detail.casefold()
+        ):
+            raise SessionMessageError(f"reviewer session {session_id} is not running: {detail}")
+        return response
+
+    def poll_session_after_message(
+        self,
+        role: SessionRole,
+        session_id: str,
+        previous: SessionSnapshot,
+    ) -> SessionSnapshot:
+        """Wait for a follow-up message to change a session before accepting its output."""
+        if self._config.mode is Mode.SIMULATE:
+            return self.poll_session(role, session_id)
+        if self._transport is None:
+            raise ConfigError("live session orchestration requires a transport")
+        deadline = self._clock() + self._limit(role).session_timeout_s
+        previous_output = previous.payload.get("structured_output")
+        previous_updated = previous.payload.get("updated_at")
+        while True:
+            response = self._transport.get(f"/v1/sessions/{session_id}")
+            status = response.get("status_enum", response.get("status"))
+            if not isinstance(status, str):
+                status = "unknown"
+            structured_output = response.get("structured_output")
+            updated_at = response.get("updated_at")
+            processed = structured_output != previous_output or (
+                isinstance(updated_at, str) and updated_at != previous_updated
+            )
+            if processed:
+                snapshot = SessionSnapshot(session_id, status, response)
+                if status in TERMINAL_STATUSES:
+                    self._record_terminal_usage(role, session_id, response)
+                return snapshot
+            if self._clock() >= deadline:
+                raise TimeoutError(
+                    f"{role.value} session did not process follow-up message: {session_id}"
+                )
+            self._sleeper(1.0)
 
 
 ROLE_OUTPUT_SCHEMAS: Mapping[SessionRole, Mapping[str, object]] = {
@@ -511,13 +569,15 @@ class RuntimeOrchestrator:
         self,
         candidate_id: str,
         planner_prompt: str,
-        implementer_prompt: str,
-        reviewer_prompt: str,
+        implementer_prompt: str | None,
+        reviewer_prompt: str | None,
         *,
         attempt: int = 1,
         candidate: Candidate | None = None,
         head_sha_resolver: Callable[[], str | None] | None = None,
-        prompt_factory: Callable[[Mapping[str, object]], tuple[str, str, str]] | None = None,
+        prompt_factory: (
+            Callable[[Mapping[str, object]], tuple[str, str, Callable[[str], str]]] | None
+        ) = None,
     ) -> OrchestrationResult:
         """Run the review loop after a planner and concurrent role join."""
         planner = self.run_planner(candidate_id, planner_prompt, attempt=attempt)
@@ -527,13 +587,13 @@ class RuntimeOrchestrator:
                 implementer_future = executor.submit(
                     self.run_implementer,
                     candidate_id,
-                    implementer_prompt,
+                    resolved_implementer_prompt,
                     attempt=role_attempt,
                 )
                 reviewer_future = executor.submit(
                     self.run_reviewer,
                     candidate_id,
-                    reviewer_prompt,
+                    resolved_reviewer_prompt,
                     attempt=role_attempt,
                 )
                 try:
@@ -550,14 +610,22 @@ class RuntimeOrchestrator:
             return structured if isinstance(structured, Mapping) else {}
 
         planner_output = output(planner)
-        if prompt_factory is not None and self._client.config.mode is Mode.LIVE:
+        if prompt_factory is not None:
             try:
                 validate_planner_output(planner_output)
             except ValueError as exc:
                 raise PlannerOutputError(str(exc)) from exc
             implementer_prompt, reviewer_prompt, phase_b_prompt = prompt_factory(planner_output)
+        elif self._client.config.mode is Mode.LIVE:
+            raise PlannerOutputError("missing planner prompt factory")
         else:
-            phase_b_prompt = reviewer_prompt
+            if implementer_prompt is None or reviewer_prompt is None:
+                raise ValueError("implementer and reviewer prompts are required without a factory")
+            phase_b_prompt = None
+        if implementer_prompt is None or reviewer_prompt is None:
+            raise ValueError("implementer and reviewer prompts are required")
+        resolved_implementer_prompt = implementer_prompt
+        resolved_reviewer_prompt = reviewer_prompt
 
         current = (
             simulation_result(concurrent_roles(attempt), candidate)
@@ -712,41 +780,40 @@ class RuntimeOrchestrator:
                 )
             return iteration
 
-        phase_b_attempted = False
+        phase_b_attempted: set[str] = set()
 
         def phase_b(result: OrchestrationResult) -> OrchestrationResult:
-            nonlocal phase_b_attempted
-            if phase_b_attempted or self._client.config.mode is Mode.SIMULATE:
+            reviewer_session_id = result.reviewer.attempt.session_id
+            if (
+                reviewer_session_id in phase_b_attempted
+                or self._client.config.mode is Mode.SIMULATE
+            ):
                 return result
             if output(result.reviewer).get("diff_reviewed") not in (None, False):
                 return result
             raw_diff = output(result.implementer).get("committed_diff")
             committed_diff = raw_diff if isinstance(raw_diff, str) else ""
-            diff_text = (
-                committed_diff
-                if len(committed_diff) <= 60_000
-                else (
-                    "[diff omitted because it exceeds 60000 characters] Read "
-                    f"`git diff {candidate.base_sha if candidate else 'BASE'}..HEAD` "
-                    "on the candidate branch instead."
-                )
-            )
+            if phase_b_prompt is None:
+                raise PlannerOutputError("missing reviewer phase-B prompt factory")
             self._client.send_message(
-                result.reviewer.attempt.session_id,
-                phase_b_prompt + "\n\nIMPLEMENTER COMMITTED DIFF:\n" + diff_text,
+                reviewer_session_id,
+                phase_b_prompt(committed_diff),
             )
-            updated = self._client.poll_session(
+            updated = self._client.poll_session_after_message(
                 SessionRole.REVIEWER,
-                result.reviewer.attempt.session_id,
+                reviewer_session_id,
+                result.reviewer.snapshot,
             )
-            phase_b_attempted = True
+            phase_b_attempted.add(reviewer_session_id)
             return replace(result, reviewer=replace(result.reviewer, snapshot=updated))
 
         current = phase_b(current)
 
         def rerun(role_attempt: int) -> ReviewIteration:
             nonlocal current
-            if phase_b_attempted and not output(current.reviewer).get("diff_reviewed"):
+            if current.reviewer.attempt.session_id in phase_b_attempted and not output(
+                current.reviewer
+            ).get("diff_reviewed"):
                 return iteration_from(current)
             next_attempt = max(
                 role_attempt + 1,
@@ -780,6 +847,7 @@ __all__ = [
     "SessionAttempt",
     "SessionClient",
     "SessionDedupeError",
+    "SessionMessageError",
     "SessionRole",
     "SessionSnapshot",
     "SessionCeilingError",

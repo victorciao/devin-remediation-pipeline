@@ -271,7 +271,11 @@ def apply_review_result(candidate: Candidate, result: ReviewLoopResult) -> Candi
         "state": result.state,
         "reason": result.reason,
         "disagreement_summary": result.disagreement_summary,
-        "unresolved_major": result.reason is ReasonCode.DISAGREEMENT_UNRESOLVED,
+        "unresolved_major": result.reason
+        in {
+            ReasonCode.DISAGREEMENT_UNRESOLVED,
+            ReasonCode.DIFF_REVIEW_INCOMPLETE,
+        },
         "auto_merge_eligible": (candidate.auto_merge_eligible if result.converged else False),
     }
     if result.red_result is not None:

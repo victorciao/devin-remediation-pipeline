@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from pipeline.config import PipelineConfig
+from pipeline.config import Mode, PipelineConfig
 from pipeline.observability.events import EventLog, append_candidate_events
 from pipeline.observability.kpis import write_kpi_report
 from pipeline.observability.report import write_run_report
@@ -38,9 +38,8 @@ def render_run_artifacts(
     state_path = output_dir / "state" / "candidates.jsonl"
     events_path = output_dir / "reports" / "events.jsonl"
     store = CandidateStateStore(state_path)
-    if config.mode.value == "simulate":
-        for candidate in candidates:
-            store.append(candidate)
+    for candidate in candidates:
+        store.append(candidate)
 
     planner = planner_outputs or {}
     reviewer = reviewer_outputs or {}
@@ -55,12 +54,12 @@ def render_run_artifacts(
     produced: list[Path] = [state_path, events_path]
     for candidate in candidates:
         routed = candidate.action in {Action.OPEN_PR, Action.OPEN_ISSUE}
-        if config.mode.value == "live" and not routed:
+        if config.mode is Mode.LIVE and not routed:
             continue
         template_text = issue_templates[candidate.lane].read_text(encoding="utf-8")
         summary = (
             f"Remediation tracking for {candidate.stable_locator}."
-            if config.mode.value == "live"
+            if config.mode is Mode.LIVE
             else f"Simulated remediation for {candidate.candidate_id}."
         )
         if not config.has_issues and config.issue_sink.value == "pr_comment":
@@ -88,7 +87,7 @@ def render_run_artifacts(
                 reviewer.get(candidate.candidate_id, {}),
                 automation_metadata={
                     "mode": config.mode.value,
-                    "would_write": config.mode.value == "simulate",
+                    "would_write": config.mode is Mode.SIMULATE,
                 },
             )
             validate_pr_body(pr_body)

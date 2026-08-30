@@ -58,17 +58,14 @@ def render_run_report(
     ]
     gated_lines = [f"- `{reason}`: {count}" for reason, count in sorted(gated.items())]
     tier_lines = [f"- `{tier}`: {count}" for tier, count in sorted(tiers.items())]
-    escalated = [
-        candidate
-        for candidate in rows
-        if candidate.state is CandidateState.TERMINAL or candidate.action is Action.HUMAN_REVIEW
-    ]
+    escalated = [candidate for candidate in rows if candidate.state is CandidateState.TERMINAL]
+    escalated_ids = {candidate.candidate_id for candidate in escalated}
     accounted = {
         candidate.candidate_id
         for candidate in rows
         if candidate.state is CandidateState.DEFERRED
         or candidate.gate_passed is False
-        or candidate in escalated
+        or candidate.candidate_id in escalated_ids
         or (
             candidate.action in {Action.OPEN_PR, Action.OPEN_ISSUE}
             and candidate.state in dispatched_states
@@ -114,6 +111,7 @@ def render_run_report(
             "## Escalated / human review",
             *(escalated_lines or ["- None"]),
             "",
+            "## Accounting",
             f"Unaccounted: {unaccounted}",
             "",
         ]

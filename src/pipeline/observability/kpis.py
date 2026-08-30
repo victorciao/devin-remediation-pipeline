@@ -158,12 +158,14 @@ def compute_kpis(
             else None
         ),
         "criterion_coverage_rate": _criterion_coverage(candidates, role_loop_events),
-        "escalated": sum(
-            candidate.state is CandidateState.TERMINAL or candidate.action is Action.HUMAN_REVIEW
-            for candidate in candidates
-        ),
+        "escalated": sum(candidate.state is CandidateState.TERMINAL for candidate in candidates),
         "expected_reason_match_rate": _expected_reason_match_rate(events),
         "disagreement_unresolved_rate": unresolved / len(events) if events else 0.0,
+        "diff_review_incomplete_rate": (
+            sum(event.reason is ReasonCode.DIFF_REVIEW_INCOMPLETE for event in events) / len(events)
+            if events
+            else 0.0
+        ),
         "session_failure_rate": session_failures / len(events) if events else 0.0,
         "implementer_test_edit_violation_rate": (
             sum(event.reason is ReasonCode.IMPLEMENTER_TEST_EDIT for event in events) / len(events)
