@@ -7,11 +7,12 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Protocol
 
 from pipeline.config import ConfigError, Mode, PipelineConfig
+from pipeline.prompts import validate_planner_output
 from pipeline.red_baseline import (
     DiffInspection,
     classify_implementer_diff,
@@ -114,6 +115,10 @@ class RoleCollisionError(ConfigError):
     """Raised when two runtime roles receive the same session identity."""
 
     reason = ReasonCode.ROLE_COLLISION
+
+
+class PlannerOutputError(ValueError):
+    """Raised when planner output cannot be shared with the other roles."""
 
 
 KNOWN_STATUSES = frozenset(
@@ -249,6 +254,8 @@ class SessionClient:
         }
         if structured_output_schema is not None:
             payload["structured_output_schema"] = structured_output_schema
+        if self._config.role_session_snapshot_id is not None:
+            payload["snapshot_id"] = self._config.role_session_snapshot_id
         try:
             if self._config.mode is Mode.SIMULATE:
                 session_id = hashlib.sha256(
@@ -337,6 +344,14 @@ class SessionClient:
             if self._clock() >= deadline:
                 raise TimeoutError(f"{role.value} session timed out: {session_id}")
             self._sleeper(1.0)
+
+    def send_message(self, session_id: str, message: str) -> Mapping[str, object]:
+        """Send a follow-up message to an existing role session."""
+        if self._config.mode is Mode.SIMULATE:
+            return {"detail": "simulation message suppressed"}
+        if self._transport is None:
+            raise ConfigError("live session orchestration requires a transport")
+        return self._transport.post(f"/v1/sessions/{session_id}/message", {"message": message})
 
 
 ROLE_OUTPUT_SCHEMAS: Mapping[SessionRole, Mapping[str, object]] = {
@@ -502,6 +517,7 @@ class RuntimeOrchestrator:
         attempt: int = 1,
         candidate: Candidate | None = None,
         head_sha_resolver: Callable[[], str | None] | None = None,
+        prompt_factory: Callable[[Mapping[str, object]], tuple[str, str, str]] | None = None,
     ) -> OrchestrationResult:
         """Run the review loop after a planner and concurrent role join."""
         planner = self.run_planner(candidate_id, planner_prompt, attempt=attempt)
@@ -529,17 +545,25 @@ class RuntimeOrchestrator:
                     raise
             return OrchestrationResult(planner, implementer, reviewer)
 
+        def output(run: RoleRun) -> Mapping[str, object]:
+            structured = run.snapshot.payload.get("structured_output")
+            return structured if isinstance(structured, Mapping) else {}
+
+        planner_output = output(planner)
+        if prompt_factory is not None and self._client.config.mode is Mode.LIVE:
+            try:
+                validate_planner_output(planner_output)
+            except ValueError as exc:
+                raise PlannerOutputError(str(exc)) from exc
+            implementer_prompt, reviewer_prompt, phase_b_prompt = prompt_factory(planner_output)
+        else:
+            phase_b_prompt = reviewer_prompt
+
         current = (
             simulation_result(concurrent_roles(attempt), candidate)
             if self._client.config.mode is Mode.SIMULATE and candidate is not None
             else concurrent_roles(attempt)
         )
-
-        def output(run: RoleRun) -> Mapping[str, object]:
-            structured = run.snapshot.payload.get("structured_output")
-            if isinstance(structured, Mapping):
-                return structured
-            return {}
 
         def iteration_from(result: OrchestrationResult) -> ReviewIteration:
             nonlocal candidate
@@ -688,13 +712,53 @@ class RuntimeOrchestrator:
                 )
             return iteration
 
+        phase_b_attempted = False
+
+        def phase_b(result: OrchestrationResult) -> OrchestrationResult:
+            nonlocal phase_b_attempted
+            if phase_b_attempted or self._client.config.mode is Mode.SIMULATE:
+                return result
+            if output(result.reviewer).get("diff_reviewed") not in (None, False):
+                return result
+            raw_diff = output(result.implementer).get("committed_diff")
+            committed_diff = raw_diff if isinstance(raw_diff, str) else ""
+            diff_text = (
+                committed_diff
+                if len(committed_diff) <= 60_000
+                else (
+                    "[diff omitted because it exceeds 60000 characters] Read "
+                    f"`git diff {candidate.base_sha if candidate else 'BASE'}..HEAD` "
+                    "on the candidate branch instead."
+                )
+            )
+            self._client.send_message(
+                result.reviewer.attempt.session_id,
+                phase_b_prompt + "\n\nIMPLEMENTER COMMITTED DIFF:\n" + diff_text,
+            )
+            updated = self._client.poll_session(
+                SessionRole.REVIEWER,
+                result.reviewer.attempt.session_id,
+            )
+            phase_b_attempted = True
+            return replace(result, reviewer=replace(result.reviewer, snapshot=updated))
+
+        current = phase_b(current)
+
         def rerun(role_attempt: int) -> ReviewIteration:
             nonlocal current
-            current = (
-                simulation_result(concurrent_roles(role_attempt), candidate)
-                if self._client.config.mode is Mode.SIMULATE and candidate is not None
-                else concurrent_roles(role_attempt)
+            if phase_b_attempted and not output(current.reviewer).get("diff_reviewed"):
+                return iteration_from(current)
+            next_attempt = max(
+                role_attempt + 1,
+                current.implementer.attempt.attempt + 1,
+                current.reviewer.attempt.attempt + 1,
             )
+            current = (
+                simulation_result(concurrent_roles(next_attempt), candidate)
+                if self._client.config.mode is Mode.SIMULATE and candidate is not None
+                else concurrent_roles(next_attempt)
+            )
+            current = phase_b(current)
             return iteration_from(current)
 
         review = run_review_loop(self._client.config, iteration_from(current), rerun)
@@ -720,6 +784,7 @@ __all__ = [
     "SessionSnapshot",
     "SessionCeilingError",
     "RoleCollisionError",
+    "PlannerOutputError",
     "event_with_attempt",
     "event_with_ceiling",
     "resolve_retry_decision",

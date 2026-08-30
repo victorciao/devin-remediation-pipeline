@@ -112,6 +112,8 @@ def _disagreement_summary(iteration: ReviewIteration) -> str:
 def _terminal_reason(iteration: ReviewIteration) -> ReasonCode:
     if any(finding.reason is ReasonCode.IMPLEMENTER_TEST_EDIT for finding in iteration.findings):
         return ReasonCode.IMPLEMENTER_TEST_EDIT
+    if not iteration.diff_reviewed:
+        return ReasonCode.DIFF_REVIEW_INCOMPLETE
     return ReasonCode.DISAGREEMENT_UNRESOLVED
 
 
@@ -214,7 +216,7 @@ def run_review_loop(
                     converged=False,
                     iterations=ordinal - 1,
                     state=CandidateState.TERMINAL,
-                    reason=ReasonCode.DISAGREEMENT_UNRESOLVED,
+                    reason=_terminal_reason(iteration),
                     disagreement_summary=_disagreement_summary(iteration),
                     needs_human_review=True,
                     red_result=iteration.red_result,
@@ -268,6 +270,7 @@ def apply_review_result(candidate: Candidate, result: ReviewLoopResult) -> Candi
     update: dict[str, object] = {
         "state": result.state,
         "reason": result.reason,
+        "disagreement_summary": result.disagreement_summary,
         "unresolved_major": result.reason is ReasonCode.DISAGREEMENT_UNRESOLVED,
         "auto_merge_eligible": (candidate.auto_merge_eligible if result.converged else False),
     }

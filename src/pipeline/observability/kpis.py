@@ -78,7 +78,7 @@ def compute_kpis(
     events: list[EventRecord],
     baseline: dict[str, object],
     config: PipelineConfig,
-) -> dict[str, float | int | NotApplicable]:
+) -> dict[str, float | int | None | NotApplicable]:
     """Compute the §11 KPI set from candidate and event evidence."""
     dispatched_states = {
         CandidateState.DISPATCHING,
@@ -98,11 +98,18 @@ def compute_kpis(
         for candidate in candidates
     )
     actions = Counter(candidate.action for candidate in candidates)
+    role_loop_events = [
+        event
+        for event in events
+        if event.planner_session_id is not None
+        or event.implementer_session_id is not None
+        or event.reviewer_session_id is not None
+    ]
     unresolved = sum(event.reason is ReasonCode.DISAGREEMENT_UNRESOLVED for event in events)
-    verified = sum(event.red_baseline is not None for event in events)
+    verified = sum(event.red_baseline is not None for event in role_loop_events)
     passing = sum(
         event.red_baseline is not None and event.reason is not ReasonCode.DISAGREEMENT_UNRESOLVED
-        for event in events
+        for event in role_loop_events
     )
     session_failures = sum(
         event.reason
@@ -125,7 +132,7 @@ def compute_kpis(
     )
     rejected = sum(event.reason is ReasonCode.DISAGREEMENT_UNRESOLVED for event in pr_events)
     edited = max(len(pr_events) - merged_clean - rejected, 0)
-    test_applicable = [event for event in events if event.action is Action.OPEN_PR]
+    test_applicable = [event for event in role_loop_events if event.action is Action.OPEN_PR]
     sessions_by_role = {
         "planner": sum(event.planner_session_id is not None for event in events),
         "implementer": sum(event.implementer_session_id is not None for event in events),
@@ -144,13 +151,17 @@ def compute_kpis(
         "dispatched_pr": dispatched_pr,
         "dispatched_issue": dispatched_issue,
         "deferred": actions[Action.DEFERRED],
-        "verification_pass_rate": passing / verified if verified else 0.0,
+        "verification_pass_rate": passing / verified if verified else None,
         "test_inclusion_rate": (
             sum(event.test_added is True for event in test_applicable) / len(test_applicable)
             if test_applicable
-            else 0.0
+            else None
         ),
-        "criterion_coverage_rate": _criterion_coverage(candidates, events),
+        "criterion_coverage_rate": _criterion_coverage(candidates, role_loop_events),
+        "escalated": sum(
+            candidate.state is CandidateState.TERMINAL or candidate.action is Action.HUMAN_REVIEW
+            for candidate in candidates
+        ),
         "expected_reason_match_rate": _expected_reason_match_rate(events),
         "disagreement_unresolved_rate": unresolved / len(events) if events else 0.0,
         "session_failure_rate": session_failures / len(events) if events else 0.0,
@@ -234,7 +245,7 @@ def render_kpi_report(
         elif name.endswith("_alert"):
             continue
         else:
-            lines.append(f"- **{label}:** {metric_value}")
+            lines.append(f"- **{label}:** {'n/a' if metric_value is None else metric_value}")
     lines.extend(["", "## Burn-down", ""])
     for lane, value in compute_burndown(candidates, baseline).items():
         if isinstance(value.denominator, NotApplicable):

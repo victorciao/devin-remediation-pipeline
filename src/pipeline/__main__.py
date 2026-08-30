@@ -58,6 +58,12 @@ from pipeline.http_transport import HttpTransportError, UrllibDevinTransport, Ur
 from pipeline.lanes.codeql import enumerate_from_config, read_alert_fixture
 from pipeline.lanes.deprecations import enumerate_deprecations, is_eol
 from pipeline.lanes.skipped_tests import enumerate_skipped_tests
+from pipeline.prompts import (
+    render_implementer_prompt,
+    render_planner_prompt,
+    render_reviewer_phase_b_prompt,
+    render_reviewer_prompt,
+)
 from pipeline.review_loop import apply_review_result
 from pipeline.rubric import load_rubrics
 from pipeline.schemas import (
@@ -72,6 +78,7 @@ from pipeline.schemas import (
 from pipeline.score import apply_score
 from pipeline.session_client import (
     DevinTransport,
+    PlannerOutputError,
     RoleCollisionError,
     RuntimeOrchestrator,
     SessionCeilingError,
@@ -1173,11 +1180,6 @@ def run_once(
     planner_outputs: dict[str, Mapping[str, object]] = {}
     reviewer_outputs: dict[str, Mapping[str, object]] = {}
     for candidate in session_candidates:
-        branch_context = (
-            f" Work on branch `{candidate.head_branch}` based on `{candidate.base_sha}`."
-            if candidate.head_branch is not None
-            else ""
-        )
         head_sha_resolver = None
         if (
             config.mode is Mode.LIVE
@@ -1194,21 +1196,59 @@ def run_once(
                 return client.branch_sha(branch)
 
             head_sha_resolver = resolve_head_sha
+        target_repo = f"{config.target_owner}/{config.target_repo}"
+        prompt_base_sha = candidate.base_sha or base_sha or "unknown"
+        prompt_head_branch = candidate.head_branch or head_branch or "candidate"
+
+        def make_prompts(
+            planner_output: Mapping[str, object],
+            candidate: Candidate = candidate,
+            target_repo: str = target_repo,
+            prompt_base_sha: str = prompt_base_sha,
+            prompt_head_branch: str = prompt_head_branch,
+        ) -> tuple[str, str, str]:
+            return (
+                render_implementer_prompt(
+                    candidate,
+                    target_repo=target_repo,
+                    base_sha=prompt_base_sha,
+                    head_branch=prompt_head_branch,
+                    planner_output=planner_output,
+                ),
+                render_reviewer_prompt(
+                    candidate,
+                    target_repo=target_repo,
+                    base_sha=prompt_base_sha,
+                    head_branch=prompt_head_branch,
+                    planner_output=planner_output,
+                ),
+                render_reviewer_phase_b_prompt(
+                    candidate,
+                    target_repo=target_repo,
+                    base_sha=prompt_base_sha,
+                    head_branch=prompt_head_branch,
+                    planner_output=planner_output,
+                    committed_diff="",
+                ),
+            )
+
         try:
             result = orchestrator.run_candidate(
                 candidate.candidate_id,
-                f"Plan remediation for {candidate.stable_locator}.{branch_context}",
-                f"Implement production changes for {candidate.stable_locator}; do not edit tests. "
-                "Commit the implementation with `git commit --signoff` and report the verified "
-                f"Signed-off-by trailer. Include the complete committed diff in committed_diff."
-                f"{branch_context}",
-                f"Author independent regression tests for {candidate.stable_locator}."
-                " Include the complete committed diff in committed_diff."
-                f"{branch_context}",
+                render_planner_prompt(
+                    candidate,
+                    target_repo=target_repo,
+                    base_sha=prompt_base_sha,
+                    head_branch=prompt_head_branch,
+                ),
+                "planner context is supplied after the planner session",
+                "planner context is supplied after the planner session",
                 candidate=candidate,
                 head_sha_resolver=head_sha_resolver,
+                prompt_factory=make_prompts,
             )
         except (
+            PlannerOutputError,
             SessionCeilingError,
             SessionDedupeError,
             RoleCollisionError,
@@ -1227,6 +1267,7 @@ def run_once(
                 update={
                     "state": CandidateState.DEFERRED,
                     "reason": reason,
+                    "reason_detail": str(exc) if isinstance(exc, PlannerOutputError) else None,
                 }
             )
             state_store.append(deferred)
@@ -1259,11 +1300,12 @@ def run_once(
         if isinstance(reviewer_output, Mapping):
             raw_tests = reviewer_output.get("tests")
             tests = raw_tests if isinstance(raw_tests, list) else []
-            test_paths = [
-                str(item["path"])
-                for item in tests
-                if isinstance(item, Mapping) and isinstance(item.get("path"), str)
-            ]
+            test_paths: list[str] = []
+            for item in tests:
+                if isinstance(item, Mapping) and isinstance(item.get("path"), str):
+                    path = str(item["path"])
+                    if path not in test_paths:
+                        test_paths.append(path)
             reviewed_candidate = reviewed_candidate.model_copy(
                 update={
                     "test_added": bool(tests),

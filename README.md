@@ -72,6 +72,8 @@ required by §3 0d. Issues, Actions history, Code Scanning, and token identity a
 capability probes; an unmet probe is recorded as `capability_unavailable` or
 `token_capability_missing`, rather than becoming an empty lane. Actions history resolves
 `ci_evidence_mode`; local evidence hard-disables auto-merge.
+The optional `role_session_snapshot_id` setting pins role sessions to a Devin snapshot
+prepared for the target repository; it is never hard-coded.
 
 After obtaining explicit approval for a target run, provide the Devin-created branch and run:
 
@@ -121,12 +123,15 @@ evidence, merge behavior, or production results are claimed here because LIVE ha
 | `target_repo` | `superset` | Non-empty string | GitHub target repository |
 | `rubrics_path` | `config/rubrics.yaml` | Path | Observable rubric tables |
 | `templates_dir` | `templates` | Path | Vendored issue/PR templates |
+| `role_session_snapshot_id` | unset | Optional string | Devin snapshot for target-repository role sessions |
 | `github_token` | unset | Runtime secret | Environment-only; required by LIVE |
 | `devin_api_key` | unset | Runtime secret | Environment-only; required by LIVE |
 
 `SECURITY_ISSUE_MODE=generic_tracking` and `BUDGET_HARD_MAX=25` are constants, not knobs.
 Security issues are always detail-free. Structural role separation and reviewer ownership
 are not configurable.
+An incomplete post-join reviewer diff inspection is recorded as
+`diff_review_incomplete`, distinct from an unresolved implementation/reviewer disagreement.
 
 ## Docker and Compose smoke
 

@@ -104,6 +104,7 @@ def event_from_candidate(candidate: Candidate, *, run_id: str) -> EventRecord:
         collects_single_item=candidate.collects_single_item,
         lifted_markers=candidate.lifted_markers,
         related_candidate_id=candidate.related_candidate_id,
+        disagreement_summary=candidate.disagreement_summary,
     )
 
 

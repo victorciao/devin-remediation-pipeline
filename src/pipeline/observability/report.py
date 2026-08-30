@@ -58,6 +58,37 @@ def render_run_report(
     ]
     gated_lines = [f"- `{reason}`: {count}" for reason, count in sorted(gated.items())]
     tier_lines = [f"- `{tier}`: {count}" for tier, count in sorted(tiers.items())]
+    escalated = [
+        candidate
+        for candidate in rows
+        if candidate.state is CandidateState.TERMINAL or candidate.action is Action.HUMAN_REVIEW
+    ]
+    accounted = {
+        candidate.candidate_id
+        for candidate in rows
+        if candidate.state is CandidateState.DEFERRED
+        or candidate.gate_passed is False
+        or candidate in escalated
+        or (
+            candidate.action in {Action.OPEN_PR, Action.OPEN_ISSUE}
+            and candidate.state in dispatched_states
+        )
+    }
+    escalated_lines: list[str] = []
+    for candidate in escalated:
+        escalated_lines.extend(
+            [
+                f"- `{candidate.candidate_id}` ({candidate.lane.value}, "
+                f"{candidate.tier.value if candidate.tier else 'n/a'}): "
+                f"reason={candidate.reason.value if candidate.reason else 'n/a'}",
+                f"  disagreement_summary={candidate.disagreement_summary or 'n/a'}",
+                f"  head_branch={candidate.head_branch or 'n/a'}; "
+                f"planner={candidate.planner_session_id or 'n/a'}; "
+                f"implementer={candidate.implementer_session_id or 'n/a'}; "
+                f"reviewer={candidate.reviewer_session_id or 'n/a'}",
+            ]
+        )
+    unaccounted = len(rows) - len(accounted)
     return "\n".join(
         [
             f"# Run {run_id}",
@@ -79,6 +110,11 @@ def render_run_report(
             "",
             "## Artifact links",
             *(links or ["- None"]),
+            "",
+            "## Escalated / human review",
+            *(escalated_lines or ["- None"]),
+            "",
+            f"Unaccounted: {unaccounted}",
             "",
         ]
     )

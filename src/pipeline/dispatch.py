@@ -221,6 +221,8 @@ def dispatch_candidates(candidates: Sequence[Candidate], config: PipelineConfig)
             and config.auto_merge_enabled
             and config.ci_evidence_mode is not CiEvidenceMode.LOCAL
             and not candidate.unresolved_major
+            and candidate.action is not Action.HUMAN_REVIEW
+            and candidate.state is not CandidateState.TERMINAL
         )
         if candidate.unresolved_major and config.major_only_requires_human:
             labels = _with_label(candidate, NEEDS_HUMAN_REVIEW_LABEL)

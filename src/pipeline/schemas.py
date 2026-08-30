@@ -63,6 +63,7 @@ class ReasonCode(str, Enum):
     SESSION_CEILING = "session_ceiling"
     COLLECTION_ERROR = "collection_error"
     RUBRIC_FACTOR_UNRESOLVED = "rubric_factor_unresolved"
+    DIFF_REVIEW_INCOMPLETE = "diff_review_incomplete"
 
 
 class CandidateState(str, Enum):
@@ -274,6 +275,7 @@ class Candidate(StrictModel):
     expected_failure: ExpectedFailure | None = None
     red_baseline: RedBaselineResult | None = None
     lifted_markers: list[str] = Field(default_factory=list)
+    disagreement_summary: str | None = None
 
 
 class EventRecord(StrictModel):
@@ -319,6 +321,7 @@ class EventRecord(StrictModel):
     collects_single_item: bool | None = None
     lifted_markers: list[str] = Field(default_factory=list)
     related_candidate_id: str | None = None
+    disagreement_summary: str | None = None
     attempt: int = Field(default=1, ge=1)
     is_new_session_raw: bool | None = None
     retry_decision: RetryDecision = RetryDecision.PROCEED

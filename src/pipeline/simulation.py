@@ -20,7 +20,7 @@ from pipeline.templates.render import (
 )
 
 
-def simulate_run(
+def render_run_artifacts(
     candidates: Sequence[Candidate],
     *,
     run_id: str,
@@ -38,8 +38,9 @@ def simulate_run(
     state_path = output_dir / "state" / "candidates.jsonl"
     events_path = output_dir / "reports" / "events.jsonl"
     store = CandidateStateStore(state_path)
-    for candidate in candidates:
-        store.append(candidate)
+    if config.mode.value == "simulate":
+        for candidate in candidates:
+            store.append(candidate)
 
     planner = planner_outputs or {}
     reviewer = reviewer_outputs or {}
@@ -53,18 +54,26 @@ def simulate_run(
     }
     produced: list[Path] = [state_path, events_path]
     for candidate in candidates:
+        routed = candidate.action in {Action.OPEN_PR, Action.OPEN_ISSUE}
+        if config.mode.value == "live" and not routed:
+            continue
         template_text = issue_templates[candidate.lane].read_text(encoding="utf-8")
+        summary = (
+            f"Remediation tracking for {candidate.stable_locator}."
+            if config.mode.value == "live"
+            else f"Simulated remediation for {candidate.candidate_id}."
+        )
         if not config.has_issues and config.issue_sink.value == "pr_comment":
             issue_body = render_degraded_comment_body(
                 template_text,
                 candidate,
-                generated_summary=f"Simulated remediation for {candidate.candidate_id}.",
+                generated_summary=summary,
             )
         else:
             issue_body = render_issue_body(
                 template_text,
                 candidate,
-                generated_summary=f"Simulated remediation for {candidate.candidate_id}.",
+                generated_summary=summary,
             )
             validate_issue_body(issue_body, candidate)
         issue_path = output_dir / "reports" / "issues" / f"{candidate.candidate_id}.md"
@@ -115,4 +124,6 @@ def simulate_run(
     return tuple(produced)
 
 
-__all__ = ["simulate_run"]
+simulate_run = render_run_artifacts
+
+__all__ = ["render_run_artifacts", "simulate_run"]
