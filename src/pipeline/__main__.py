@@ -1252,8 +1252,12 @@ def run_once(
                     base_sha=prompt_base_sha,
                     head_branch=prompt_head_branch,
                 ),
-                "" if config.mode is Mode.SIMULATE else None,
-                "" if config.mode is Mode.SIMULATE else None,
+                "SIMULATE implementer role; no remote session is created."
+                if config.mode is Mode.SIMULATE
+                else None,
+                "SIMULATE reviewer role; no remote session is created."
+                if config.mode is Mode.SIMULATE
+                else None,
                 candidate=candidate,
                 head_sha_resolver=head_sha_resolver,
                 prompt_factory=make_prompts if config.mode is Mode.LIVE else None,

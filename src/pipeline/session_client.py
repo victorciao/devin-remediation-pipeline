@@ -208,7 +208,7 @@ class SessionClient:
         self._total_acu = 0.0
         self._previous: dict[tuple[str, SessionRole], str] = {}
         self._issued_roles: dict[str, SessionRole] = {}
-        self._accounted_sessions: set[str] = set()
+        self._accounted_acu: dict[str, float] = {}
         self._lock = threading.Lock()
 
     @property
@@ -349,15 +349,15 @@ class SessionClient:
         session_id: str,
         response: Mapping[str, object],
     ) -> None:
-        """Account terminal-session ACU exactly once for a returned snapshot."""
+        """Account newly observed terminal-session ACU for a returned snapshot."""
         acu = response.get("acu_used", response.get("acu"))
-        used = float(acu) if isinstance(acu, (int, float)) else 0.0
+        observed = float(acu) if isinstance(acu, (int, float)) else 0.0
         with self._lock:
-            if session_id in self._accounted_sessions:
-                return
-            self._accounted_sessions.add(session_id)
-            self._total_acu += used
-            if used > self._limit(role).max_acu_limit:
+            accounted = self._accounted_acu.get(session_id, 0.0)
+            delta = max(observed - accounted, 0.0)
+            self._accounted_acu[session_id] = max(accounted, observed)
+            self._total_acu += delta
+            if observed > self._limit(role).max_acu_limit:
                 raise SessionCeilingError(f"{role.value} session exceeded max_acu_limit")
             if self._total_acu > self._max_total_acu:
                 raise SessionCeilingError("per-run ACU ceiling exceeded")
@@ -389,21 +389,15 @@ class SessionClient:
             raise ConfigError("live session orchestration requires a transport")
         deadline = self._clock() + self._limit(role).session_timeout_s
         previous_output = previous.payload.get("structured_output")
-        previous_updated = previous.payload.get("updated_at")
         while True:
             response = self._transport.get(f"/v1/sessions/{session_id}")
             status = response.get("status_enum", response.get("status"))
             if not isinstance(status, str):
                 status = "unknown"
             structured_output = response.get("structured_output")
-            updated_at = response.get("updated_at")
-            processed = structured_output != previous_output or (
-                isinstance(updated_at, str) and updated_at != previous_updated
-            )
-            if processed:
+            if status in TERMINAL_STATUSES and structured_output != previous_output:
                 snapshot = SessionSnapshot(session_id, status, response)
-                if status in TERMINAL_STATUSES:
-                    self._record_terminal_usage(role, session_id, response)
+                self._record_terminal_usage(role, session_id, response)
                 return snapshot
             if self._clock() >= deadline:
                 raise TimeoutError(

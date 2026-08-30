@@ -108,7 +108,7 @@ def render_run_report(
             "## Artifact links",
             *(links or ["- None"]),
             "",
-            "## Escalated / human review",
+            "## Failed review escalation",
             *(escalated_lines or ["- None"]),
             "",
             "## Accounting",
