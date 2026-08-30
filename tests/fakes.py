@@ -74,6 +74,8 @@ class FakeGitHubTransport:
     completed_workflow_runs: bool = False
     existing_pull_requests: Sequence[Mapping[str, object]] = ()
     labels_present: bool = True
+    label_read_error: HttpTransportError | None = None
+    label_create_error: HttpTransportError | None = None
     create_pr_error: HttpTransportError | None = None
     create_branch_error: HttpTransportError | None = None
     next_number: int = 1
@@ -114,6 +116,8 @@ class FakeGitHubTransport:
                 raise HttpTransportError("no such ref", status_code=404)
             return {"object": {"sha": sha}}
         if path.startswith(f"{prefix}/labels/"):
+            if self.label_read_error is not None:
+                raise self.label_read_error
             if self.labels_present:
                 return {"name": path.rsplit("/", 1)[-1]}
             raise HttpTransportError("no such label", status_code=404)
@@ -163,6 +167,8 @@ class FakeGitHubTransport:
             self.before_write(record)
         if path.endswith("/pulls") and self.create_pr_error is not None:
             raise self.create_pr_error
+        if path.endswith("/labels") and self.label_create_error is not None:
+            raise self.label_create_error
         if path.endswith("/git/refs") and self.create_branch_error is not None:
             raise self.create_branch_error
         self.writes.append(record)

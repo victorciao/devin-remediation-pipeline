@@ -29,7 +29,9 @@ from tests.factories import codeql_candidate
 from tests.fakes import FakeGitHubTransport
 
 RUN_ID = "run-1"
-SIMULATED_WORDING = "Simulated remediation for"
+SIMULATED_WORDING = "SIMULATED remediation for"
+SIMULATED_HEADING = "### SIMULATED ARTIFACT"
+SUPPRESSED_WORDING = "Writes are suppressed; no remote artifact exists."
 LIVE_WORDING = "Remediation tracking for"
 LIVE_STATE_FILE = "candidates-live.jsonl"
 SIMULATE_STATE_FILE = "candidates.jsonl"
@@ -140,10 +142,12 @@ def test_live_does_not_describe_its_artifacts_as_simulated(tmp_path: Path) -> No
     assert bodies != {}
     for body in bodies.values():
         assert SIMULATED_WORDING not in body
+        assert SIMULATED_HEADING not in body
+        assert SUPPRESSED_WORDING not in body
         assert LIVE_WORDING in body
 
 
-def test_live_pr_bodies_do_not_claim_a_would_write_dry_run(tmp_path: Path) -> None:
+def test_live_pr_bodies_do_not_claim_that_writes_were_suppressed(tmp_path: Path) -> None:
     """§14.1 — the PR body's automation metadata reports the mode that actually ran.
 
     The metadata block is the role loop's local evidence, so it is rendered from the
@@ -153,7 +157,8 @@ def test_live_pr_bodies_do_not_claim_a_would_write_dry_run(tmp_path: Path) -> No
     body = (tmp_path / "out" / "reports" / "prs" / "codeql-pr.md").read_text(encoding="utf-8")
 
     assert "**mode**: live" in body
-    assert "**would_write**: False" in body
+    assert "**writes_suppressed**: False" in body
+    assert "**artifact_simulated**: False" in body
 
 
 def test_simulate_keeps_its_breadth_and_its_wording(tmp_path: Path) -> None:
@@ -164,6 +169,46 @@ def test_simulate_keeps_its_breadth_and_its_wording(tmp_path: Path) -> None:
     assert set(bodies) == {"codeql-pr", "codeql-issue", "codeql-gated", "codeql-budget"}
     for candidate_id, body in bodies.items():
         assert f"{SIMULATED_WORDING} {candidate_id}." in body
+
+
+def test_a_simulated_body_says_on_its_face_that_no_write_happened(tmp_path: Path) -> None:
+    """§17 (10) — a simulated artifact read out of context must not look like a real one.
+
+    A rendered body is a file someone can open months later with no memory of the mode it came
+    from, so the heading and the suppression statement travel with the body itself.
+    """
+    render(Mode.SIMULATE, tmp_path / "out", **ROLE_OUTPUTS)
+    bodies = issue_bodies(tmp_path / "out")
+
+    assert bodies != {}
+    for body in bodies.values():
+        assert SIMULATED_HEADING in body
+        assert SUPPRESSED_WORDING in body
+
+    pr_body = (tmp_path / "out" / "reports" / "prs" / "codeql-pr.md").read_text(encoding="utf-8")
+
+    assert SIMULATED_HEADING in pr_body
+    assert "**writes_suppressed**: True" in pr_body
+    assert "**artifact_simulated**: True" in pr_body
+
+
+def test_simulated_durable_rows_are_stamped_as_simulated(tmp_path: Path) -> None:
+    """§17 (10) — the durable row is what a later LIVE run reads, so it carries the stamp.
+
+    Without it a crashed SIMULATE run's lifecycle rows are indistinguishable from a run that
+    actually published, which is the dedupe hazard the stamp exists to close.
+    """
+    render(Mode.SIMULATE, tmp_path / "out")
+    simulated = CandidateStateStore(tmp_path / "out" / "state" / SIMULATE_STATE_FILE).rows()
+
+    assert simulated != []
+    assert all(row.artifact_simulated for row in simulated)
+
+    render(Mode.LIVE, tmp_path / "live")
+    published = CandidateStateStore(tmp_path / "live" / "state" / LIVE_STATE_FILE).rows()
+
+    assert published != []
+    assert not any(row.artifact_simulated for row in published)
 
 
 def test_simulate_run_is_still_the_same_callable(tmp_path: Path) -> None:

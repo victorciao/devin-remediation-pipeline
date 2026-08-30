@@ -22,6 +22,7 @@ from pipeline.github_client import (
     ClosedPullRequestError,
     GitHubClient,
     GitHubResponseError,
+    LabelCapabilityError,
     MergedPullRequestError,
     SimulationWriteError,
     maybe_upgrade_ci_mode,
@@ -932,3 +933,39 @@ def test_ensure_label_creates_a_missing_label_once() -> None:
     assert client.ensure_label("needs-human-review") is True
     assert client.ensure_label("needs-human-review") is True
     assert transport.write_paths == ["/repos/victorciao/superset/labels"]
+
+
+def test_a_label_that_cannot_be_read_fails_closed() -> None:
+    """§17 — an unreadable required label is a capability failure, not an absent label.
+
+    Treating a `403` like a `404` would make the client attempt a creation it cannot perform and
+    then publish an unlabelled human-review artifact, which is the routing §14 requires.
+    """
+    transport = FakeGitHubTransport(
+        label_read_error=HttpTransportError("forbidden", status_code=403)
+    )
+    client = GitHubClient(live_config(), transport=transport)
+
+    with pytest.raises(LabelCapabilityError, match="needs-human-review"):
+        client.ensure_label("needs-human-review")
+    assert transport.writes == []
+
+
+def test_a_label_creation_denial_fails_closed_and_stays_denied() -> None:
+    """§17 — the fork may not carry `needs-human-review`, so creation is part of the path."""
+    transport = FakeGitHubTransport(
+        labels_present=False,
+        label_create_error=HttpTransportError("forbidden", status_code=403),
+    )
+    client = GitHubClient(live_config(), transport=transport)
+
+    with pytest.raises(LabelCapabilityError, match="needs-human-review"):
+        client.ensure_label("needs-human-review")
+    with pytest.raises(LabelCapabilityError, match="needs-human-review"):
+        client.ensure_label("needs-human-review")
+    assert transport.writes == []
+
+
+def test_a_denied_label_carries_the_capability_reason_code() -> None:
+    """§17 — the raised error names the reason a caller must persist on the candidate."""
+    assert LabelCapabilityError("denied").reason is ReasonCode.LABEL_CAPABILITY_UNAVAILABLE

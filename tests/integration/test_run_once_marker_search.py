@@ -26,7 +26,13 @@ from pipeline.config import Mode, PipelineConfig
 from pipeline.http_transport import HttpTransportError
 from pipeline.lanes.codeql import read_alert_fixture
 from pipeline.observability.events import EventLog
-from pipeline.schemas import CandidateState, ReasonCode, RunEventRecord
+from pipeline.schemas import (
+    CandidateState,
+    EventRecord,
+    ReasonCode,
+    RunEventRecord,
+)
+from pipeline.state import MarkerSearchOutcome
 from tests.conftest import FIXTURES_DIR, RUBRICS_PATH, TARGET_CHECKOUT, TEMPLATES_DIR
 from tests.fakes import FakeGitHubTransport, WriteRecord
 
@@ -70,6 +76,10 @@ class AbortedRun:
     def events(self) -> list[RunEventRecord]:
         """Every Layer 1 run-level event written before the abort."""
         return EventLog(self.output_dir / "reports" / "events.jsonl").read_run_events()
+
+    def candidate_events(self) -> list[EventRecord]:
+        """Every Layer 1 per-candidate event written before the abort."""
+        return EventLog(self.output_dir / "reports" / "events.jsonl").read()
 
 
 def read_rows(path: Path) -> list[dict[str, Any]]:
@@ -180,10 +190,33 @@ def test_the_durable_state_rows_survive_the_abort(aborted_run: AbortedRun) -> No
     assert rows != []
     assert deferred != []
     assert all(
-        row["reason"] == ReasonCode.CAPABILITY_UNAVAILABLE.value
+        row["reason"] == ReasonCode.MARKER_SEARCH_FAILED.value
         for row in deferred
         if row["action"] == "open_pr"
     )
+
+
+def test_the_rows_record_that_the_lookup_failed_not_merely_that_nothing_published(
+    aborted_run: AbortedRun,
+) -> None:
+    """§17 (10) — "could not look" and "looked and did not publish" are different facts.
+
+    A row that only said `capability_unavailable` left a later reader unable to tell whether
+    dedupe had been consulted at all, which is precisely the state in which a republish is
+    unsafe.
+    """
+    deferred = [row for row in aborted_run.rows() if row["state"] == CandidateState.DEFERRED.value]
+
+    assert deferred != []
+    assert all(row["marker_search_outcome"] == MarkerSearchOutcome.FAILED.value for row in deferred)
+    deferred_ids = {row["candidate_id"] for row in deferred}
+    events = [
+        event for event in aborted_run.candidate_events() if event.candidate_id in deferred_ids
+    ]
+
+    assert events != []
+    assert all(event.marker_search_outcome == MarkerSearchOutcome.FAILED.value for event in events)
+    assert all(event.reason is ReasonCode.MARKER_SEARCH_FAILED for event in events)
 
 
 def test_no_candidate_is_reported_dispatched_after_the_abort(aborted_run: AbortedRun) -> None:

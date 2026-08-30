@@ -382,23 +382,57 @@ def test_session_ceiling_abort_is_recorded_as_a_terminal_event() -> None:
     assert recorded.terminal_outcome is not None
 
 
-def test_the_acu_ceiling_defers_the_candidate_with_its_own_reason() -> None:
-    """§12.2/§13 — the per-run ACU ceiling is enforced on poll and carries `session_ceiling`.
+def test_the_run_acu_ceiling_is_projected_before_the_session_is_created() -> None:
+    """§12.2/§13 — the ceiling is checked against `_total_acu + max_acu_limit`, before creation.
 
-    The reason code is what makes the deferral accountable: the run-level handler appends the
-    in-flight candidate as `deferred`/`session_ceiling` and still reaches publication, so an
-    exhausted budget costs one candidate rather than the run's whole report.
+    Enforcing it only on poll spends the session first: the run has already paid for work it
+    refuses to accept. The refusal must therefore happen with no session created at all, and
+    carry `session_ceiling` so the run-level handler can defer that one candidate and still
+    reach publication.
     """
     transport = FakeTransport(
         get_responses=[terminal_response(SessionRole.PLANNER, acu_used=40.0)],
     )
-    client = SessionClient(live_config(), transport=transport, max_total_acu=10.0)
-    attempt = client.create_session(SessionRole.PLANNER, "cand-1", "prompt")
+    client = SessionClient(
+        live_config(),
+        transport=transport,
+        max_total_acu=10.0,
+        role_limits={SessionRole.PLANNER: RoleLimits(max_acu_limit=40.0)},
+    )
 
     with pytest.raises(SessionCeilingError) as excinfo:
-        client.poll_session(SessionRole.PLANNER, attempt.session_id)
+        client.create_session(SessionRole.PLANNER, "cand-1", "prompt")
 
     assert excinfo.value.reason is ReasonCode.SESSION_CEILING
+    assert transport.posts == []
+
+
+def test_a_projection_that_fits_still_refuses_the_next_session() -> None:
+    """§12.2/§13 — the projection is cumulative: the first session fits, the second cannot.
+
+    A per-run ceiling that only rejects the first oversized request would let an arbitrary number
+    of just-fitting sessions run past it.
+    """
+    transport = FakeTransport(
+        get_responses=[terminal_response(SessionRole.PLANNER, acu_used=8.0)],
+    )
+    client = SessionClient(
+        live_config(),
+        transport=transport,
+        max_total_acu=12.0,
+        role_limits={
+            SessionRole.PLANNER: RoleLimits(max_acu_limit=10.0),
+            SessionRole.IMPLEMENTER: RoleLimits(max_acu_limit=10.0),
+        },
+    )
+    attempt = client.create_session(SessionRole.PLANNER, "cand-1", "prompt")
+    client.poll_session(SessionRole.PLANNER, attempt.session_id)
+
+    with pytest.raises(SessionCeilingError) as excinfo:
+        client.create_session(SessionRole.IMPLEMENTER, "cand-1", "prompt")
+
+    assert excinfo.value.reason is ReasonCode.SESSION_CEILING
+    assert len(transport.posts) == 1
 
 
 def test_per_session_acu_limit_is_enforced() -> None:

@@ -10,6 +10,7 @@ from pydantic import SecretStr
 
 from pipeline.config import (
     BUDGET_HARD_MAX,
+    DEFAULT_SESSION_TIMEOUT_S,
     SECURITY_ISSUE_MODE,
     CiEvidenceMode,
     ConfigError,
@@ -169,3 +170,36 @@ def test_local_ci_evidence_hard_disables_auto_merge_on_every_path() -> None:
         ).auto_merge_enabled
         is False
     )
+
+
+def test_the_reservation_lease_defaults_to_three_role_session_timeouts() -> None:
+    """§17 — a lease must outlive the role loop it protects, so its default is derived from it.
+
+    A run holds its claim across the planner, implementer and reviewer sessions; a lease shorter
+    than that window would expire mid-loop and let a second run reserve the same candidate, which
+    is the duplicate-artifact hazard the claim exists to close.
+    """
+    assert PipelineConfig().reservation_lease_s == 3 * DEFAULT_SESSION_TIMEOUT_S
+    assert (
+        load_config(env={}).reservation_lease_s
+        == PipelineConfig(reservation_lease_s=None).reservation_lease_s
+    )
+
+
+def test_a_lease_shorter_than_one_role_session_is_a_startup_error() -> None:
+    """§17 — an unenforceable lease is refused at startup, not discovered mid-run."""
+    with pytest.raises(ConfigError, match="reservation_lease_s"):
+        PipelineConfig(reservation_lease_s=DEFAULT_SESSION_TIMEOUT_S - 1)
+    with pytest.raises(ConfigError, match="reservation_lease_s"):
+        load_config(env={"PIPELINE_RESERVATION_LEASE_S": str(DEFAULT_SESSION_TIMEOUT_S - 1)})
+
+    assert (
+        PipelineConfig(reservation_lease_s=DEFAULT_SESSION_TIMEOUT_S).reservation_lease_s
+        == DEFAULT_SESSION_TIMEOUT_S
+    )
+
+
+def test_the_removed_human_review_knob_has_no_environment_name_either() -> None:
+    """§17 (l.1016) — the invariant would be undone by a surviving env override."""
+    with pytest.raises(ConfigError, match="MAJOR_ONLY_REQUIRES_HUMAN"):
+        load_config(env={"PIPELINE_MAJOR_ONLY_REQUIRES_HUMAN": "false"})

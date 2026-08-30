@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from pipeline.config import PipelineConfig
+from pipeline.config import Mode, PipelineConfig
 from pipeline.observability.events import EventLog, append_candidate_events, event_from_candidate
 from pipeline.observability.kpis import (
     NotApplicable,
@@ -570,7 +570,26 @@ def test_kpi_report_is_written_to_the_local_sink(
 
     write_kpi_report(path, [], [merged("c1")], {}, simulate_config)
 
-    assert path.read_text(encoding="utf-8").startswith("# Remediation KPI rollup")
+    assert path.read_text(encoding="utf-8").startswith("# SIMULATED Remediation KPI rollup")
+
+
+def test_the_kpi_title_says_simulated_only_when_writes_were_suppressed(
+    simulate_config: PipelineConfig,
+) -> None:
+    """§17 (10) — a simulated rollup must not be mistakable for a run that published.
+
+    The numbers of a SIMULATE run describe artifacts that do not exist; the title is the one
+    line every reader sees, so it carries the distinction rather than leaving it to the `mode`
+    field further down.
+    """
+    live = simulate_config.model_copy(update={"mode": Mode.LIVE})
+
+    simulated = render_kpi_report([], [merged("c1")], {}, simulate_config)
+    published = render_kpi_report([], [merged("c1")], {}, live)
+
+    assert simulated.startswith("# SIMULATED Remediation KPI rollup")
+    assert published.startswith("# Remediation KPI rollup")
+    assert "SIMULATED" not in published
 
 
 def test_run_report_lists_dispatched_and_deferred() -> None:

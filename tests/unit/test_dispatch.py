@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from pydantic import SecretStr
 
-from pipeline.config import CiEvidenceMode, IssueSink, Mode, PipelineConfig
+from pipeline.config import CiEvidenceMode, ConfigError, IssueSink, Mode, PipelineConfig
 from pipeline.dispatch import (
     DROPPED_REASONS,
     HUMAN_ROUTED_REASONS,
@@ -426,14 +426,24 @@ def test_unresolved_major_never_auto_merges_at_dispatch() -> None:
     assert NEEDS_HUMAN_REVIEW_LABEL in decision.labels
 
 
-def test_major_only_requires_human_false_still_blocks_auto_merge() -> None:
-    """§17 — the knob may drop the human-review routing, never the auto-merge block."""
-    config = github_config(major_only_requires_human=False)
+def test_no_configuration_can_unblock_an_unresolved_major() -> None:
+    """§17 (l.1016) — an unresolved `major` blocks auto-merge under every configuration.
+
+    The clause was written against a knob that could only ever weaken it, so the invariant is
+    stated over the configuration surface itself: there is no accepted key that turns the §14
+    human-review routing off, and the routing holds for a default and a maximally permissive
+    configuration alike.
+    """
+    assert "major_only_requires_human" not in PipelineConfig.model_fields
+    with pytest.raises(ConfigError, match="major_only_requires_human"):
+        PipelineConfig(major_only_requires_human=False)
+
     candidate = high_candidate(risk=1, unresolved_major=True)
+    for config in (pipeline_config(), github_config()):
+        decision = dispatch_candidates([candidate], config)[0]
 
-    decision = dispatch_candidates([candidate], config)[0]
-
-    assert decision.auto_merge_eligible is False
+        assert decision.auto_merge_eligible is False
+        assert NEEDS_HUMAN_REVIEW_LABEL in decision.labels
 
 
 def test_high_risk_candidate_is_labelled_and_never_auto_merged() -> None:

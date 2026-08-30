@@ -4,14 +4,21 @@ from __future__ import annotations
 
 import pytest
 
+from pipeline.config import PipelineConfig
 from pipeline.red_baseline import (
     apply_red_baseline,
     classify_red_baseline,
     should_reauthor_baseline,
     validate_nested_marker_lifts,
 )
-from pipeline.review_loop import ReviewLoopResult, apply_review_result
+from pipeline.review_loop import (
+    ReviewIteration,
+    ReviewLoopResult,
+    apply_review_result,
+    run_review_loop,
+)
 from pipeline.schemas import (
+    NEEDS_HUMAN_REVIEW_LABEL,
     Action,
     BaselineStatus,
     Candidate,
@@ -279,8 +286,13 @@ def test_stale_skip_is_a_successful_reviewer_only_terminal_outcome() -> None:
     assert reviewed.auto_merge_eligible is False
 
 
-def test_invalid_baseline_routes_back_to_the_gate_with_its_own_reason() -> None:
-    """§9.1 — an unusable baseline is re-gated, and only the routing owner may say so."""
+def test_invalid_baseline_escalation_is_terminal_never_back_to_gated() -> None:
+    """§9.1 (l.441-446) — one re-author, then `terminal`/`invalid_red_baseline`/human review.
+
+    `gated` is a pre-dispatch state, so a backwards edge there would re-gate, re-score and re-open
+    three role sessions on a candidate already known to fail, on this and every later run, while
+    reporting it in the cheap pre-dispatch bucket. The baseline facts must survive the routing.
+    """
     candidate = lane2_candidate(nodeid=ITEM, gate_passed=True, score=128.0, risk=1)
     result = classify_red_baseline(EXPECTED, [outcome(ITEM, ItemOutcome.SKIPPED)])
 
@@ -291,11 +303,28 @@ def test_invalid_baseline_routes_back_to_the_gate_with_its_own_reason() -> None:
     assert applied.state is candidate.state
     assert applied.reason is candidate.reason
 
-    reviewed = routed(applied, result)
+    invalid = ReviewIteration(
+        red_baseline=BaselineStatus.INVALID_RED_BASELINE,
+        green=False,
+        diff_reviewed=True,
+        red_result=result,
+    )
+    loop = run_review_loop(PipelineConfig(iteration_cap=5), invalid, lambda _ordinal: invalid)
 
+    assert loop.iterations == 2, "the re-author attempt is bounded at one"
+
+    reviewed = apply_review_result(applied, loop)
+
+    assert reviewed.state is CandidateState.TERMINAL
+    assert reviewed.state.value != CandidateState.GATED.value
     assert reviewed.reason is ReasonCode.INVALID_RED_BASELINE
-    assert reviewed.state is CandidateState.GATED
+    assert reviewed.action is Action.HUMAN_REVIEW
+    assert NEEDS_HUMAN_REVIEW_LABEL in reviewed.labels
     assert reviewed.auto_merge_eligible is False
+    assert reviewed.red_baseline is not None
+    assert reviewed.red_baseline.status is BaselineStatus.INVALID_RED_BASELINE
+    assert reviewed.red_baseline.per_item_outcomes == result.per_item_outcomes
+    assert reviewed.red_baseline.expected_failure == result.expected_failure
 
 
 def test_valid_baseline_only_records_evidence() -> None:

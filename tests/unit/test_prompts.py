@@ -24,6 +24,7 @@ from tests.factories import codeql_candidate, lane2_candidate, lane3_candidate
 TARGET_REPO = "victorciao/superset"
 BASE_SHA = "a" * 40
 HEAD_BRANCH = "devin/codeql-0"
+HEAD_SHA = "b" * 40
 NODEID = "tests/unit_tests/db_engine_specs/test_base.py::test_normalize_indexes"
 
 
@@ -84,6 +85,7 @@ def role_prompts(candidate: Candidate, **overrides: Any) -> list[str]:  # noqa: 
             head_branch=HEAD_BRANCH,
             planner_output=output,
             committed_diff="--- a/superset/db_engine_specs/base.py\n+++ b/x\n",
+            head_sha=HEAD_SHA,
         ),
     ]
 
@@ -163,10 +165,41 @@ def test_the_phase_b_prompt_carries_the_implementer_diff() -> None:
         head_branch=HEAD_BRANCH,
         planner_output=planner_output(),
         committed_diff="-        return None\n+        return indexes\n",
+        head_sha=HEAD_SHA,
     )
 
     assert "+        return indexes" in prompt
-    assert "diff_reviewed true only after actually reading the diff" in prompt
+    assert "a boolean is rejected" in prompt
+
+
+def test_the_phase_b_prompt_dictates_the_head_sha_and_the_paths_to_report() -> None:
+    """§14.1 (l.918-922) / §17 — phase B is asked about one resolved revision, not "the branch".
+
+    The response object the reviewer is told to fill carries the resolved head SHA and every
+    changed path, so `validated_diff_review` can reject an answer about a different revision or
+    an answer that read only part of the diff. A prompt that named neither would make the
+    validator's rejection unanswerable.
+    """
+    prompt = render_reviewer_phase_b_prompt(
+        codeql_candidate(),
+        target_repo=TARGET_REPO,
+        base_sha=BASE_SHA,
+        head_branch=HEAD_BRANCH,
+        planner_output=planner_output(),
+        committed_diff=(
+            "--- a/superset/db_engine_specs/base.py\n"
+            "+++ b/superset/db_engine_specs/base.py\n"
+            "--- a/tests/unit_tests/db_engine_specs/test_base.py\n"
+            "+++ b/tests/unit_tests/db_engine_specs/test_base.py\n"
+        ),
+        head_sha=HEAD_SHA,
+    )
+
+    assert HEAD_SHA in prompt
+    assert '"head_sha": "' + HEAD_SHA + '"' in prompt
+    assert '"superset/db_engine_specs/base.py"' in prompt
+    assert '"tests/unit_tests/db_engine_specs/test_base.py"' in prompt
+    assert "Every changed path must appear in files_read" in prompt
 
 
 def test_an_oversized_phase_b_diff_is_replaced_by_a_read_instruction() -> None:
@@ -180,6 +213,7 @@ def test_an_oversized_phase_b_diff_is_replaced_by_a_read_instruction() -> None:
         head_branch=HEAD_BRANCH,
         planner_output=planner_output(),
         committed_diff=huge,
+        head_sha=HEAD_SHA,
     )
 
     assert "diff omitted" in prompt

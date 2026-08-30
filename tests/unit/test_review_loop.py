@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 
 import pytest
 
@@ -235,12 +236,13 @@ def test_an_implementer_test_edit_outranks_a_missing_role_commit() -> None:
     assert result.reason is ReasonCode.IMPLEMENTER_TEST_EDIT
 
 
-def test_a_detected_disagreement_is_named_even_before_a_diff_review() -> None:
-    """§9.2 — a gate that positively detected a disagreement reports what it detected.
+def test_an_unreviewed_disagreement_is_incomplete_but_still_named() -> None:
+    """§9 (l.426) — an iteration without a diff review is incomplete, whatever else it found.
 
-    The empty-`committed_diff` and `base_sha == head_sha` gates raise a
-    `disagreement_unresolved` finding without needing a diff review; that detection is
-    more specific than the absence of a review and must not be relabelled.
+    The empty-`committed_diff` gate raises a `disagreement_unresolved` finding without any diff
+    review, so the two labels compete. "Incomplete" is the honest one — nobody read the diff, so
+    no disagreement was adjudicated — and the §9.5 handoff summary has to say so, while the same
+    detection *with* a review is a real adjudicated disagreement.
     """
     detected = iteration(
         diff_reviewed=False,
@@ -256,7 +258,14 @@ def test_a_detected_disagreement_is_named_even_before_a_diff_review() -> None:
 
     result = run_review_loop(PipelineConfig(), detected, lambda _ordinal: detected)
 
-    assert result.reason is ReasonCode.DISAGREEMENT_UNRESOLVED
+    assert result.reason is ReasonCode.DIFF_REVIEW_INCOMPLETE
+    assert result.disagreement_summary is not None
+    assert "reviewer diff review incomplete" in result.disagreement_summary
+
+    reviewed = replace(detected, diff_reviewed=True)
+    adjudicated = run_review_loop(PipelineConfig(), reviewed, lambda _ordinal: reviewed)
+
+    assert adjudicated.reason is ReasonCode.DISAGREEMENT_UNRESOLVED
 
 
 def test_a_finding_carries_the_file_and_line_it_was_raised_against() -> None:
@@ -590,12 +599,19 @@ def test_invalid_red_baseline_is_reauthored_once_then_escalates() -> None:
     assert result.iterations == 2
 
 
-def test_unresolved_major_blocks_auto_merge_even_when_humans_are_not_required() -> None:
-    """§17 — `major_only_requires_human = false` still blocks auto-merge."""
-    config = PipelineConfig(iteration_cap=1, major_only_requires_human=False)
+def test_unresolved_major_blocks_auto_merge_with_no_knob_to_relax_it() -> None:
+    """§17 (l.1016) — the unresolved-`major` block is evaluated without consulting configuration.
+
+    `evaluate_review_iteration` used to take the routing policy as a keyword, which is the only
+    way a caller could have relaxed it; the clause holds now because the decision has no such
+    input at all.
+    """
     major = iteration(findings=(ReviewFinding(FindingSeverity.MAJOR, "AC-1", "unresolved"),))
 
-    result = run_review_loop(config, major)
+    with pytest.raises(TypeError):
+        evaluate_review_iteration(major, major_only_requires_human=False)  # type: ignore[call-arg]
+
+    result = run_review_loop(PipelineConfig(iteration_cap=1), major)
 
     assert result.converged is False
     assert apply_review_result(eligible_candidate(), result).auto_merge_eligible is False

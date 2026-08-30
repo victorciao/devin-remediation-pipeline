@@ -20,7 +20,7 @@ from pipeline import __main__ as entrypoint
 from pipeline.config import CiEvidenceMode, IssueSink, Mode, PipelineConfig
 from pipeline.http_transport import HttpTransportError
 from pipeline.schemas import Action, Candidate, CandidateState, ReasonCode, RunEventRecord, Tier
-from pipeline.state import CandidateStateStore, MarkerArtifact
+from pipeline.state import CandidateStateStore, MarkerArtifact, MarkerSearchOutcome
 from tests.conftest import RUBRICS_PATH, TEMPLATES_DIR
 from tests.factories import codeql_candidate
 from tests.fakes import (
@@ -73,7 +73,13 @@ def live_config(**fields: Any) -> PipelineConfig:  # noqa: ANN401
 
 
 def publishable(**fields: Any) -> Candidate:  # noqa: ANN401
-    """A reviewed HIGH-tier candidate whose branch has already been prepared."""
+    """A reviewed HIGH-tier candidate whose branch has already been prepared.
+
+    `reviewed_head_sha` is part of being *reviewed*: §17 renders the local-evidence `diff_range`
+    from the head the reviewer actually read, so a candidate without one cannot pass
+    `validate_pr_body` under `ci_evidence_mode=local`.
+    """
+    fields.setdefault("reviewed_head_sha", HEAD_SHA)
     return codeql_candidate(
         tier=fields.pop("tier", Tier.HIGH),
         action=fields.pop("action", Action.OPEN_PR),
@@ -386,7 +392,12 @@ def test_a_marker_hit_without_local_state_defers_instead_of_duplicating(tmp_path
 
 
 def test_an_unavailable_marker_search_defers_before_the_first_write(tmp_path: Path) -> None:
-    """§14.1 — fail closed: an unverifiable candidate performs no first remote write."""
+    """§14.1 (l.931-933) — fail closed, and say "could not look" rather than "not published".
+
+    The deferral reason and the persisted `MarkerSearchOutcome` both have to name the failed
+    lookup: `capability_unavailable` would read as an attempted publication that lost a
+    capability, which is the confusion the clause forbids.
+    """
 
     def failing(_marker: str) -> MarkerArtifact | None:
         raise OSError("search unavailable")
@@ -397,7 +408,9 @@ def test_an_unavailable_marker_search_defers_before_the_first_write(tmp_path: Pa
 
     assert harness.transport.writes == []
     assert published[0].state is CandidateState.DEFERRED
-    assert published[0].reason is ReasonCode.CAPABILITY_UNAVAILABLE
+    assert published[0].reason is ReasonCode.MARKER_SEARCH_FAILED
+    assert published[0].marker_search_outcome == MarkerSearchOutcome.FAILED.value
+    assert published[0].reason_detail == MarkerSearchOutcome.FAILED.value
 
 
 # -- §11 merged and closed classification ------------------------------------------------
@@ -798,3 +811,70 @@ def test_log_only_candidates_are_passed_through_untouched(tmp_path: Path) -> Non
     assert harness.transport.writes == []
     assert harness.store.rows() == []
     assert published[0].action is Action.LOG_ONLY
+
+
+def test_a_required_label_that_cannot_be_read_defers_that_candidate(tmp_path: Path) -> None:
+    """§17 — a denied required label defers with `label_capability_unavailable`, before any write.
+
+    The human-review label is the only routing the pipeline has for a candidate a human must look
+    at; publishing an artifact that silently lacks it would put the change in the merge queue's
+    blind spot, so the label capability is proven before the issue is opened.
+    """
+    transport = green_transport(
+        label_read_error=HttpTransportError("forbidden", status_code=403),
+    )
+    harness = Harness(tmp_path, transport=transport)
+
+    published = harness.publish(publishable(labels=["needs-human-review"]))
+
+    assert published[0].state is CandidateState.DEFERRED
+    assert published[0].reason is ReasonCode.LABEL_CAPABILITY_UNAVAILABLE
+    assert published[0].auto_merge_eligible is False
+    assert harness.artifact_writes == []
+
+
+def test_a_missing_human_review_label_is_created_rather_than_assumed(tmp_path: Path) -> None:
+    """§17 — the fork does not carry `needs-human-review`, so creation is part of the path."""
+    transport = green_transport(labels_present=False)
+    harness = Harness(tmp_path, transport=transport)
+
+    published = harness.publish(publishable(labels=["needs-human-review"]))
+
+    assert "/repos/victorciao/superset/labels" in transport.write_paths
+    assert published[0].pr_number is not None
+    assert "needs-human-review" in transport.labels_for(published[0].pr_number)
+    assert published[0].state is CandidateState.ISSUE_PATCHED
+
+
+def test_a_body_that_fails_validation_defers_only_its_own_candidate(tmp_path: Path) -> None:
+    """§17 — validation runs before that candidate's first write and isolates the failure.
+
+    The previous behaviour validated after opening the issue and then rewrote every candidate in
+    the pass as `capability_unavailable`, so one unrenderable body erased a run's worth of work.
+    """
+    harness = Harness(
+        tmp_path,
+        config=live_config(ci_evidence_mode=CiEvidenceMode.LOCAL),
+        transport=green_transport(),
+    )
+
+    published = harness.publish(
+        publishable(candidate_id="codeql-0", head_branch="devin/codeql-0", reviewed_head_sha=None),
+        publishable(candidate_id="codeql-1", head_branch="devin/codeql-1"),
+    )
+
+    assert published[0].state is CandidateState.DEFERRED
+    assert published[0].reason is ReasonCode.ARTIFACT_VALIDATION_FAILED
+    assert published[0].issue_number is None
+    assert [row.state for row in harness.store.rows() if row.candidate_id == "codeql-0"] == [
+        CandidateState.DISPATCHING,
+        CandidateState.DEFERRED,
+    ]
+
+    assert published[1].state is CandidateState.ISSUE_PATCHED
+    assert harness.latest("codeql-1").reason is None
+    assert all(
+        row.reason is not ReasonCode.CAPABILITY_UNAVAILABLE
+        for row in harness.store.rows()
+        if row.candidate_id == "codeql-1"
+    )
