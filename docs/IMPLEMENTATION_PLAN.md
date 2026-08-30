@@ -7,12 +7,21 @@ This repo (REPO A) finds real technical debt in the Superset fork `victorciao/su
 Two loops exist and they are separate:
 
 - **Build time (§3)** — how this repo is built, once, by a planner / implementer / reviewer trio of Devin sessions.
-- **Runtime (§4)** — what the pipeline does per candidate, on every run. **High tier: one Devin session and one GitHub artifact, the PR. Medium tier: one tracking issue, no session and no branch. Low tier: nothing.**
+- **Runtime (§4)** — what the pipeline does per candidate, on every run. **High tier: one Devin session and two GitHub artifacts — a tracking issue, then the PR that closes it. Medium tier: one tracking issue, no session and no branch. Low tier: nothing.**
+
+### 1.1 Requirements this repo satisfies
+
+- REPO B is a fork of `apache/superset` (`victorciao/superset`), and every write lands there.
+- Issues are created in the fork for the debt that is remediated: a high-tier candidate's issue is opened at dispatch and closed by its PR (§11). Medium-tier issues cover ranked debt held back for a human.
+- Runs are event-driven (§5): the fork's CodeQL analysis completing on `master`, a weekly cron, `workflow_dispatch`.
+- Devin sessions are created and managed programmatically through the Devin API (§9).
+- Outputs are observable by a technical audience: PRs and issues on the fork, the JSONL event log, the KPI rollup, the run report and `RESULTS.md` (§14).
+- The repo is public, runs under `docker compose`, and its README covers how to run LIVE and how to SIMULATE (§15).
 
 ## 2. Out of scope
 
 - Low-tier candidates are reported only: no session, no artifact.
-- No companion artifacts beyond the one per candidate: no PR comments, no issue attached to a PR candidate, no `Closes #n` cross-link, no patching an artifact after it is written.
+- No companion artifacts beyond a high-tier candidate's issue and PR: no PR comments, no patching an artifact after it is written.
 - No frontend lane: JS/TS alerts are enumerated and reported, never dispatched. No dashboards or hosted services; the outputs are Markdown reports and a JSONL log.
 
 ## 3. Build-time loop: planner, implementer, reviewer
@@ -56,15 +65,15 @@ test belongs in this repo's own CI, which §17 covers.
 |---|---|---|---|---|
 | `enumerated` | a lane emits it, criterion declared | gate | none | no |
 | `gated` | all gates passed | score | none | no |
-| `scored` | tier and merge mode assigned | high tier: dispatch if within `budget_N`; medium tier: publish an issue; low tier: report | none | no |
-| `dispatching` | branch created, session launched | poll the session | branch | no |
+| `scored` | tier and merge mode assigned | high tier: publish the tracking issue, then dispatch, if within `budget_N`; medium tier: publish an issue; low tier: report | none | no |
+| `issue_created` | issue exists (created or marker-adopted) and its number is recorded | high tier: create the branch and dispatch; medium tier: record KPIs | issue | medium tier: **yes** |
+| `dispatching` | branch created, session launched | poll the session | issue + branch | no |
 | `session_done` | session terminal with required output | evaluate the criterion (§10) | branch | no |
-| `verified` | criterion satisfied, evidence recorded | render + create PR | branch | no |
-| `pr_created` | PR exists and its number is recorded | watch the head's check runs (§12) | PR | no |
-| `issue_created` | medium tier: issue exists (created or marker-adopted) and its number is recorded | record KPIs | issue | **yes** |
+| `verified` | criterion satisfied, evidence recorded | render + create the PR, `Closes #<issue_number>` | issue + branch | no |
+| `pr_created` | PR exists and its number is recorded | watch the head's check runs (§12) | issue + PR | no |
 | `awaiting_human_merge` | `merge_mode = manual`, §12 gate green | leave open, report it | PR | **yes** |
 | `merged` | `merge_mode = auto`, §12 gate green, merge succeeded | record KPIs | PR | **yes** |
-| `terminal` | any §13 failure | record reason; never merge | ≤1 PR | **yes** |
+| `terminal` | any §13 failure | record reason; never merge | ≤1 issue, ≤1 PR | **yes** |
 | `deferred` | budget overflow, session ceiling, transport error | retry next run | ≤1 PR | no |
 
 Terminal reasons: `session_failed`, `session_blocked`, `criterion_not_met`, `invalid_red_baseline`, `stale_skip`, `green_not_reached`, `alert_still_present`, `symbol_still_referenced`, `suite_regressed`, `ci_check_failed`, `ci_evidence_unavailable`, `artifact_validation_failed`, `manual_merge_required`, `human_routed` (a gate
@@ -155,14 +164,18 @@ all settles `terminal/criterion_not_met` with what was attempted.
 
 ## 11. Publication
 
-Duplicate detection differs between the two artifacts, and the asymmetry is deliberate:
+A high-tier candidate has exactly **two writes in a fixed order: the tracking issue, then the PR**. The issue is created at dispatch time, before the session, and states the debt the pipeline intends to remediate; it carries the same hidden marker and the same lane / locator / score / factor-breakdown body as a medium-tier
+issue. The PR body then contains `Closes #<issue_number>`, which cross-links both directions and closes the issue on merge, so **there is deliberately no third write**: no issue patch, no PR link written back to the issue. That patch write is what would reopen a crash window, and `Closes` removes the need for it. If the issue
+write succeeds and the candidate later fails its criterion, the issue stays open with no PR — a correct outcome, recorded as such on the state row and in the report. Medium tier is issue-only: no session, no branch, no PR, no merge.
+
+Each run reconciles both artifacts against the fork before writing either. Duplicate detection differs between them, and the asymmetry is deliberate:
 
 - **PR path (high tier)** — one exact query taken immediately before the write: `GET /repos/{o}/{r}/pulls?state=all&head=<owner>:<candidate branch>`. A match is adopted, never duplicated. No marker. Because the branch name derives from `candidate_id`, at most one PR can ever exist per candidate.
-- **Issue path (medium tier)** — there is no branch to key on, so the issue body carries a hidden HTML-comment marker holding `candidate_id`, and dedupe is a GitHub issue search for that marker. Search indexing lags: measured on this fork at up to **~17 s**, so a crash after creating an issue but before its state row lands can
+- **Issue path (both tiers)** — there is no branch to key on, so the issue body carries a hidden HTML-comment marker holding `candidate_id`, and dedupe is a GitHub issue search for that marker. Search indexing lags: measured on this fork at up to **~17 s**, so a crash after creating an issue but before its state row lands can
   let a later run create a second issue. **This residual window is a known, accepted, bounded risk: the blast radius is one duplicate issue, never a duplicate PR and never a merge.** Resume searches the marker first, adopts a found issue (recording its number and URL), and creates one only when the search returns nothing; a
   search that errors or is unconfigured defers the candidate and writes nothing. No write-intent rows, no reservation leases.
 
-The issue body renders the fork's issue template heading set, the marker, the lane, the locator, the score with its factor breakdown, and why the candidate was not automated; its title obeys the PR title regex.
+The issue body renders the fork's issue template heading set, the marker, the lane, the locator and the score with its factor breakdown; a medium-tier body adds why the candidate was not automated. Its title obeys the PR title regex.
 
 The PR body renders Superset's `.github/PULL_REQUEST_TEMPLATE.md` heading set verbatim and in order — `SUMMARY`, `BEFORE/AFTER SCREENSHOTS OR ANIMATED GIF` (`n/a` for backend fixes), `TESTING INSTRUCTIONS`, `ADDITIONAL INFORMATION` with its checkbox block — plus an `EVIDENCE` section after `SUMMARY` stating the criterion and the
 commands the orchestrator ran with their outcomes, and a config-gated `AUTOMATION METADATA` section last. The body states that every commit carries the `Signed-off-by` trailer, and for `merge_mode = manual` that a human owns the merge. A body failing section presence/order validation defers the candidate with
@@ -198,10 +211,11 @@ Every failure is terminal, leaves **at most one artifact** on the fork, and neve
 | Check runs never settle within `ci_wait_timeout_s`, or the PR waits on workflow approval | `terminal/ci_evidence_unavailable` | PR URL as open-not-merged, with the unsettled check runs |
 | `merge_mode = manual` | `awaiting_human_merge` / `manual_merge_required` | PR URL, gate result, merge owned by a human |
 | Issue marker search errors or is unconfigured | `deferred/marker_search_failed` / `deferred/marker_search_unconfigured` | not published this run; retried next run, no issue written |
+| High-tier candidate fails its criterion after its issue was written | the criterion's terminal reason, with `issue_url` retained | issue URL as open-unremediated; no PR |
 
 **The one non-atomic step is: create the PR, then record its number.** A crash between them leaves a PR no state row names. Resume settles it from the fork: for any candidate whose last row is `verified` or `pr_created` without a `pr_number`, resume queries `GET /pulls?state=all&head=<candidate branch>` and adopts the single
-match (recording `pr_number`, `pr_url`, `head_sha`) before doing anything else; no match means the write never landed and publication is retried. Because the branch name derives from `candidate_id` the query is exact, so at most one PR can ever exist per candidate. The issue path's equivalent step is not exact and its accepted
-residual window is stated in §11.
+match (recording `pr_number`, `pr_url`, `head_sha`) before doing anything else; no match means the write never landed and publication is retried. Because the branch name derives from `candidate_id` the query is exact, so at most one PR can ever exist per candidate. The issue write of either tier reconciles marker-first instead,
+and its accepted residual window is stated once in §11.
 
 State rows are append-only, last-write-wins per `candidate_id`; durable identities (`pr_url`, `pr_number`, `issue_url`, `issue_number`, `head_sha`, `merged_at`) are write-once-non-null and replacing a non-null value with `None` raises `StatePreservationError`. "Already published" is decided by artifact proof — a persisted number
 or a fork match — never by a state value alone. A per-candidate failure defers or terminates that candidate only; the run continues to publication and reporting.
@@ -211,22 +225,22 @@ or a fork match — never by a state value alone. A per-candidate failure defers
 - `state/candidates.jsonl` is the dedupe/resume source of truth. `candidate_id = sha256(lane | repo | stable_locator)`, where `stable_locator` is `rule_id + file_path + normalized_symbol + position_digest` (LANE 1; **never** `alert.number`), the collectable nodeid (LANE 2), or `module:qualname` (LANE 3). `position_digest =
   sha256("{start_line}:{start_column}-{end_line}:{end_column}")[:12]`: four live `py/overly-large-range` alerts share one line of `add_chart_to_existing_dashboard.py` and differ only by column, so without it they collapse into one candidate.
 - **Drift** — an edit above an alert shifts its digest, so before dispatching a LANE 1 candidate the orchestrator attempts a drift match against state: the weak key `(rule_id, file_path, normalized_symbol)` must have multiplicity 1 among current alerts *and* among active (not `superseded_by`) rows, and the persisted
-  `region_digest` or `symbol_relative_offset` must agree. A hit links the rows (`supersedes` / `superseded_by`) and suppresses re-dispatch; neither condition is configurable. Because LANE 1 re-scans every run, positions move between scans and drift matching is load-bearing rather than an edge case: it is what stops a known alert
-  being re-dispatched under a new `candidate_id`.
+  `region_digest` or `symbol_relative_offset` must agree. A hit links the rows (`supersedes` / `superseded_by`) and suppresses re-dispatch; neither condition is configurable. Because LANE 1 reads a fresh analysis every run, positions move between analyses and drift matching is load-bearing rather than an edge case: it is what
+  stops a known alert being re-dispatched under a new `candidate_id`.
 - **Layer 1** JSONL event log per candidate: `run_id`, lane, `candidate_id`, gate results and failed gate, score with factor breakdown, tier, `merge_mode`, `session_id`, the declared criterion and its observed evidence, `test_nodeid`/`test_paths`/`suite_scope`, PR or issue URL and number, every check run's name and conclusion,
-  terminal state and reason, LANE 2 breadth fields, `related_candidate_id`.
+  terminal state and reason, both artifact identities where a high-tier candidate has an issue and a PR, LANE 2 breadth fields, `related_candidate_id`.
 - **Layer 2** `reports/run-<run_id>.md`: candidates seen, gated out with reasons, scored, dispatched, deferred, every terminal candidate with its reason, PR and issue links, merge results, `skipped`/`neutral` check runs named, and every `awaiting_human_merge` PR called out as awaiting a human. No candidate may be unaccounted
   for.
 - **Layer 3** `reports/kpis.md`: PR merge rate (merged over `merge_mode = auto` PRs) with manual PRs counted separately; **verification pass rate = candidates whose declared criterion was satisfied / candidates dispatched**, reported overall and per lane since the criteria differ; backlog burn-down per lane against
-  `fixtures/baseline.json` (`n/a` for a lane absent from `baseline_valid_lanes`); test-inclusion rate over the candidates whose criterion required a test; issues created and issues adopted; session-failure rate; deferred-by-reason. Alerts when merge rate `< merge_rate_floor = 0.50` or session-failure rate `>
-  session_failure_ceiling = 0.30`.
+  `fixtures/baseline.json` (`n/a` for a lane absent from `baseline_valid_lanes`); test-inclusion rate over the candidates whose criterion required a test; issues created and issues adopted, split by tier, with high-tier issues closed by their merged PR counted separately; session-failure rate; deferred-by-reason. Alerts when
+  merge rate `< merge_rate_floor = 0.50` or session-failure rate `> session_failure_ceiling = 0.30`.
 
 ## 15. Configuration and modes
 
 | Knob | Default | Notes |
 |---|---|---|
 | `mode` | `simulate` | **safety-relevant** — `live` must be explicit; unset/empty/unknown → `simulate`, logged |
-| `budget_N` | `5` | PRs per run — it bounds what a human has to review; **safety-relevant** — clamped at `BUDGET_HARD_MAX = 25` so a misconfigured knob cannot produce a large run, logging `guardrail_clamped` |
+| `budget_N` | `5` | high-tier candidates per run, each an issue plus a PR — it bounds what a human has to review; **safety-relevant** — clamped at `BUDGET_HARD_MAX = 25` so a misconfigured knob cannot produce a large run, logging `guardrail_clamped` |
 | `max_sessions` | `budget_N + 3` | **safety-relevant** — per-run ceiling on Devin sessions created; it bounds what a run costs. Not the same ceiling as `budget_N`: a session can end infeasible, error or blocked and produce no PR, and a retried candidate consumes a second session, so sessions ≥ PRs. Hitting it defers the remaining candidates while the run still publishes and reports what it holds |
 | `score_cap` / `tier_high_min` / `tier_medium_min` | `200` / `60` / `20` | `tier_high_min > tier_medium_min` |
 | `eol_major_lag` / `version_source` | `2` / `.github/ISSUE_TEMPLATE/bug-report.yml` | drift-tested; no concrete release → startup error |
@@ -234,7 +248,7 @@ or a fork match — never by a state value alone. A per-candidate failure defers
 | `alert_source` / `alert_fixture_path` | `code_scanning_api` / `fixtures/codeql_alerts.json` | §7 — `code_scanning_api` reads the fork's alerts for `master` and requires the latest analysis to sit on `base_sha`; a mismatch or missing analysis is a startup error under LIVE; `sarif_file` is the SIMULATE input |
 | `lane1_alert_check` / `alert_analysis_wait_s` / `ci_evidence_mode` | `pr_ref_alerts` / `2700` / `local` | §10 — how alert absence and suite-green are observed. `pr_ref_alerts` reads the alerts for the PR ref once the fork's `codeql-analysis` has analysed that head, bounded by the wait; expiry settles `terminal/criterion_not_met`. `codeql_cli` is the offline alternative, a local CodeQL run over the touched paths |
 | `required_contexts_min` / `ci_wait_timeout_s` | probe-measured (`pre-commit checks`) / `5400` | **safety-relevant** — §12; must be present and successful on the head; empty forces `auto_merge_enabled = false`; expiry → `ci_evidence_unavailable` |
-| `issue_sink` / `has_issues` / `marker_search_enabled` | `github` / probed / `true` | **safety-relevant** — medium-tier publication; issues disabled on the fork or search unavailable → defer, never write |
+| `issue_sink` / `has_issues` / `marker_search_enabled` | `github` / probed / `true` | **safety-relevant** — issue publication for both tiers; issues disabled on the fork or search unavailable → defer, never write, and a high-tier candidate is deferred before its session is created |
 | `auto_merge_enabled` | `false` | **safety-relevant** — never sufficient alone: `merge_mode = auto` and the §12 gate must also hold |
 | `session_timeout_s` / `max_acu_limit` / `max_total_acu` | `5400` / per-session / `500` | — |
 | `merge_rate_floor` / `session_failure_ceiling` / `kpi_sink` | `0.50` / `0.30` / `local` | `gsheet` under `simulate` is a startup error |
@@ -250,11 +264,11 @@ Also configurable: target `owner/repo`, GitHub token, Devin API key, rubrics, te
 
 1. Strip the §18 dead modules, symbols and config keys; keep the suite importable.
 2. `session_client.py`: one runtime role — create, poll to terminal, validate the §9 schema, attempt/retry assertion, session ceiling. Add `prompts.render_fix_prompt` building the §9 prompt, criterion included, from a `Candidate`.
-3. Lanes declare a `success_criterion` per candidate; `schemas.py` carries it plus `merge_mode`, `suite_scope` and the observed evidence.
+3. Publication order for high tier: `create_issue` at dispatch, then the PR with `Closes #<issue_number>`; both reconciled against the fork first (§11), no third write. Lanes declare a `success_criterion` per candidate; `schemas.py` carries it plus `merge_mode`, `suite_scope` and the observed evidence.
 4. `lanes/codeql.py`: `alert_source = code_scanning_api` as the default — alerts for `master` plus the `GET /code-scanning/analyses` check that the latest analysis sits on `base_sha`, a startup error otherwise; `sarif_file` kept as the SIMULATE input.
 5. Add `verify.py` — one evaluator per lane criterion (§10): LANE 2 red-at-base/green-at-head with per-item vectors, LANE 1 alert re-check plus suite, LANE 3 symbol and caller re-check plus suite; each returns evidence or a terminal reason.
-6. `github_client.py`: `pull_request_for_head` as the PR dedupe path; marker search plus `create_issue` for medium tier; check-run polling and the §12 rule; merge only for `merge_mode = auto`. `templates/render.py`: PR body/title with `EVIDENCE`, issue body/title with the marker.
-7. `state.py`: the §6 state set including `awaiting_human_merge` and `issue_created`, resume-from-fork reconciliation of the PR write and marker-first reconciliation of the issue write.
+6. `github_client.py`: `pull_request_for_head` as the PR dedupe path; marker search plus `create_issue` for both tiers; check-run polling and the §12 rule; merge only for `merge_mode = auto`. `templates/render.py`: PR body/title with `EVIDENCE`, issue body/title with the marker.
+7. `state.py`: the §6 state set, `issue_created` on the high-tier path as well, `awaiting_human_merge`, resume-from-fork reconciliation of the PR write and marker-first reconciliation of the issue write.
 8. `__main__.py`: the linear §6 pipeline, per-candidate error scoping, one publication path. Update `observability/` to the §14 fields, KPIs and alerts.
 9. Update `tests/` to this contract and add the §17 fault-injection test.
 10. Measure `required_contexts_min` from a probe PR, and record the observed check-run set (including `skipped` members) in config and `RESULTS.md`.
@@ -266,8 +280,8 @@ Also configurable: target `owner/repo`, GitHub token, Devin API key, rubrics, te
 
 This gate is finite: no review round and no further finding widens it, and anything discovered after it is a listed follow-up, not a reason to reopen it.
 
-- One real Python candidate goes discovery → session → orchestrator-verified criterion → PR → CI green → merged on `victorciao/superset`, with PR URL, merge commit and `session_id` recorded on its state row and in `RESULTS.md`.
-- Crash recovery is proven by **fault injection**, not inspection: the process is `SIGKILL`ed immediately before and immediately after the single PR-creating write, each run is resumed to completion, and afterwards **exactly one PR exists for that candidate** on the fork.
+- One real Python candidate goes discovery → tracking issue → session → orchestrator-verified criterion → PR closing that issue → CI green → merged on `victorciao/superset`, with issue URL, PR URL, merge commit and `session_id` recorded on its state row and in `RESULTS.md`, and the issue closed by the merge.
+- Crash recovery is proven by **fault injection**, not inspection: the process is `SIGKILL`ed immediately before and immediately after the PR-creating write, each run is resumed to completion, and afterwards **exactly one PR exists for that candidate** on the fork.
 - A full SIMULATE run completes with no credentials and no writes, and under `docker compose`. Every §15 knob is settable without code edits; the README documents defaults and safety classes.
 - `tests/`, `ruff` and `mypy --strict` are green, pure-logic coverage `>= coverage_bar`; the run report accounts for every candidate and the KPI rollup agrees with the fork re-read after the run.
 
@@ -282,7 +296,7 @@ This gate is finite: no review round and no further finding widens it, and anyth
 - `session_client.py`: `SessionRole`, `ROLE_OUTPUT_SCHEMAS`, `validated_diff_review`, `_candidate_diff_review_matches`, `_validated_diff_review_head`, `_sent_message_timestamp`, `_message_timestamps`, `_message_processed`, `send_message`, `poll_session_after_message`, `RoleCollisionError`, `PlannerOutputError`, `DiffReviewIncompleteError`, `PhaseBCorrelationTimeoutError`, `PhaseBHeadUnavailableError`, `BranchNotAdvancedError`, `RuntimeOrchestrator.run_planner`/`run_implementer`/`run_reviewer`/`inspect_implementer_diff`/`inspect_reviewer_diff`.
 - `prompts.py`: `PHASE_B_REVIEWER_OUTPUT_SCHEMA`, `render_planner_prompt`, `render_implementer_prompt`, `render_reviewer_prompt`, `render_reviewer_phase_b_prompt`, `validate_planner_output`, `_findings_text`, `_planner_text`.
 - `red_baseline.py`: `DiffInspection`, `classify_implementer_diff`, `inspect_reviewer_diff`, `validate_nested_marker_lifts`, `should_reauthor_baseline` — the LANE 2 red-baseline evaluation itself moves into `verify.py`.
-- `templates/render.py`: `render_degraded_comment_body`, `_planner_text`, `_reviewer_text`. **Keep** `candidate_marker`, `render_issue_title`, `render_issue_body`, `validate_issue_body` — the medium-tier issue path uses them.
+- `templates/render.py`: `render_degraded_comment_body`, `_planner_text`, `_reviewer_text`. **Keep** `candidate_marker`, `render_issue_title`, `render_issue_body`, `validate_issue_body` — both tiers' issue path uses them; the PR body gains `Closes #<issue_number>`.
 - `github_client.py`: `patch_issue`, `comment_pr`, `publish_degraded`, the PR-comment and issue-patch branches of `publish_artifacts`, and the hard-coded `REQUIRED_CONTEXTS` tuple (replaced by `required_contexts_min` in config plus the §12 check-run rule). **Keep** `create_issue` and `pull_request_for_head`.
 - `state.py`: the reservation fields and branches in `append_if_new_artifact`. **Keep** `MarkerSearchOutcome`, `MarkerArtifact`, `github_marker_search`, `marker_artifact`, `marker_exists`, `marker_search_unavailable`, `marker_search_orphaned`, `marker_search_outcome` — §11's issue dedupe is built on them; drop only `marker_search_orphaned`'s degraded-artifact handling.
 - `schemas.py` enums: `CandidateState.ISSUE_PATCHED`/`COMMENT_CREATED`/`CONVERGED`; `Action.REVIEWER_ONLY_DIFF`; `ReasonCode.DISAGREEMENT_UNRESOLVED`/`DIFF_REVIEW_INCOMPLETE`/`IMPLEMENTER_TEST_EDIT`/`ROLE_COLLISION`/`PHASE_B_CORRELATION_UNAVAILABLE`/`RESERVATION_HELD`/`ARTIFACT_DEGRADED`/`ARTIFACT_ORPHANED`/`BRANCH_NOT_ADVANCED`/`ROLE_COMMIT_MISSING`. **Keep** `CandidateState.ISSUE_CREATED`, `Action.OPEN_ISSUE`, `ReasonCode.MARKER_SEARCH_FAILED`/`MARKER_SEARCH_UNCONFIGURED`.
