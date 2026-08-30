@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -15,6 +16,7 @@ from pipeline.config import ConfigError, Mode, PipelineConfig
 from pipeline.prompts import validate_planner_output
 from pipeline.red_baseline import (
     DiffInspection,
+    apply_red_baseline,
     classify_implementer_diff,
     inspect_reviewer_diff,
 )
@@ -101,6 +103,88 @@ class OrchestrationResult:
     review: ReviewLoopResult | None = None
 
 
+def validated_diff_review(
+    result: OrchestrationResult,
+) -> bool:
+    """Return whether the reviewer supplied a complete diff review."""
+    reviewer_payload = result.reviewer.snapshot.payload.get("structured_output")
+    implementer_payload = result.implementer.snapshot.payload.get("structured_output")
+    if not isinstance(reviewer_payload, Mapping) or not isinstance(implementer_payload, Mapping):
+        return False
+    value = reviewer_payload.get("diff_reviewed")
+    raw_diff = implementer_payload.get("committed_diff")
+    if not isinstance(value, Mapping) or not isinstance(raw_diff, str):
+        return False
+    base_sha = value.get("base_sha")
+    head_sha = value.get("head_sha")
+    files_read = value.get("files_read")
+    if not (
+        isinstance(base_sha, str)
+        and isinstance(head_sha, str)
+        and isinstance(files_read, Sequence)
+        and not isinstance(files_read, str)
+    ):
+        return False
+    changed_paths = set(classify_implementer_diff(raw_diff).changed_paths)
+    read_paths = {path for path in files_read if isinstance(path, str)}
+    return bool(base_sha) and bool(head_sha) and changed_paths <= read_paths
+
+
+def _candidate_diff_review_matches(
+    result: OrchestrationResult,
+    candidate: Candidate | None,
+) -> bool:
+    """Require a valid review to identify the current candidate revision."""
+    if candidate is None or not validated_diff_review(result):
+        return False
+    reviewer_payload = result.reviewer.snapshot.payload.get("structured_output")
+    if not isinstance(reviewer_payload, Mapping):
+        return False
+    value = reviewer_payload.get("diff_reviewed")
+    if not isinstance(value, Mapping):
+        return False
+    return (
+        value.get("base_sha") == candidate.base_sha and value.get("head_sha") == candidate.head_sha
+    )
+
+
+def _is_test_path(path: str) -> bool:
+    """Match paths owned by the reviewer role."""
+    return (
+        path.startswith("tests/")
+        or "/tests/" in path
+        or path.startswith("test_")
+        or path.startswith("fixtures/")
+        or "/fixtures/" in path
+        or path.endswith("/conftest.py")
+        or path == "conftest.py"
+    )
+
+
+def _call_prompt_factory(
+    factory: Callable[..., tuple[str, str, Callable[[str], str]]],
+    planner_output: Mapping[str, object],
+    previous_iteration: ReviewIteration | None,
+) -> tuple[str, str, Callable[[str], str]]:
+    """Call current factories with retry context and tolerate legacy one-arg adapters."""
+    try:
+        parameters = list(inspect.signature(factory).parameters.values())
+    except (TypeError, ValueError):
+        parameters = []
+    positional = tuple(
+        parameter
+        for parameter in parameters
+        if parameter.kind
+        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    )
+    accepts_varargs = any(
+        parameter.kind is inspect.Parameter.VAR_POSITIONAL for parameter in parameters
+    )
+    if accepts_varargs or len(positional) >= 2:
+        return factory(planner_output, previous_iteration)
+    return factory(planner_output)
+
+
 class SessionCeilingError(RuntimeError):
     """Raised when a run exceeds its configured session or cost ceiling."""
 
@@ -123,6 +207,20 @@ class PlannerOutputError(ValueError):
 
 class SessionMessageError(RuntimeError):
     """Raised when a follow-up message cannot be processed by a role session."""
+
+    reason = ReasonCode.DIFF_REVIEW_INCOMPLETE
+
+
+class SessionBlockedError(RuntimeError):
+    """Raised when a role session stops without producing a completed response."""
+
+    reason = ReasonCode.SESSION_BLOCKED
+
+
+class BranchNotAdvancedError(RuntimeError):
+    """Raised when the shared candidate branch remained at its base revision."""
+
+    reason = ReasonCode.BRANCH_NOT_ADVANCED
 
 
 KNOWN_STATUSES = frozenset(
@@ -178,6 +276,16 @@ def event_with_ceiling(event: EventRecord, error: SessionCeilingError) -> EventR
             "reason": error.reason,
             "terminal_outcome": CandidateState.TERMINAL,
         }
+    )
+
+
+def _message_marker(response: Mapping[str, object]) -> tuple[str | None, str | None]:
+    """Extract an opaque message identity and timestamp when the API supplies them."""
+    message_id = response.get("message_id", response.get("id"))
+    timestamp = response.get("created_at", response.get("timestamp"))
+    return (
+        message_id if isinstance(message_id, str) else None,
+        timestamp if isinstance(timestamp, str) else None,
     )
 
 
@@ -336,9 +444,13 @@ class SessionClient:
             if not isinstance(status, str):
                 status = "unknown"
             snapshot = SessionSnapshot(session_id, status, response)
-            if status in TERMINAL_STATUSES:
+            if status == "finished":
                 self._record_terminal_usage(role, session_id, response)
                 return snapshot
+            if status in {"blocked", "expired"}:
+                raise SessionBlockedError(
+                    f"{role.value} session stopped with status {status}: {session_id}"
+                )
             if self._clock() >= deadline:
                 raise TimeoutError(f"{role.value} session timed out: {session_id}")
             self._sleeper(1.0)
@@ -381,6 +493,7 @@ class SessionClient:
         role: SessionRole,
         session_id: str,
         previous: SessionSnapshot,
+        message_response: Mapping[str, object] | None = None,
     ) -> SessionSnapshot:
         """Wait for a follow-up message to change a session before accepting its output."""
         if self._config.mode is Mode.SIMULATE:
@@ -395,7 +508,12 @@ class SessionClient:
             if not isinstance(status, str):
                 status = "unknown"
             structured_output = response.get("structured_output")
-            if status in TERMINAL_STATUSES and structured_output != previous_output:
+            changed_output = structured_output != previous_output
+            if status in {"blocked", "expired"}:
+                raise SessionBlockedError(
+                    f"{role.value} session stopped with status {status}: {session_id}"
+                )
+            if status == "finished" and changed_output:
                 snapshot = SessionSnapshot(session_id, status, response)
                 self._record_terminal_usage(role, session_id, response)
                 return snapshot
@@ -453,7 +571,6 @@ ROLE_OUTPUT_SCHEMAS: Mapping[SessionRole, Mapping[str, object]] = {
             "tests",
             "red_baseline",
             "green_result",
-            "diff_reviewed",
             "findings",
             "committed_diff",
         ],
@@ -472,15 +589,6 @@ ROLE_OUTPUT_SCHEMAS: Mapping[SessionRole, Mapping[str, object]] = {
             },
             "red_baseline": {"type": "object"},
             "green_result": {"type": "object"},
-            "diff_reviewed": {
-                "type": "object",
-                "required": ["base_sha", "head_sha", "files_read"],
-                "properties": {
-                    "base_sha": {"type": "string"},
-                    "head_sha": {"type": "string"},
-                    "files_read": {"type": "array", "items": {"type": "string"}},
-                },
-            },
             "committed_diff": {"type": "string"},
             "findings": {
                 "type": "array",
@@ -492,9 +600,33 @@ ROLE_OUTPUT_SCHEMAS: Mapping[SessionRole, Mapping[str, object]] = {
                         "criterion_id": {"type": ["string", "null"]},
                         "note": {"type": "string"},
                         "reason": {"type": ["string", "null"]},
+                        "file": {"type": ["string", "null"]},
+                        "line": {"type": ["string", "null"]},
                     },
                 },
             },
+            "lifted_markers": {"type": "array", "items": {"type": "string"}},
+            "remaining_markers": {"type": "array", "items": {"type": "string"}},
+        },
+    },
+}
+
+PHASE_B_REVIEWER_OUTPUT_SCHEMA: Mapping[str, object] = {
+    "type": "object",
+    "required": ["diff_reviewed", "findings"],
+    "properties": {
+        "diff_reviewed": {
+            "type": "object",
+            "required": ["base_sha", "head_sha", "files_read"],
+            "properties": {
+                "base_sha": {"type": "string"},
+                "head_sha": {"type": "string"},
+                "files_read": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+        "findings": {
+            "type": "array",
+            "items": {"type": "object"},
         },
     },
 }
@@ -551,12 +683,14 @@ class RuntimeOrchestrator:
         candidate: Candidate,
         *,
         lifted_markers: tuple[str, ...] = (),
+        remaining_markers: tuple[str, ...] = (),
     ) -> DiffInspection:
         """Apply reviewer ownership and nested-marker policy to reviewer output."""
         return inspect_reviewer_diff(
             diff_text,
             candidate,
             lifted_markers=lifted_markers,
+            remaining_markers=remaining_markers,
         )
 
     def run_candidate(
@@ -569,25 +703,34 @@ class RuntimeOrchestrator:
         attempt: int = 1,
         candidate: Candidate | None = None,
         head_sha_resolver: Callable[[], str | None] | None = None,
+        branch_paths_resolver: Callable[[str, str], Sequence[str]] | None = None,
         prompt_factory: (
-            Callable[[Mapping[str, object]], tuple[str, str, Callable[[str], str]]] | None
+            Callable[
+                [Mapping[str, object], ReviewIteration | None],
+                tuple[str, str, Callable[[str], str]],
+            ]
+            | None
         ) = None,
     ) -> OrchestrationResult:
         """Run the review loop after a planner and concurrent role join."""
         planner = self.run_planner(candidate_id, planner_prompt, attempt=attempt)
 
-        def concurrent_roles(role_attempt: int) -> OrchestrationResult:
+        def concurrent_roles(
+            role_attempt: int,
+            implementer_prompt: str,
+            reviewer_prompt: str,
+        ) -> OrchestrationResult:
             with ThreadPoolExecutor(max_workers=2) as executor:
                 implementer_future = executor.submit(
                     self.run_implementer,
                     candidate_id,
-                    resolved_implementer_prompt,
+                    implementer_prompt,
                     attempt=role_attempt,
                 )
                 reviewer_future = executor.submit(
                     self.run_reviewer,
                     candidate_id,
-                    resolved_reviewer_prompt,
+                    reviewer_prompt,
                     attempt=role_attempt,
                 )
                 try:
@@ -609,7 +752,9 @@ class RuntimeOrchestrator:
                 validate_planner_output(planner_output)
             except ValueError as exc:
                 raise PlannerOutputError(str(exc)) from exc
-            implementer_prompt, reviewer_prompt, phase_b_prompt = prompt_factory(planner_output)
+            implementer_prompt, reviewer_prompt, phase_b_prompt = _call_prompt_factory(
+                prompt_factory, planner_output, None
+            )
         elif self._client.config.mode is Mode.LIVE:
             raise PlannerOutputError("missing planner prompt factory")
         else:
@@ -618,13 +763,12 @@ class RuntimeOrchestrator:
             phase_b_prompt = None
         if implementer_prompt is None or reviewer_prompt is None:
             raise ValueError("implementer and reviewer prompts are required")
-        resolved_implementer_prompt = implementer_prompt
-        resolved_reviewer_prompt = reviewer_prompt
-
         current = (
-            simulation_result(concurrent_roles(attempt), candidate)
+            simulation_result(
+                concurrent_roles(attempt, implementer_prompt, reviewer_prompt), candidate
+            )
             if self._client.config.mode is Mode.SIMULATE and candidate is not None
-            else concurrent_roles(attempt)
+            else concurrent_roles(attempt, implementer_prompt, reviewer_prompt)
         )
 
         def iteration_from(result: OrchestrationResult) -> ReviewIteration:
@@ -638,8 +782,29 @@ class RuntimeOrchestrator:
                 output(result.reviewer),
                 output(result.implementer),
             )
+            if candidate is not None and candidate.head_sha is not None:
+                iteration = replace(iteration, prior_head_sha=candidate.head_sha)
             implementer_payload = output(result.implementer)
             reviewer_payload = output(result.reviewer)
+            if candidate is not None and iteration.red_result is not None:
+                raw_lifted = reviewer_payload.get("lifted_markers")
+                lifted = (
+                    tuple(item for item in raw_lifted if isinstance(item, str))
+                    if isinstance(raw_lifted, Sequence) and not isinstance(raw_lifted, str)
+                    else ()
+                )
+                remaining = (
+                    (candidate.enclosing_skip_nodeid,)
+                    if candidate.enclosing_skip_nodeid is not None
+                    and candidate.enclosing_skip_nodeid not in lifted
+                    else ()
+                )
+                candidate = apply_red_baseline(
+                    candidate,
+                    iteration.red_result,
+                    lifted_markers=lifted,
+                    remaining_markers=remaining,
+                )
             implementer_diff = implementer_payload.get("committed_diff")
             reviewer_diff = reviewer_payload.get("committed_diff")
             findings = list(iteration.findings)
@@ -702,6 +867,12 @@ class RuntimeOrchestrator:
                     reviewer_diff,
                     candidate,
                     lifted_markers=tuple(candidate.lifted_markers),
+                    remaining_markers=(
+                        (candidate.enclosing_skip_nodeid,)
+                        if candidate.enclosing_skip_nodeid is not None
+                        and candidate.enclosing_skip_nodeid not in candidate.lifted_markers
+                        else ()
+                    ),
                 )
                 if not reviewer_inspection.accepted:
                     findings.append(
@@ -711,39 +882,32 @@ class RuntimeOrchestrator:
                             "reviewer diff violates reviewer ownership policy",
                         )
                     )
-            diff_reviewed = (
-                iteration.diff_reviewed
-                and isinstance(implementer_diff, str)
-                and isinstance(reviewer_diff, str)
-            )
-            raw_diff_reviewed = reviewer_payload.get("diff_reviewed")
-            if diff_reviewed and isinstance(raw_diff_reviewed, Mapping):
-                files_read = raw_diff_reviewed.get("files_read")
-                read_paths = (
-                    {path for path in files_read if isinstance(path, str)}
-                    if isinstance(files_read, Sequence) and not isinstance(files_read, str)
-                    else set()
-                )
-                changed_paths = (
-                    set(implementer_inspection.changed_paths)
-                    if implementer_inspection is not None
-                    else set()
-                )
-                base_sha = raw_diff_reviewed.get("base_sha")
-                head_sha = raw_diff_reviewed.get("head_sha")
-                expected_base = candidate.base_sha if candidate is not None else None
-                expected_head = candidate.head_sha if candidate is not None else None
-                diff_reviewed = (
-                    isinstance(base_sha, str)
-                    and isinstance(head_sha, str)
-                    and expected_base is not None
-                    and base_sha == expected_base
-                    and expected_head is not None
-                    and head_sha == expected_head
-                    and changed_paths <= read_paths
-                )
-            else:
-                diff_reviewed = False
+            if (
+                candidate is not None
+                and candidate.base_sha is not None
+                and candidate.head_sha is not None
+                and branch_paths_resolver is not None
+            ):
+                branch_paths = tuple(branch_paths_resolver(candidate.base_sha, candidate.head_sha))
+                if not any(not _is_test_path(path) for path in branch_paths):
+                    findings.append(
+                        ReviewFinding(
+                            FindingSeverity.BLOCKING,
+                            None,
+                            "candidate branch lacks an implementer commit",
+                            ReasonCode.DISAGREEMENT_UNRESOLVED,
+                        )
+                    )
+                if not any(_is_test_path(path) for path in branch_paths):
+                    findings.append(
+                        ReviewFinding(
+                            FindingSeverity.BLOCKING,
+                            None,
+                            "candidate branch lacks a reviewer test commit",
+                            ReasonCode.DISAGREEMENT_UNRESOLVED,
+                        )
+                    )
+            diff_reviewed = _candidate_diff_review_matches(result, candidate)
             if (
                 candidate is not None
                 and candidate.base_sha is not None
@@ -771,25 +935,35 @@ class RuntimeOrchestrator:
                     fix_rationale=iteration.fix_rationale,
                     diff_reviewed=diff_reviewed,
                     red_result=iteration.red_result,
+                    prior_head_sha=iteration.prior_head_sha,
                 )
             return iteration
 
         phase_b_attempted: set[str] = set()
 
         def phase_b(result: OrchestrationResult) -> OrchestrationResult:
+            nonlocal candidate
+            if candidate is not None and head_sha_resolver is not None:
+                resolved_head_sha = head_sha_resolver()
+                if resolved_head_sha is not None:
+                    candidate = candidate.model_copy(update={"head_sha": resolved_head_sha})
+                    if candidate.base_sha is not None and resolved_head_sha == candidate.base_sha:
+                        raise BranchNotAdvancedError(
+                            f"candidate branch remained at base SHA: {resolved_head_sha}"
+                        )
             reviewer_session_id = result.reviewer.attempt.session_id
             if (
                 reviewer_session_id in phase_b_attempted
                 or self._client.config.mode is Mode.SIMULATE
             ):
                 return result
-            if output(result.reviewer).get("diff_reviewed") not in (None, False):
+            if _candidate_diff_review_matches(result, candidate):
                 return result
             raw_diff = output(result.implementer).get("committed_diff")
             committed_diff = raw_diff if isinstance(raw_diff, str) else ""
             if phase_b_prompt is None:
                 raise PlannerOutputError("missing reviewer phase-B prompt factory")
-            self._client.send_message(
+            message_response = self._client.send_message(
                 reviewer_session_id,
                 phase_b_prompt(committed_diff),
             )
@@ -797,6 +971,7 @@ class RuntimeOrchestrator:
                 SessionRole.REVIEWER,
                 reviewer_session_id,
                 result.reviewer.snapshot,
+                message_response,
             )
             phase_b_attempted.add(reviewer_session_id)
             return replace(result, reviewer=replace(result.reviewer, snapshot=updated))
@@ -804,20 +979,33 @@ class RuntimeOrchestrator:
         current = phase_b(current)
 
         def rerun(role_attempt: int) -> ReviewIteration:
-            nonlocal current
+            nonlocal current, phase_b_prompt
             if current.reviewer.attempt.session_id in phase_b_attempted and not output(
                 current.reviewer
             ).get("diff_reviewed"):
                 return iteration_from(current)
+            previous_iteration = iteration_from(current)
             next_attempt = max(
                 role_attempt + 1,
                 current.implementer.attempt.attempt + 1,
                 current.reviewer.attempt.attempt + 1,
             )
+            if prompt_factory is not None:
+                (
+                    next_implementer_prompt,
+                    next_reviewer_prompt,
+                    phase_b_prompt,
+                ) = _call_prompt_factory(prompt_factory, planner_output, previous_iteration)
+            else:
+                next_implementer_prompt = implementer_prompt
+                next_reviewer_prompt = reviewer_prompt
             current = (
-                simulation_result(concurrent_roles(next_attempt), candidate)
+                simulation_result(
+                    concurrent_roles(next_attempt, next_implementer_prompt, next_reviewer_prompt),
+                    candidate,
+                )
                 if self._client.config.mode is Mode.SIMULATE and candidate is not None
-                else concurrent_roles(next_attempt)
+                else concurrent_roles(next_attempt, next_implementer_prompt, next_reviewer_prompt)
             )
             current = phase_b(current)
             return iteration_from(current)
@@ -835,6 +1023,7 @@ __all__ = [
     "DevinTransport",
     "OrchestrationResult",
     "ROLE_OUTPUT_SCHEMAS",
+    "PHASE_B_REVIEWER_OUTPUT_SCHEMA",
     "RoleLimits",
     "RoleRun",
     "RuntimeOrchestrator",
@@ -845,7 +1034,10 @@ __all__ = [
     "SessionRole",
     "SessionSnapshot",
     "SessionCeilingError",
+    "BranchNotAdvancedError",
     "RoleCollisionError",
+    "SessionBlockedError",
+    "validated_diff_review",
     "PlannerOutputError",
     "event_with_attempt",
     "event_with_ceiling",

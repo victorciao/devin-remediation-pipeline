@@ -64,6 +64,8 @@ class ReasonCode(str, Enum):
     COLLECTION_ERROR = "collection_error"
     RUBRIC_FACTOR_UNRESOLVED = "rubric_factor_unresolved"
     DIFF_REVIEW_INCOMPLETE = "diff_review_incomplete"
+    BRANCH_NOT_ADVANCED = "branch_not_advanced"
+    SESSION_BLOCKED = "session_blocked"
 
 
 class CandidateState(str, Enum):

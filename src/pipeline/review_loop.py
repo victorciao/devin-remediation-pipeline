@@ -38,6 +38,8 @@ class ReviewFinding:
     criterion_id: str | None
     note: str
     reason: ReasonCode | None = None
+    file: str | None = None
+    line: str | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,7 @@ class ReviewIteration:
     fix_rationale: str | None = None
     diff_reviewed: bool = False
     red_result: RedBaselineResult | None = None
+    prior_head_sha: str | None = None
 
 
 @dataclass(frozen=True)
@@ -339,6 +342,8 @@ def review_iteration_from_payload(
                     criterion_id if isinstance(criterion_id, str) else None,
                     note,
                     reason,
+                    raw.get("file") if isinstance(raw.get("file"), str) else None,
+                    (str(raw.get("line")) if isinstance(raw.get("line"), (int, str)) else None),
                 )
             )
 
@@ -419,6 +424,9 @@ def review_iteration_from_payload(
             and has_files
             and (bool(files_read) or not changed_count)
         )
+    raw_head_sha = reviewer_output.get("head_sha")
+    if not isinstance(raw_head_sha, str) and implementer_output is not None:
+        raw_head_sha = implementer_output.get("head_sha")
     return ReviewIteration(
         red_baseline=baseline_status,
         green=green,
@@ -428,6 +436,7 @@ def review_iteration_from_payload(
         addressed_criteria=frozenset(addressed),
         diff_reviewed=diff_reviewed,
         red_result=red_result,
+        prior_head_sha=raw_head_sha if isinstance(raw_head_sha, str) else None,
     )
 
 

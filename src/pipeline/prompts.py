@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 from pipeline.schemas import Candidate, Lane
+
+if TYPE_CHECKING:
+    from pipeline.review_loop import ReviewIteration
 
 
 def _context(candidate: Candidate) -> str:
@@ -47,6 +51,18 @@ def _preamble(
     )
 
 
+def _branch_contract(head_branch: str) -> str:
+    """Describe the shared branch handoff both coding roles must honor."""
+    return (
+        f"Run `git fetch origin {head_branch}` and `git checkout {head_branch}` for the existing "
+        "pinned branch; do not create a branch or work detached. The implementer and reviewer "
+        "are working concurrently on "
+        "this same branch. Commit only your own permitted paths with `git commit -s`, then "
+        f"pull --rebase origin `{head_branch}` and push origin `{head_branch}`. If the push is "
+        "rejected, repeat pull-rebase-push. Never force-push. Report the resulting head_sha."
+    )
+
+
 def render_planner_prompt(
     candidate: Candidate,
     *,
@@ -70,6 +86,31 @@ def render_planner_prompt(
 
 def _planner_text(planner_output: Mapping[str, object]) -> str:
     return json.dumps(dict(planner_output), indent=2, sort_keys=True)
+
+
+def _findings_text(previous_iteration: ReviewIteration | None) -> str:
+    """Render prior review evidence so retries correct the failed attempt."""
+    if previous_iteration is None:
+        return ""
+    findings = [
+        {
+            "severity": finding.severity.value,
+            "criterion_id": finding.criterion_id,
+            "file": finding.file,
+            "line": finding.line,
+            "note": finding.note,
+        }
+        for finding in previous_iteration.findings
+    ]
+    payload = {
+        "findings": findings,
+        "failing_test": previous_iteration.failing_test,
+        "pre_fix_signature": previous_iteration.pre_fix_signature,
+        "prior_head_sha": previous_iteration.prior_head_sha,
+    }
+    return "\n\nPREVIOUS ITERATION FAILURE (correct this, do not re-roll it):\n" + json.dumps(
+        payload, indent=2, sort_keys=True
+    )
 
 
 def validate_planner_output(planner_output: Mapping[str, object]) -> None:
@@ -129,6 +170,7 @@ def render_implementer_prompt(
     base_sha: str,
     head_branch: str,
     planner_output: Mapping[str, object],
+    previous_iteration: ReviewIteration | None = None,
 ) -> str:
     """Render the production-only implementer prompt with planner output."""
     return (
@@ -139,11 +181,14 @@ def render_implementer_prompt(
             head_branch=head_branch,
             role="IMPLEMENTER",
         )
-        + "Implement the planner specification below. Touch production files only; never edit "
+        + _branch_contract(head_branch)
+        + "\nImplement the planner specification below. Touch production files only; never edit "
         "tests or skip markers. Run every verify_command (create a venv if the environment "
-        "lacks one), report only commands actually run, commit with `git commit --signoff`, "
+        "lacks one), report only commands actually run, commit with `git commit -s`, "
         "and do not open a PR or issue.\n\n"
-        "PLANNER SPECIFICATION (verbatim):\n" + _planner_text(planner_output)
+        "PLANNER SPECIFICATION (verbatim):\n"
+        + _planner_text(planner_output)
+        + _findings_text(previous_iteration)
     )
 
 
@@ -154,6 +199,7 @@ def render_reviewer_prompt(
     base_sha: str,
     head_branch: str,
     planner_output: Mapping[str, object],
+    previous_iteration: ReviewIteration | None = None,
 ) -> str:
     """Render the phase-A reviewer prompt with planner output."""
     return (
@@ -164,11 +210,14 @@ def render_reviewer_prompt(
             head_branch=head_branch,
             role="REVIEWER",
         )
-        + "Author tests only, at exactly the planner expected_failure nodeids. Run every "
+        + _branch_contract(head_branch)
+        + "\nAuthor tests only, at exactly the planner expected_failure nodeids. Run every "
         "verify_command (create a venv if the environment lacks one) and report only executed "
         "commands. Every test maps to a planner criterion; findings carry a criterion id or "
         "null for a genuine off-criterion defect. Do not open a PR or issue.\n\n"
-        "PLANNER SPECIFICATION (verbatim):\n" + _planner_text(planner_output)
+        "PLANNER SPECIFICATION (verbatim):\n"
+        + _planner_text(planner_output)
+        + _findings_text(previous_iteration)
     )
 
 

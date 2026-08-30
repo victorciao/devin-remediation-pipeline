@@ -523,6 +523,23 @@ class GitHubClient:
                 messages.append(str(commit["message"]))
         return messages
 
+    def changed_paths_between(self, base_sha: str, head_sha: str) -> list[str]:
+        """Read paths changed on the candidate branch from GitHub compare data."""
+        response = self._read(
+            f"/repos/{self._config.target_owner}/{self._config.target_repo}/compare/"
+            f"{base_sha}...{head_sha}"
+        )
+        if not isinstance(response, Mapping):
+            return []
+        files = response.get("files")
+        if not isinstance(files, list):
+            return []
+        paths: list[str] = []
+        for item in files:
+            if isinstance(item, Mapping) and isinstance(item.get("filename"), str):
+                paths.append(str(item["filename"]))
+        return paths
+
     def patch_issue(self, number: int, body: str) -> str:
         """Patch an issue after its linked PR exists."""
         response = self._write(

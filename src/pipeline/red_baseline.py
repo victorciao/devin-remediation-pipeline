@@ -102,9 +102,11 @@ def apply_red_baseline(
     result: RedBaselineResult,
     *,
     lifted_markers: Iterable[str] = (),
+    remaining_markers: Iterable[str] = (),
 ) -> Candidate:
     """Apply baseline classification, including reviewer-only stale skips."""
-    marker_list = list(lifted_markers)
+    remaining = set(remaining_markers)
+    marker_list = [marker for marker in lifted_markers if marker not in remaining]
     if result.status is BaselineStatus.STALE_SKIP:
         return candidate.model_copy(
             update={

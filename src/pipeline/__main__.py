@@ -58,13 +58,14 @@ from pipeline.http_transport import HttpTransportError, UrllibDevinTransport, Ur
 from pipeline.lanes.codeql import enumerate_from_config, read_alert_fixture
 from pipeline.lanes.deprecations import enumerate_deprecations, is_eol
 from pipeline.lanes.skipped_tests import enumerate_skipped_tests
+from pipeline.observability.events import event_from_candidate
 from pipeline.prompts import (
     render_implementer_prompt,
     render_planner_prompt,
     render_reviewer_phase_b_prompt,
     render_reviewer_prompt,
 )
-from pipeline.review_loop import apply_review_result
+from pipeline.review_loop import ReviewIteration, apply_review_result
 from pipeline.rubric import load_rubrics
 from pipeline.schemas import (
     Action,
@@ -77,14 +78,17 @@ from pipeline.schemas import (
 )
 from pipeline.score import apply_score
 from pipeline.session_client import (
+    BranchNotAdvancedError,
     DevinTransport,
     PlannerOutputError,
     RoleCollisionError,
     RuntimeOrchestrator,
+    SessionBlockedError,
     SessionCeilingError,
     SessionClient,
     SessionDedupeError,
     SessionMessageError,
+    event_with_ceiling,
 )
 from pipeline.simulation import simulate_run
 from pipeline.state import (
@@ -1122,6 +1126,7 @@ def run_once(
     dispatched = dispatch_candidates(selected, config)
     orchestrator = RuntimeOrchestrator(SessionClient(config, transport=session_transport))
     reviewed: list[Candidate] = []
+    ceiling_error: SessionCeilingError | None = None
     session_candidates: list[Candidate] = []
     live_client: GitHubClient | None = None
     if config.mode is Mode.LIVE:
@@ -1203,6 +1208,7 @@ def run_once(
 
         def make_prompts(
             planner_output: Mapping[str, object],
+            previous_iteration: ReviewIteration | None = None,
             candidate: Candidate = candidate,
             target_repo: str = target_repo,
             prompt_base_sha: str = prompt_base_sha,
@@ -1232,6 +1238,7 @@ def run_once(
                     base_sha=prompt_base_sha,
                     head_branch=prompt_head_branch,
                     planner_output=planner_output,
+                    previous_iteration=previous_iteration,
                 ),
                 render_reviewer_prompt(
                     candidate,
@@ -1239,6 +1246,7 @@ def run_once(
                     base_sha=prompt_base_sha,
                     head_branch=prompt_head_branch,
                     planner_output=planner_output,
+                    previous_iteration=previous_iteration,
                 ),
                 phase_b_prompt,
             )
@@ -1260,14 +1268,38 @@ def run_once(
                 else None,
                 candidate=candidate,
                 head_sha_resolver=head_sha_resolver,
+                branch_paths_resolver=(
+                    live_client.changed_paths_between
+                    if config.mode is Mode.LIVE and live_client is not None
+                    else None
+                ),
                 prompt_factory=make_prompts if config.mode is Mode.LIVE else None,
             )
+        except SessionCeilingError as exc:
+            latest = state_store.resume(candidate.candidate_id) or candidate
+            ceiling_event = event_with_ceiling(
+                event_from_candidate(latest, run_id=run_id),
+                exc,
+            )
+            terminal = latest.model_copy(
+                update={
+                    "state": CandidateState.TERMINAL,
+                    "reason": ceiling_event.reason,
+                    "reason_detail": str(exc),
+                    "auto_merge_eligible": False,
+                }
+            )
+            state_store.append(terminal)
+            reviewed.append(terminal)
+            ceiling_error = exc
+            break
         except (
             PlannerOutputError,
-            SessionCeilingError,
             SessionDedupeError,
             RoleCollisionError,
             SessionMessageError,
+            SessionBlockedError,
+            BranchNotAdvancedError,
             TimeoutError,
             HttpTransportError,
         ) as exc:
@@ -1279,19 +1311,30 @@ def run_once(
                     else ReasonCode.CAPABILITY_UNAVAILABLE
                 )
             latest = state_store.resume(candidate.candidate_id) or candidate
-            deferred = latest.model_copy(
+            is_terminal_error = isinstance(exc, BranchNotAdvancedError)
+            updated = latest.model_copy(
                 update={
-                    "state": CandidateState.DEFERRED,
+                    "state": (
+                        CandidateState.TERMINAL if is_terminal_error else CandidateState.DEFERRED
+                    ),
                     "reason": reason,
                     "reason_detail": (
                         str(exc)
-                        if isinstance(exc, (PlannerOutputError, SessionMessageError))
+                        if isinstance(
+                            exc,
+                            (
+                                PlannerOutputError,
+                                SessionMessageError,
+                                SessionBlockedError,
+                                BranchNotAdvancedError,
+                            ),
+                        )
                         else None
                     ),
                 }
             )
-            state_store.append(deferred)
-            reviewed.append(deferred)
+            state_store.append(updated)
+            reviewed.append(updated)
             continue
         planner_output = result.planner.snapshot.payload.get("structured_output")
         reviewer_output = result.reviewer.snapshot.payload.get("structured_output")
@@ -1331,6 +1374,11 @@ def run_once(
                     "test_added": bool(tests),
                     "test_paths": test_paths,
                     "test_author": result.reviewer.snapshot.session_id,
+                    "lifted_markers": [
+                        item
+                        for item in reviewer_output.get("lifted_markers", [])
+                        if isinstance(item, str)
+                    ],
                 }
             )
         if result.review is not None:
@@ -1451,6 +1499,8 @@ def run_once(
     )
     if config.mode is Mode.LIVE and state_store.marker_search_failed:
         raise RunAbort("capability_unavailable: marker_search_failed")
+    if ceiling_error is not None:
+        raise RunAbort(str(ceiling_error))
     return run_id, produced
 
 
