@@ -183,21 +183,26 @@ def classify_implementer_diff(
     paths = tuple(path for path, _ in hunks)
     configured_test_paths = tuple(test_paths)
     for path, lines in hunks:
-        test_path = (
-            path.startswith("tests/")
-            or "/tests/" in path
-            or path.startswith("test_")
-            or path.startswith("fixtures/")
-            or "/fixtures/" in path
-            or path.endswith("/conftest.py")
-            or path == "conftest.py"
-            or path in configured_test_paths
-        )
+        test_path = is_test_path(path, configured_test_paths)
         if test_path or any(
             _SKIP_MARKER.search(line) or _TEST_LOGIC.search(line) for line in lines
         ):
             return DiffInspection(False, ReasonCode.IMPLEMENTER_TEST_EDIT, paths)
     return DiffInspection(True, None, paths)
+
+
+def is_test_path(path: str, configured_test_paths: Iterable[str] = ()) -> bool:
+    """Return whether a path belongs to reviewer-owned test files."""
+    return (
+        path.startswith("tests/")
+        or "/tests/" in path
+        or path.startswith("test_")
+        or path.startswith("fixtures/")
+        or "/fixtures/" in path
+        or path.endswith("/conftest.py")
+        or path == "conftest.py"
+        or path in tuple(configured_test_paths)
+    )
 
 
 def validate_nested_marker_lifts(
@@ -257,6 +262,7 @@ __all__ = [
     "classify_implementer_diff",
     "classify_red_baseline",
     "inspect_reviewer_diff",
+    "is_test_path",
     "should_reauthor_baseline",
     "validate_nested_marker_lifts",
 ]

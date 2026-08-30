@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -19,6 +18,7 @@ from pipeline.red_baseline import (
     apply_red_baseline,
     classify_implementer_diff,
     inspect_reviewer_diff,
+    is_test_path,
 )
 from pipeline.review_loop import (
     FindingSeverity,
@@ -146,43 +146,6 @@ def _candidate_diff_review_matches(
     return (
         value.get("base_sha") == candidate.base_sha and value.get("head_sha") == candidate.head_sha
     )
-
-
-def _is_test_path(path: str) -> bool:
-    """Match paths owned by the reviewer role."""
-    return (
-        path.startswith("tests/")
-        or "/tests/" in path
-        or path.startswith("test_")
-        or path.startswith("fixtures/")
-        or "/fixtures/" in path
-        or path.endswith("/conftest.py")
-        or path == "conftest.py"
-    )
-
-
-def _call_prompt_factory(
-    factory: Callable[..., tuple[str, str, Callable[[str], str]]],
-    planner_output: Mapping[str, object],
-    previous_iteration: ReviewIteration | None,
-) -> tuple[str, str, Callable[[str], str]]:
-    """Call current factories with retry context and tolerate legacy one-arg adapters."""
-    try:
-        parameters = list(inspect.signature(factory).parameters.values())
-    except (TypeError, ValueError):
-        parameters = []
-    positional = tuple(
-        parameter
-        for parameter in parameters
-        if parameter.kind
-        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-    )
-    accepts_varargs = any(
-        parameter.kind is inspect.Parameter.VAR_POSITIONAL for parameter in parameters
-    )
-    if accepts_varargs or len(positional) >= 2:
-        return factory(planner_output, previous_iteration)
-    return factory(planner_output)
 
 
 class SessionCeilingError(RuntimeError):
@@ -644,6 +607,7 @@ class RuntimeOrchestrator:
         candidate_id: str,
         prompt: str,
         attempt: int,
+        session_created: Callable[[SessionAttempt], None] | None = None,
     ) -> RoleRun:
         evidence = self._client.create_session(
             role,
@@ -652,11 +616,26 @@ class RuntimeOrchestrator:
             attempt=attempt,
             structured_output_schema=ROLE_OUTPUT_SCHEMAS[role],
         )
+        if session_created is not None:
+            session_created(evidence)
         return RoleRun(evidence, self._client.poll_session(role, evidence.session_id))
 
-    def run_planner(self, candidate_id: str, prompt: str, *, attempt: int = 1) -> RoleRun:
+    def run_planner(
+        self,
+        candidate_id: str,
+        prompt: str,
+        *,
+        attempt: int = 1,
+        session_created: Callable[[SessionAttempt], None] | None = None,
+    ) -> RoleRun:
         """Run the candidate-specific planner session."""
-        return self._run(SessionRole.PLANNER, candidate_id, prompt, attempt)
+        return self._run(
+            SessionRole.PLANNER,
+            candidate_id,
+            prompt,
+            attempt,
+            session_created,
+        )
 
     def run_implementer(
         self,
@@ -664,13 +643,33 @@ class RuntimeOrchestrator:
         prompt: str,
         *,
         attempt: int = 1,
+        session_created: Callable[[SessionAttempt], None] | None = None,
     ) -> RoleRun:
         """Run the production-only implementer session."""
-        return self._run(SessionRole.IMPLEMENTER, candidate_id, prompt, attempt)
+        return self._run(
+            SessionRole.IMPLEMENTER,
+            candidate_id,
+            prompt,
+            attempt,
+            session_created,
+        )
 
-    def run_reviewer(self, candidate_id: str, prompt: str, *, attempt: int = 1) -> RoleRun:
+    def run_reviewer(
+        self,
+        candidate_id: str,
+        prompt: str,
+        *,
+        attempt: int = 1,
+        session_created: Callable[[SessionAttempt], None] | None = None,
+    ) -> RoleRun:
         """Run the independent reviewer session."""
-        return self._run(SessionRole.REVIEWER, candidate_id, prompt, attempt)
+        return self._run(
+            SessionRole.REVIEWER,
+            candidate_id,
+            prompt,
+            attempt,
+            session_created,
+        )
 
     @staticmethod
     def inspect_implementer_diff(diff_text: str) -> DiffInspection:
@@ -711,9 +710,15 @@ class RuntimeOrchestrator:
             ]
             | None
         ) = None,
+        session_created: Callable[[SessionAttempt], None] | None = None,
     ) -> OrchestrationResult:
         """Run the review loop after a planner and concurrent role join."""
-        planner = self.run_planner(candidate_id, planner_prompt, attempt=attempt)
+        planner = self.run_planner(
+            candidate_id,
+            planner_prompt,
+            attempt=attempt,
+            session_created=session_created,
+        )
 
         def concurrent_roles(
             role_attempt: int,
@@ -726,12 +731,14 @@ class RuntimeOrchestrator:
                     candidate_id,
                     implementer_prompt,
                     attempt=role_attempt,
+                    session_created=session_created,
                 )
                 reviewer_future = executor.submit(
                     self.run_reviewer,
                     candidate_id,
                     reviewer_prompt,
                     attempt=role_attempt,
+                    session_created=session_created,
                 )
                 try:
                     implementer = implementer_future.result()
@@ -752,8 +759,8 @@ class RuntimeOrchestrator:
                 validate_planner_output(planner_output)
             except ValueError as exc:
                 raise PlannerOutputError(str(exc)) from exc
-            implementer_prompt, reviewer_prompt, phase_b_prompt = _call_prompt_factory(
-                prompt_factory, planner_output, None
+            implementer_prompt, reviewer_prompt, phase_b_prompt = prompt_factory(
+                planner_output, None
             )
         elif self._client.config.mode is Mode.LIVE:
             raise PlannerOutputError("missing planner prompt factory")
@@ -889,22 +896,22 @@ class RuntimeOrchestrator:
                 and branch_paths_resolver is not None
             ):
                 branch_paths = tuple(branch_paths_resolver(candidate.base_sha, candidate.head_sha))
-                if not any(not _is_test_path(path) for path in branch_paths):
+                if not any(not is_test_path(path) for path in branch_paths):
                     findings.append(
                         ReviewFinding(
                             FindingSeverity.BLOCKING,
                             None,
                             "candidate branch lacks an implementer commit",
-                            ReasonCode.DISAGREEMENT_UNRESOLVED,
+                            ReasonCode.ROLE_COMMIT_MISSING,
                         )
                     )
-                if not any(_is_test_path(path) for path in branch_paths):
+                if not any(is_test_path(path) for path in branch_paths):
                     findings.append(
                         ReviewFinding(
                             FindingSeverity.BLOCKING,
                             None,
                             "candidate branch lacks a reviewer test commit",
-                            ReasonCode.DISAGREEMENT_UNRESOLVED,
+                            ReasonCode.ROLE_COMMIT_MISSING,
                         )
                     )
             diff_reviewed = _candidate_diff_review_matches(result, candidate)
@@ -943,6 +950,12 @@ class RuntimeOrchestrator:
 
         def phase_b(result: OrchestrationResult) -> OrchestrationResult:
             nonlocal candidate
+            reviewer_session_id = result.reviewer.attempt.session_id
+            if (
+                reviewer_session_id in phase_b_attempted
+                or self._client.config.mode is Mode.SIMULATE
+            ):
+                return result
             if candidate is not None and head_sha_resolver is not None:
                 resolved_head_sha = head_sha_resolver()
                 if resolved_head_sha is not None:
@@ -951,12 +964,6 @@ class RuntimeOrchestrator:
                         raise BranchNotAdvancedError(
                             f"candidate branch remained at base SHA: {resolved_head_sha}"
                         )
-            reviewer_session_id = result.reviewer.attempt.session_id
-            if (
-                reviewer_session_id in phase_b_attempted
-                or self._client.config.mode is Mode.SIMULATE
-            ):
-                return result
             if _candidate_diff_review_matches(result, candidate):
                 return result
             raw_diff = output(result.implementer).get("committed_diff")
@@ -980,9 +987,10 @@ class RuntimeOrchestrator:
 
         def rerun(role_attempt: int) -> ReviewIteration:
             nonlocal current, phase_b_prompt
-            if current.reviewer.attempt.session_id in phase_b_attempted and not output(
-                current.reviewer
-            ).get("diff_reviewed"):
+            if (
+                current.reviewer.attempt.session_id in phase_b_attempted
+                and not _candidate_diff_review_matches(current, candidate)
+            ):
                 return iteration_from(current)
             previous_iteration = iteration_from(current)
             next_attempt = max(
@@ -995,7 +1003,7 @@ class RuntimeOrchestrator:
                     next_implementer_prompt,
                     next_reviewer_prompt,
                     phase_b_prompt,
-                ) = _call_prompt_factory(prompt_factory, planner_output, previous_iteration)
+                ) = prompt_factory(planner_output, previous_iteration)
             else:
                 next_implementer_prompt = implementer_prompt
                 next_reviewer_prompt = reviewer_prompt

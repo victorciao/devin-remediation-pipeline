@@ -326,6 +326,19 @@ def wait_for_required_contexts(
             and not any(context in statuses for context in REQUIRED_CONTEXTS)
             and clock() - started >= poll_interval_s
         ):
+            workflow_response = client.get(_path(config, f"/actions/runs?head_sha={sha}"))
+            workflow_runs = (
+                workflow_response.get("workflow_runs")
+                if isinstance(workflow_response, Mapping)
+                else None
+            )
+            if not isinstance(workflow_runs, list) or not workflow_runs:
+                return CiWaitResult(
+                    current_mode,
+                    ReasonCode.CI_WORKFLOWS_ABSENT,
+                    False,
+                    "ci_workflows_absent",
+                )
             return CiWaitResult(
                 current_mode,
                 ReasonCode.CI_EVIDENCE_UNAVAILABLE,
@@ -472,17 +485,6 @@ class GitHubClient:
             obj = response.get("object")
             if isinstance(obj, Mapping) and isinstance(obj.get("sha"), str):
                 return str(obj["sha"])
-        return None
-
-    def pull_request_head_sha(self, number: int) -> str | None:
-        """Read the actual head SHA from a pull request."""
-        response = self._read(
-            f"/repos/{self._config.target_owner}/{self._config.target_repo}/pulls/{number}"
-        )
-        if isinstance(response, Mapping):
-            head = response.get("head")
-            if isinstance(head, Mapping) and isinstance(head.get("sha"), str):
-                return str(head["sha"])
         return None
 
     def pull_request_head_metadata(self, number: int) -> tuple[str | None, bool]:
@@ -667,7 +669,11 @@ class GitHubClient:
 
     def enable_auto_merge(self, number: int, *, ci_mode: CiEvidenceMode) -> None:
         """Request auto-merge only after the caller has checked all gates."""
-        if not self._config.auto_merge_enabled or ci_mode is not CiEvidenceMode.GITHUB:
+        if (
+            not self._config.auto_merge_enabled
+            or self._config.ci_evidence_mode is not CiEvidenceMode.GITHUB
+            or ci_mode is not CiEvidenceMode.GITHUB
+        ):
             raise ValueError("auto-merge requires enabled GitHub CI evidence")
         self._write(
             "post",
@@ -695,6 +701,7 @@ def publish_artifacts(
     existing_pr_url: str | None = None,
     after_issue: Callable[[int, str], None] | None = None,
     after_pr_created: Callable[[int, str], None] | None = None,
+    after_pr_adopted: Callable[[int, str], None] | None = None,
     after_ci: Callable[[int], None] | None = None,
     after_issue_patched: Callable[[str], None] | None = None,
 ) -> ArtifactLinks:
@@ -717,7 +724,12 @@ def publish_artifacts(
         and issue_url is not None
     ):
         after_issue(issue_number, issue_url)
-    if candidate.tier is Tier.MEDIUM or pr_title is None or pr_body is None or head is None:
+    if (
+        candidate.tier is Tier.MEDIUM
+        or pr_title is None
+        or pr_body is None
+        or (head is None and existing_pr_number is None)
+    ):
         return ArtifactLinks(issue_url, None, issue_number=issue_number)
     if ci_probe is None:
         raise ValueError("PR publication requires an observed CI probe")
@@ -733,6 +745,8 @@ def publish_artifacts(
                 after_issue_patched(pr_url)
             raise MergedPullRequestError(existing_match)
     else:
+        if head is None:
+            raise ArtifactUnavailableError("PR publication requires a candidate branch")
         try:
             pr_number, pr_url = client.create_pr(
                 pr_title,
@@ -759,8 +773,10 @@ def publish_artifacts(
                 raise MergedPullRequestError(existing) from exc
             else:
                 raise ClosedPullRequestError(head, existing) from exc
-    if after_pr_created is not None and created_pr:
+    if created_pr and after_pr_created is not None:
         after_pr_created(pr_number, pr_url)
+    elif not created_pr and after_pr_adopted is not None:
+        after_pr_adopted(pr_number, pr_url)
     ci_result = ci_probe(pr_number)
     if preflight is not None:
         preflight()

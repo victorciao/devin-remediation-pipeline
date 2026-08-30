@@ -56,7 +56,11 @@ def render_run_artifacts(
         routed = candidate.action in {Action.OPEN_PR, Action.OPEN_ISSUE}
         if config.mode is Mode.LIVE and not routed:
             continue
-        template_text = issue_templates[candidate.lane].read_text(encoding="utf-8")
+        template_text = (
+            ""
+            if candidate.lane is Lane.CODEQL
+            else issue_templates[candidate.lane].read_text(encoding="utf-8")
+        )
         summary = (
             f"Remediation tracking for {candidate.stable_locator}."
             if config.mode is Mode.LIVE
@@ -79,7 +83,7 @@ def render_run_artifacts(
         issue_path.parent.mkdir(parents=True, exist_ok=True)
         issue_path.write_text(issue_body, encoding="utf-8")
         produced.append(issue_path)
-        if candidate.action is Action.OPEN_PR:
+        if candidate.action in {Action.OPEN_PR, Action.REVIEWER_ONLY_DIFF}:
             pr_body = render_pr_body(
                 pr_template,
                 candidate,
@@ -88,6 +92,24 @@ def render_run_artifacts(
                 automation_metadata={
                     "mode": config.mode.value,
                     "would_write": config.mode is Mode.SIMULATE,
+                    "ci_evidence_mode": config.ci_evidence_mode.value,
+                    "implementer_commands_run": (
+                        "simulated: "
+                        + str(planner.get(candidate.candidate_id, {}).get("commands_run", "n/a"))
+                    ),
+                    "reviewer_pre_fix_failure": (
+                        "simulated: "
+                        + str(
+                            reviewer.get(candidate.candidate_id, {}).get("pre_fix_failure", "n/a")
+                        )
+                    ),
+                    "reviewer_post_fix_result": (
+                        "simulated: "
+                        + str(
+                            reviewer.get(candidate.candidate_id, {}).get("post_fix_result", "n/a")
+                        )
+                    ),
+                    "diff_range": (f"{candidate.base_sha or 'n/a'}..{candidate.head_sha or 'n/a'}"),
                 },
             )
             validate_pr_body(pr_body)
@@ -111,6 +133,7 @@ def render_run_artifacts(
         candidates,
         run_id=run_id,
         capability_notes=capability_notes,
+        mode=config.mode,
     )
     if not config.has_issues and config.issue_sink.value == "pr_comment":
         run_path.write_text(

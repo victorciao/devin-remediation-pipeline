@@ -56,6 +56,8 @@ class ReasonCode(str, Enum):
     MERGED_EXTERNALLY_UNVERIFIED = "merged_externally_unverified"
     AWAITING_WORKFLOW_APPROVAL = "awaiting_workflow_approval"
     ARTIFACT_DEGRADED = "artifact_degraded"
+    ARTIFACT_ORPHANED = "artifact_orphaned"
+    CI_WORKFLOWS_ABSENT = "ci_workflows_absent"
     GUARDRAIL_CLAMPED = "guardrail_clamped"
     DISAGREEMENT_UNRESOLVED = "disagreement_unresolved"
     IMPLEMENTER_TEST_EDIT = "implementer_test_edit"
@@ -65,6 +67,7 @@ class ReasonCode(str, Enum):
     RUBRIC_FACTOR_UNRESOLVED = "rubric_factor_unresolved"
     DIFF_REVIEW_INCOMPLETE = "diff_review_incomplete"
     BRANCH_NOT_ADVANCED = "branch_not_advanced"
+    ROLE_COMMIT_MISSING = "role_commit_missing"
     SESSION_BLOCKED = "session_blocked"
 
 
@@ -269,6 +272,11 @@ class Candidate(StrictModel):
     planner_session_id: str | None = None
     implementer_session_id: str | None = None
     reviewer_session_id: str | None = None
+    role_attempts: dict[str, int] = Field(default_factory=dict)
+    role_attempt_evidence: dict[str, dict[str, object]] = Field(default_factory=dict)
+    planner_criteria: list[str] = Field(default_factory=list)
+    reviewer_criterion_ids: list[str] = Field(default_factory=list)
+    diff_reviewed: bool = False
     iterations: int = Field(default=0, ge=0)
     test_added: bool | None = None
     test_paths: list[str] = Field(default_factory=list)
@@ -301,6 +309,11 @@ class EventRecord(StrictModel):
     planner_session_id: str | None = None
     implementer_session_id: str | None = None
     reviewer_session_id: str | None = None
+    role_attempts: dict[str, int] = Field(default_factory=dict)
+    role_attempt_evidence: dict[str, dict[str, object]] = Field(default_factory=dict)
+    planner_criteria: list[str] = Field(default_factory=list)
+    reviewer_criterion_ids: list[str] = Field(default_factory=list)
+    diff_reviewed: bool = False
     iterations: int = Field(default=0, ge=0)
     pr_url: str | None = None
     issue_url: str | None = None

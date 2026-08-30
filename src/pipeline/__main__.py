@@ -83,6 +83,7 @@ from pipeline.session_client import (
     PlannerOutputError,
     RoleCollisionError,
     RuntimeOrchestrator,
+    SessionAttempt,
     SessionBlockedError,
     SessionCeilingError,
     SessionClient,
@@ -175,7 +176,11 @@ def _publish_live(
         raise RunAbort("target base SHA is unavailable")
     published: list[Candidate] = []
     for candidate in candidates:
-        if candidate.action not in {Action.OPEN_PR, Action.OPEN_ISSUE}:
+        if candidate.action not in {
+            Action.OPEN_PR,
+            Action.OPEN_ISSUE,
+            Action.REVIEWER_ONLY_DIFF,
+        }:
             published.append(candidate)
             continue
         if not config.has_issues and candidate.action is Action.OPEN_ISSUE:
@@ -187,7 +192,11 @@ def _publish_live(
                 published.append(persisted_degraded)
                 continue
             issue_body = render_degraded_comment_body(
-                templates[candidate.lane].read_text(encoding="utf-8"),
+                (
+                    ""
+                    if candidate.lane is Lane.CODEQL
+                    else templates[candidate.lane].read_text(encoding="utf-8")
+                ),
                 candidate,
                 generated_summary=f"Remediation tracking for {candidate.stable_locator}.",
             )
@@ -253,7 +262,11 @@ def _publish_live(
                 "merge_verified": persisted.merge_verified,
             }
         )
-        issue_template = templates[candidate.lane].read_text(encoding="utf-8")
+        issue_template = (
+            ""
+            if candidate.lane is Lane.CODEQL
+            else templates[candidate.lane].read_text(encoding="utf-8")
+        )
         summary = f"Remediation tracking for {candidate.stable_locator}."
         requested_labels = list(candidate.labels)
         if (
@@ -328,7 +341,21 @@ def _publish_live(
             candidate,
             planner_outputs.get(candidate.candidate_id, {}),
             reviewer_outputs.get(candidate.candidate_id, {}),
-            automation_metadata={"mode": "live", "would_write": False},
+            automation_metadata={
+                "mode": "live",
+                "would_write": False,
+                "ci_evidence_mode": config.ci_evidence_mode.value,
+                "implementer_commands_run": planner_outputs.get(candidate.candidate_id, {}).get(
+                    "commands_run", "n/a"
+                ),
+                "reviewer_pre_fix_failure": reviewer_outputs.get(candidate.candidate_id, {}).get(
+                    "pre_fix_failure", "n/a"
+                ),
+                "reviewer_post_fix_result": reviewer_outputs.get(candidate.candidate_id, {}).get(
+                    "post_fix_result", "n/a"
+                ),
+                "diff_range": f"{candidate.base_sha or 'n/a'}..{candidate.head_sha or 'n/a'}",
+            },
             commit_message=None,
         )
         validate_pr_body(pr_body)
@@ -393,6 +420,14 @@ def _publish_live(
                     }
                 )
             )
+
+        def after_pr_adopted(
+            pr_number: int,
+            pr_url: str,
+            candidate_for_callback: Candidate = candidate,
+        ) -> None:
+            """Persist identity when publication reconciles an existing PR."""
+            after_pr_created(pr_number, pr_url, candidate_for_callback)
 
         def ci_probe(
             pr_number: int,
@@ -465,7 +500,18 @@ def _publish_live(
                 candidate_for_body,
                 planner_for_body,
                 reviewer_for_body,
-                automation_metadata={"mode": "live", "would_write": False},
+                automation_metadata={
+                    "mode": "live",
+                    "would_write": False,
+                    "ci_evidence_mode": config.ci_evidence_mode.value,
+                    "implementer_commands_run": planner_for_body.get("commands_run", "n/a"),
+                    "reviewer_pre_fix_failure": reviewer_for_body.get("pre_fix_failure", "n/a"),
+                    "reviewer_post_fix_result": reviewer_for_body.get("post_fix_result", "n/a"),
+                    "diff_range": (
+                        f"{candidate_for_body.base_sha or 'n/a'}.."
+                        f"{candidate_for_body.head_sha or 'n/a'}"
+                    ),
+                },
                 issue_number=issue_numbers[0],
                 commit_message=commit_messages[0],
             )
@@ -540,6 +586,7 @@ def _publish_live(
                     existing_pr_url=candidate.pr_url,
                     after_issue=after_issue,
                     after_pr_created=after_pr_created,
+                    after_pr_adopted=after_pr_adopted,
                     after_ci=after_ci,
                     after_issue_patched=after_issue_patched,
                 )
@@ -868,6 +915,32 @@ def _prepare_live_candidate(
 ) -> Candidate:
     """Reserve and create a candidate branch before any role session starts."""
     persisted = state_store.resume(candidate.candidate_id)
+    marker = state_store.marker_artifact(candidate.candidate_id) if persisted is None else None
+    if persisted is None and state_store.marker_search_orphaned(candidate.candidate_id):
+        orphaned = candidate.model_copy(
+            update={
+                "state": CandidateState.DEFERRED,
+                "reason": ReasonCode.ARTIFACT_ORPHANED,
+                "reason_detail": "marker search returned a non-unique or malformed artifact",
+            }
+        )
+        state_store.append(orphaned)
+        return orphaned
+    if marker is not None:
+        adopted = candidate.model_copy(
+            update={
+                "state": CandidateState.ISSUE_CREATED,
+                "issue_number": marker.number,
+                "issue_url": marker.url,
+                "pr_number": marker.number if marker.is_pull_request else None,
+                "pr_url": marker.url if marker.is_pull_request else None,
+                "reason": None,
+                "reason_detail": None,
+            }
+        )
+        state_store.append(adopted)
+        if marker.is_pull_request:
+            return adopted
     decision = state_store.resume_decision(candidate.candidate_id)
     if decision.action is ResumeAction.SKIP:
         return persisted if persisted is not None else candidate
@@ -1098,6 +1171,8 @@ def run_once(
                         "issue_url": drifted.issue_url,
                         "pr_url": drifted.pr_url,
                         "base_sha": drifted.base_sha,
+                        "head_branch": drifted.head_branch,
+                        "head_sha": drifted.head_sha,
                     }
                 )
         normalized_candidates.append(candidate)
@@ -1251,6 +1326,32 @@ def run_once(
                 phase_b_prompt,
             )
 
+        def session_created(
+            evidence: SessionAttempt,
+            candidate_for_callback: Candidate = candidate,
+        ) -> None:
+            """Persist role identity and attempt evidence immediately."""
+            latest = (
+                state_store.resume(candidate_for_callback.candidate_id) or candidate_for_callback
+            )
+            role_attempts = dict(latest.role_attempts)
+            role_attempts[evidence.role.value] = role_attempts.get(evidence.role.value, 0) + 1
+            role_attempt_evidence = dict(latest.role_attempt_evidence)
+            role_attempt_evidence[evidence.role.value] = {
+                "attempt": evidence.attempt,
+                "is_new_session_raw": evidence.is_new_session_raw,
+                "retry_decision": evidence.retry_decision.value,
+            }
+            state_store.append(
+                latest.model_copy(
+                    update={
+                        f"{evidence.role.value}_session_id": evidence.session_id,
+                        "role_attempts": role_attempts,
+                        "role_attempt_evidence": role_attempt_evidence,
+                    }
+                )
+            )
+
         try:
             result = orchestrator.run_candidate(
                 candidate.candidate_id,
@@ -1274,6 +1375,7 @@ def run_once(
                     else None
                 ),
                 prompt_factory=make_prompts if config.mode is Mode.LIVE else None,
+                session_created=session_created,
             )
         except SessionCeilingError as exc:
             latest = state_store.resume(candidate.candidate_id) or candidate
@@ -1338,8 +1440,19 @@ def run_once(
             continue
         planner_output = result.planner.snapshot.payload.get("structured_output")
         reviewer_output = result.reviewer.snapshot.payload.get("structured_output")
+        planner_criteria_ids: list[str] = []
         if isinstance(planner_output, Mapping):
             planner_outputs[candidate.candidate_id] = planner_output
+            raw_criteria = planner_output.get("criteria")
+            planner_criteria_ids = (
+                [
+                    str(item.get("id"))
+                    for item in raw_criteria
+                    if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+                ]
+                if isinstance(raw_criteria, list)
+                else []
+            )
         if isinstance(reviewer_output, Mapping):
             reviewer_outputs[candidate.candidate_id] = reviewer_output
         reviewed_candidate = candidate.model_copy(
@@ -1348,6 +1461,7 @@ def run_once(
                 "implementer_session_id": result.implementer.snapshot.session_id,
                 "reviewer_session_id": result.reviewer.snapshot.session_id,
                 "iterations": result.review.iterations if result.review is not None else 0,
+                "planner_criteria": planner_criteria_ids,
             }
         )
         if (
@@ -1373,12 +1487,31 @@ def run_once(
                 update={
                     "test_added": bool(tests),
                     "test_paths": test_paths,
+                    "reviewer_criterion_ids": [
+                        str(item.get("criterion_id"))
+                        for item in tests
+                        if isinstance(item, Mapping) and isinstance(item.get("criterion_id"), str)
+                    ],
+                    "diff_reviewed": (
+                        result.review.diff_reviewed if result.review is not None else False
+                    ),
                     "test_author": result.reviewer.snapshot.session_id,
                     "lifted_markers": [
                         item
                         for item in reviewer_output.get("lifted_markers", [])
                         if isinstance(item, str)
                     ],
+                }
+            )
+        persisted_sessions = state_store.resume(candidate.candidate_id)
+        if persisted_sessions is not None:
+            reviewed_candidate = reviewed_candidate.model_copy(
+                update={
+                    "planner_session_id": persisted_sessions.planner_session_id,
+                    "implementer_session_id": persisted_sessions.implementer_session_id,
+                    "reviewer_session_id": persisted_sessions.reviewer_session_id,
+                    "role_attempts": persisted_sessions.role_attempts,
+                    "role_attempt_evidence": persisted_sessions.role_attempt_evidence,
                 }
             )
         if result.review is not None:

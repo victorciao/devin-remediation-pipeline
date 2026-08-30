@@ -72,6 +72,7 @@ class ReviewLoopResult:
     reviewer_only: bool = False
     needs_human_review: bool = False
     red_result: RedBaselineResult | None = None
+    diff_reviewed: bool = False
 
 
 def _criterion_findings(iteration: ReviewIteration) -> list[ReviewFinding]:
@@ -115,6 +116,10 @@ def _disagreement_summary(iteration: ReviewIteration) -> str:
 def _terminal_reason(iteration: ReviewIteration) -> ReasonCode:
     if any(finding.reason is ReasonCode.IMPLEMENTER_TEST_EDIT for finding in iteration.findings):
         return ReasonCode.IMPLEMENTER_TEST_EDIT
+    if any(finding.reason is ReasonCode.ROLE_COMMIT_MISSING for finding in iteration.findings):
+        return ReasonCode.ROLE_COMMIT_MISSING
+    if any(finding.reason is ReasonCode.DISAGREEMENT_UNRESOLVED for finding in iteration.findings):
+        return ReasonCode.DISAGREEMENT_UNRESOLVED
     if not iteration.diff_reviewed:
         return ReasonCode.DIFF_REVIEW_INCOMPLETE
     return ReasonCode.DISAGREEMENT_UNRESOLVED
@@ -151,6 +156,7 @@ def evaluate_review_iteration(
             reason=ReasonCode.STALE_SKIP,
             reviewer_only=True,
             red_result=iteration.red_result,
+            diff_reviewed=iteration.diff_reviewed,
         )
     if iteration.red_baseline is BaselineStatus.STALE_SKIP:
         findings.append(
@@ -188,6 +194,7 @@ def evaluate_review_iteration(
             iterations=1,
             state=CandidateState.CONVERGED,
             red_result=iteration.red_result,
+            diff_reviewed=iteration.diff_reviewed,
         )
     return None
 
@@ -213,6 +220,7 @@ def run_review_loop(
                     disagreement_summary=_disagreement_summary(iteration),
                     needs_human_review=True,
                     red_result=iteration.red_result,
+                    diff_reviewed=iteration.diff_reviewed,
                 )
             if incomplete_attempts >= 1:
                 return ReviewLoopResult(
@@ -223,6 +231,7 @@ def run_review_loop(
                     disagreement_summary=_disagreement_summary(iteration),
                     needs_human_review=True,
                     red_result=iteration.red_result,
+                    diff_reviewed=iteration.diff_reviewed,
                 )
             incomplete_attempts += 1
             iteration = rerun(ordinal)
@@ -237,6 +246,7 @@ def run_review_loop(
                     disagreement_summary=_disagreement_summary(iteration),
                     needs_human_review=True,
                     red_result=iteration.red_result,
+                    diff_reviewed=iteration.diff_reviewed,
                 )
             reauthor_attempts += 1
         decision = evaluate_review_iteration(
@@ -252,6 +262,7 @@ def run_review_loop(
                 disagreement_summary=decision.disagreement_summary,
                 reviewer_only=decision.reviewer_only,
                 red_result=iteration.red_result,
+                diff_reviewed=iteration.diff_reviewed,
             )
         if ordinal == config.iteration_cap or rerun is None:
             return ReviewLoopResult(
@@ -262,6 +273,7 @@ def run_review_loop(
                 disagreement_summary=_disagreement_summary(iteration),
                 needs_human_review=True,
                 red_result=iteration.red_result,
+                diff_reviewed=iteration.diff_reviewed,
             )
         iteration = rerun(ordinal + 1)
         ordinal += 1
@@ -424,9 +436,6 @@ def review_iteration_from_payload(
             and has_files
             and (bool(files_read) or not changed_count)
         )
-    raw_head_sha = reviewer_output.get("head_sha")
-    if not isinstance(raw_head_sha, str) and implementer_output is not None:
-        raw_head_sha = implementer_output.get("head_sha")
     return ReviewIteration(
         red_baseline=baseline_status,
         green=green,
@@ -436,7 +445,6 @@ def review_iteration_from_payload(
         addressed_criteria=frozenset(addressed),
         diff_reviewed=diff_reviewed,
         red_result=red_result,
-        prior_head_sha=raw_head_sha if isinstance(raw_head_sha, str) else None,
     )
 
 

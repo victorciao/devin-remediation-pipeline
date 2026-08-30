@@ -74,6 +74,13 @@ def _commit_signoff(commit_message: str | None) -> str | None:
     return None
 
 
+def _metadata_value(value: object) -> str:
+    """Render evidence values without changing command text."""
+    if isinstance(value, (list, tuple)):
+        return "\n".join(str(item) for item in value)
+    return str(value)
+
+
 def render_pr_body(
     template: str,
     candidate: Candidate,
@@ -118,13 +125,27 @@ def render_pr_body(
     if signoff is not None:
         sections.extend(["", signoff])
     if automation_metadata is not None:
+        metadata = dict(automation_metadata)
         sections.extend(
             [
                 "",
                 "### AUTOMATION METADATA",
-                *(f"- **{key}**: {value}" for key, value in automation_metadata.items()),
+                *(f"- **{key}**: {_metadata_value(value)}" for key, value in metadata.items()),
             ]
         )
+        if metadata.get("ci_evidence_mode") == "local":
+            sections.extend(
+                [
+                    "- **evidence_label**: self-reported by automation",
+                    "- **implementer_commands_run**: "
+                    f"{_metadata_value(metadata.get('implementer_commands_run', 'n/a'))}",
+                    "- **reviewer_pre_fix_failure**: "
+                    f"{_metadata_value(metadata.get('reviewer_pre_fix_failure', 'n/a'))}",
+                    "- **reviewer_post_fix_result**: "
+                    f"{_metadata_value(metadata.get('reviewer_post_fix_result', 'n/a'))}",
+                    f"- **diff_range**: {_metadata_value(metadata.get('diff_range', 'n/a'))}",
+                ]
+            )
     return "\n".join(sections).rstrip() + "\n"
 
 
@@ -244,6 +265,16 @@ def validate_pr_body(body: str) -> None:
         raise ArtifactValidationError("PR body lost the Superset checkbox block")
     if "### AUTOMATION METADATA" in body and body.index("### AUTOMATION METADATA") < positions[-1]:
         raise ArtifactValidationError("automation metadata must be last")
+    if "- **ci_evidence_mode**: local" in body:
+        required_evidence = (
+            "- **evidence_label**: self-reported by automation",
+            "- **implementer_commands_run**:",
+            "- **reviewer_pre_fix_failure**:",
+            "- **reviewer_post_fix_result**:",
+            "- **diff_range**:",
+        )
+        if any(item not in body for item in required_evidence):
+            raise ArtifactValidationError("local PR body lacks automation evidence block")
 
 
 def validate_issue_body(body: str, candidate: Candidate) -> None:

@@ -26,6 +26,15 @@ class StatePreservationError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class MarkerArtifact:
+    """Unique GitHub artifact found by the candidate marker search."""
+
+    number: int
+    url: str
+    is_pull_request: bool
+
+
+@dataclass(frozen=True)
 class ResumeDecision:
     """Pure decision for resuming one persisted candidate."""
 
@@ -69,36 +78,33 @@ def decide_resume(
 
 def github_marker_search(
     query: Callable[[str], object],
-) -> Callable[[str], bool]:
-    """Return a marker lookup backed by GitHub's issue and pull-request search."""
+) -> Callable[[str], MarkerArtifact | None]:
+    """Return a unique marker lookup backed by GitHub search."""
 
-    def contains(marker: str) -> bool:
+    def find(marker: str) -> MarkerArtifact | None:
         result = query(marker)
-        if isinstance(result, dict):
-            total = result.get("total_count")
-            return isinstance(total, int) and total > 0
-        if isinstance(result, list):
-            return bool(result)
-        return False
+        if not isinstance(result, dict):
+            raise ValueError("marker search response is not an object")
+        total = result.get("total_count")
+        items = result.get("items")
+        if not isinstance(total, int) or not isinstance(items, list):
+            raise ValueError("marker search response lacks total_count/items")
+        if total == 0:
+            return None
+        if total != 1 or len(items) != 1 or not isinstance(items[0], dict):
+            raise ValueError("marker search did not return a unique artifact")
+        item = items[0]
+        number = item.get("number")
+        url = item.get("html_url")
+        if not isinstance(number, int) or not isinstance(url, str) or not url:
+            raise ValueError("marker search artifact lacks number/html_url")
+        return MarkerArtifact(
+            number=number,
+            url=url,
+            is_pull_request=isinstance(item.get("pull_request"), dict) or "/pull/" in url,
+        )
 
-    return contains
-
-
-def repository_marker_search(repository: Path) -> Callable[[str], bool]:
-    """Compatibility helper for local callers; LIVE uses GitHub search instead."""
-
-    def contains(marker: str) -> bool:
-        for path in repository.rglob("*"):
-            if not path.is_file() or ".git" in path.parts:
-                continue
-            try:
-                if marker in path.read_text(encoding="utf-8"):
-                    return True
-            except (OSError, UnicodeDecodeError):
-                continue
-        return False
-
-    return contains
+    return find
 
 
 class CandidateStateStore:
@@ -108,15 +114,16 @@ class CandidateStateStore:
         self,
         path: Path,
         *,
-        marker_search: Callable[[str], bool] | None = None,
+        marker_search: Callable[[str], MarkerArtifact | None] | None = None,
     ) -> None:
         self._path = path
         self._marker_search = marker_search
         self.marker_search_failed = False
         self.quarantined_rows = 0
         self._quarantine_seen: set[str] | None = None
-        self._marker_results: dict[str, bool | None] = {}
+        self._marker_results: dict[str, MarkerArtifact | None] = {}
         self._marker_search_unconfigured: set[str] = set()
+        self._marker_search_orphaned: set[str] = set()
 
     def _read_rows(self) -> list[Candidate]:
         if not self._path.exists():
@@ -165,7 +172,7 @@ class CandidateStateStore:
         current = self.latest().get(candidate_id)
         if has_local_artifact(current):
             return True
-        return self.marker_exists(candidate_id)
+        return self.marker_artifact(candidate_id) is not None
 
     def resume_decision(self, candidate_id: str) -> ResumeDecision:
         """Resolve resume behavior from persisted state and one marker lookup."""
@@ -183,22 +190,30 @@ class CandidateStateStore:
             marker_search_available=marker_search_available,
         )
 
-    def marker_exists(self, candidate_id: str) -> bool:
+    def marker_artifact(self, candidate_id: str) -> MarkerArtifact | None:
         """Search the target repository for one candidate's stable marker."""
         if candidate_id in self._marker_results:
-            return self._marker_results[candidate_id] is True
+            return self._marker_results[candidate_id]
         if self._marker_search is None:
             self._marker_search_unconfigured.add(candidate_id)
-            self._marker_results[candidate_id] = False
-            return False
+            self._marker_results[candidate_id] = None
+            return None
         try:
             result = self._marker_search(f"<!-- devin-remediation-id: {candidate_id} -->")
             self._marker_results[candidate_id] = result
             return result
+        except ValueError:
+            self._marker_search_orphaned.add(candidate_id)
+            self._marker_results[candidate_id] = None
+            return None
         except Exception:
             self.marker_search_failed = True
             self._marker_results[candidate_id] = None
-            return False
+            return None
+
+    def marker_exists(self, candidate_id: str) -> bool:
+        """Return whether a unique target artifact exists for a candidate."""
+        return self.marker_artifact(candidate_id) is not None
 
     def marker_search_unavailable(self, candidate_id: str) -> bool:
         """Return whether the configured marker lookup failed for one candidate."""
@@ -207,19 +222,29 @@ class CandidateStateStore:
         return (
             candidate_id not in self._marker_search_unconfigured
             and self._marker_results.get(candidate_id) is None
+            and candidate_id not in self._marker_search_orphaned
         )
+
+    def marker_search_orphaned(self, candidate_id: str) -> bool:
+        """Return whether marker search found an ambiguous or malformed artifact."""
+        if candidate_id not in self._marker_results:
+            self.marker_artifact(candidate_id)
+        return candidate_id in self._marker_search_orphaned
 
     def append(self, candidate: Candidate) -> None:
         """Append one candidate lifecycle row after rereading current state."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        latest = self.latest().get(candidate.candidate_id)
-        if latest is not None and latest.model_dump(mode="json") == candidate.model_dump(
-            mode="json"
-        ):
-            return
-        line = json.dumps(candidate.model_dump(mode="json"), sort_keys=True) + "\n"
-        with self._path.open("a", encoding="utf-8") as handle:
-            handle.write(line)
+        lock_path = self._path.with_suffix(self._path.suffix + ".lock")
+        with lock_path.open("a", encoding="utf-8") as lock_handle:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            latest = self.latest().get(candidate.candidate_id)
+            if latest is not None and latest.model_dump(mode="json") == candidate.model_dump(
+                mode="json"
+            ):
+                return
+            line = json.dumps(candidate.model_dump(mode="json"), sort_keys=True) + "\n"
+            with self._path.open("a", encoding="utf-8") as handle:
+                handle.write(line)
 
     def append_if_new_artifact(self, candidate: Candidate) -> bool:
         """Atomically reserve a candidate before the first artifact write."""
@@ -264,8 +289,8 @@ __all__ = [
     "ResumeAction",
     "ResumeDecision",
     "StatePreservationError",
+    "MarkerArtifact",
     "decide_resume",
     "has_local_artifact",
     "github_marker_search",
-    "repository_marker_search",
 ]

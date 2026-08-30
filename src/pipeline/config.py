@@ -7,7 +7,7 @@ import os
 from collections.abc import Mapping, Sequence
 from enum import Enum
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import yaml
 from pydantic import (
@@ -133,6 +133,18 @@ class PipelineConfig(BaseModel):
         except ValidationError as exc:
             raise ConfigError(str(exc)) from exc
 
+    def model_copy(
+        self,
+        *,
+        update: Mapping[str, Any] | None = None,
+        deep: bool = False,
+    ) -> PipelineConfig:
+        """Preserve the local-evidence auto-merge invariant on copies."""
+        copied = super().model_copy(update=update, deep=deep)
+        if copied.ci_evidence_mode is CiEvidenceMode.LOCAL:
+            object.__setattr__(copied, "auto_merge_enabled", False)
+        return copied
+
     @field_validator("mode", mode="before")
     @classmethod
     def normalize_mode(cls, value: object) -> Mode:
@@ -196,6 +208,18 @@ class PipelineConfig(BaseModel):
         resolved["max_sessions"] = budget * (3 + 2 * iteration_cap)
         return resolved
 
+    @model_validator(mode="before")
+    @classmethod
+    def disable_local_auto_merge(cls, value: object) -> object:
+        """Make local CI evidence permanently ineligible for auto-merge."""
+        if not isinstance(value, dict):
+            return value
+        if value.get("ci_evidence_mode") in {CiEvidenceMode.LOCAL, CiEvidenceMode.LOCAL.value}:
+            resolved = dict(value)
+            resolved["auto_merge_enabled"] = False
+            return resolved
+        return value
+
     @model_validator(mode="after")
     def validate_cross_field_rules(self) -> PipelineConfig:
         """Re-assert cross-field safety rules on construction and assignment."""
@@ -210,8 +234,6 @@ class PipelineConfig(BaseModel):
             raise ConfigError(
                 f"max_sessions={self.max_sessions} is below required floor {required_floor}"
             )
-        if self.ci_evidence_mode == CiEvidenceMode.LOCAL:
-            self.__dict__["auto_merge_enabled"] = False
         return self
 
     @model_validator(mode="wrap")

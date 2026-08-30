@@ -6,7 +6,7 @@ import json
 from collections.abc import Iterable
 from pathlib import Path
 
-from pipeline.schemas import Candidate, CandidateState, EventRecord, RunEventRecord
+from pipeline.schemas import Candidate, CandidateState, EventRecord, RetryDecision, RunEventRecord
 
 
 class EventLog:
@@ -78,6 +78,11 @@ def event_from_candidate(candidate: Candidate, *, run_id: str) -> EventRecord:
         planner_session_id=candidate.planner_session_id,
         implementer_session_id=candidate.implementer_session_id,
         reviewer_session_id=candidate.reviewer_session_id,
+        role_attempts=candidate.role_attempts,
+        role_attempt_evidence=candidate.role_attempt_evidence,
+        planner_criteria=candidate.planner_criteria,
+        reviewer_criterion_ids=candidate.reviewer_criterion_ids,
+        diff_reviewed=candidate.diff_reviewed,
         iterations=candidate.iterations,
         pr_url=candidate.pr_url,
         issue_url=candidate.issue_url,
@@ -126,10 +131,37 @@ def append_candidate_events(
                 token_scopes=list(token_scopes),
             )
         )
-    for event in run_events:
-        log.append(event)
+    for run_event in run_events:
+        log.append(run_event)
     for candidate in candidates:
-        log.append(event_from_candidate(candidate, run_id=run_id))
+        candidate_event = event_from_candidate(candidate, run_id=run_id)
+        if candidate.role_attempt_evidence:
+            from pipeline.session_client import SessionAttempt, SessionRole, event_with_attempt
+
+            for role_name, evidence in sorted(candidate.role_attempt_evidence.items()):
+                try:
+                    role = SessionRole(role_name)
+                    raw_attempt = evidence["attempt"]
+                    if not isinstance(raw_attempt, int):
+                        continue
+                    attempt = raw_attempt
+                    raw_new = evidence.get("is_new_session_raw")
+                    is_new = raw_new if isinstance(raw_new, bool) else None
+                    decision = RetryDecision(str(evidence["retry_decision"]))
+                    candidate_event = event_with_attempt(
+                        candidate_event,
+                        SessionAttempt(
+                            role,
+                            candidate.candidate_id,
+                            attempt,
+                            getattr(candidate, f"{role_name}_session_id") or "",
+                            is_new,
+                            decision,
+                        ),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+        log.append(candidate_event)
 
 
 __all__ = ["EventLog", "append_candidate_events", "event_from_candidate"]
