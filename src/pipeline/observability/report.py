@@ -24,10 +24,21 @@ def render_run_report(
         for candidate in rows
         if candidate.gate_passed is False and candidate.reason is not None
     )
+    dispatched_states = {
+        CandidateState.DISPATCHING,
+        CandidateState.ISSUE_CREATED,
+        CandidateState.PR_CREATED,
+        CandidateState.ISSUE_PATCHED,
+        CandidateState.COMMENT_CREATED,
+        CandidateState.CONVERGED,
+        CandidateState.TERMINAL,
+    }
     tiers = Counter(
         candidate.tier.value
         for candidate in rows
-        if candidate.action in {Action.OPEN_PR, Action.OPEN_ISSUE} and candidate.tier is not None
+        if candidate.action in {Action.OPEN_PR, Action.OPEN_ISSUE}
+        and candidate.state in dispatched_states
+        and candidate.tier is not None
     )
     deferred_by_reason = Counter(
         candidate.reason.value

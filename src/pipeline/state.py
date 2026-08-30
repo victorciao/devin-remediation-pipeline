@@ -212,6 +212,11 @@ class CandidateStateStore:
     def append(self, candidate: Candidate) -> None:
         """Append one candidate lifecycle row after rereading current state."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        latest = self.latest().get(candidate.candidate_id)
+        if latest is not None and latest.model_dump(mode="json") == candidate.model_dump(
+            mode="json"
+        ):
+            return
         line = json.dumps(candidate.model_dump(mode="json"), sort_keys=True) + "\n"
         with self._path.open("a", encoding="utf-8") as handle:
             handle.write(line)

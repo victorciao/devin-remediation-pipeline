@@ -1362,7 +1362,18 @@ def run_once(
                 recovered.append(deferred)
             reviewed = recovered
         if state_store.marker_search_failed:
-            notes.append("marker search unavailable; durable local state used")
+            notes.append(
+                "marker search failed; no candidate can be dispatched while dedupe "
+                "capability is unavailable"
+            )
+            ci_mode_events.append(
+                RunEventRecord(
+                    event_type="marker_search_failure",
+                    run_id=run_id,
+                    transition_reason=ReasonCode.CAPABILITY_UNAVAILABLE,
+                    reason_detail="marker_search_failed",
+                )
+            )
     produced = simulate_run(
         reviewed,
         run_id=run_id,
@@ -1376,6 +1387,8 @@ def run_once(
         token_scopes=preflight.token_scopes if preflight is not None else (),
         run_events=ci_mode_events,
     )
+    if config.mode is Mode.LIVE and state_store.marker_search_failed:
+        raise RunAbort("capability_unavailable: marker_search_failed")
     return run_id, produced
 
 

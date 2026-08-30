@@ -33,6 +33,7 @@ class EventLog:
             if isinstance(payload, dict) and payload.get("event_type") in {
                 "run_capabilities",
                 "ci_mode_transition",
+                "marker_search_failure",
             }:
                 continue
             events.append(EventRecord.model_validate(payload, strict=False))
@@ -50,6 +51,7 @@ class EventLog:
             if isinstance(payload, dict) and payload.get("event_type") in {
                 "run_capabilities",
                 "ci_mode_transition",
+                "marker_search_failure",
             }:
                 events.append(RunEventRecord.model_validate(payload, strict=False))
         return events

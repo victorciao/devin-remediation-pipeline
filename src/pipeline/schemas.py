@@ -327,7 +327,10 @@ class EventRecord(StrictModel):
 class RunEventRecord(StrictModel):
     """Layer 1 run-level capability evidence."""
 
-    event_type: Literal["run_capabilities", "ci_mode_transition"] = "run_capabilities"
+    event_type: Literal["run_capabilities", "ci_mode_transition", "marker_search_failure"] = (
+        "run_capabilities"
+    )
+    reason_detail: str | None = None
     run_id: str = Field(min_length=1)
     token_login: str | None = None
     token_scopes: list[str] = Field(default_factory=list)

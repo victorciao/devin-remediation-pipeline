@@ -80,6 +80,23 @@ def compute_kpis(
     config: PipelineConfig,
 ) -> dict[str, float | int | NotApplicable]:
     """Compute the §11 KPI set from candidate and event evidence."""
+    dispatched_states = {
+        CandidateState.DISPATCHING,
+        CandidateState.ISSUE_CREATED,
+        CandidateState.PR_CREATED,
+        CandidateState.ISSUE_PATCHED,
+        CandidateState.COMMENT_CREATED,
+        CandidateState.CONVERGED,
+        CandidateState.TERMINAL,
+    }
+    dispatched_pr = sum(
+        candidate.action is Action.OPEN_PR and candidate.state in dispatched_states
+        for candidate in candidates
+    )
+    dispatched_issue = sum(
+        candidate.action is Action.OPEN_ISSUE and candidate.state in dispatched_states
+        for candidate in candidates
+    )
     actions = Counter(candidate.action for candidate in candidates)
     unresolved = sum(event.reason is ReasonCode.DISAGREEMENT_UNRESOLVED for event in events)
     verified = sum(event.red_baseline is not None for event in events)
@@ -124,8 +141,8 @@ def compute_kpis(
             candidate.state in {CandidateState.TERMINAL, CandidateState.CONVERGED}
             for candidate in candidates
         ),
-        "dispatched_pr": actions[Action.OPEN_PR],
-        "dispatched_issue": actions[Action.OPEN_ISSUE],
+        "dispatched_pr": dispatched_pr,
+        "dispatched_issue": dispatched_issue,
         "deferred": actions[Action.DEFERRED],
         "verification_pass_rate": passing / verified if verified else 0.0,
         "test_inclusion_rate": (
