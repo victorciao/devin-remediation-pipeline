@@ -118,10 +118,10 @@ def _terminal_reason(iteration: ReviewIteration) -> ReasonCode:
         return ReasonCode.IMPLEMENTER_TEST_EDIT
     if any(finding.reason is ReasonCode.ROLE_COMMIT_MISSING for finding in iteration.findings):
         return ReasonCode.ROLE_COMMIT_MISSING
-    if any(finding.reason is ReasonCode.DISAGREEMENT_UNRESOLVED for finding in iteration.findings):
-        return ReasonCode.DISAGREEMENT_UNRESOLVED
     if not iteration.diff_reviewed:
         return ReasonCode.DIFF_REVIEW_INCOMPLETE
+    if any(finding.reason is ReasonCode.DISAGREEMENT_UNRESOLVED for finding in iteration.findings):
+        return ReasonCode.DISAGREEMENT_UNRESOLVED
     return ReasonCode.DISAGREEMENT_UNRESOLVED
 
 
@@ -140,11 +140,7 @@ def _parse_observed_outcome(raw: Mapping[str, object]) -> PerItemOutcome | None:
         return None
 
 
-def evaluate_review_iteration(
-    iteration: ReviewIteration,
-    *,
-    major_only_requires_human: bool = True,
-) -> ReviewLoopResult | None:
+def evaluate_review_iteration(iteration: ReviewIteration) -> ReviewLoopResult | None:
     """Return a terminal decision when one iteration has settled the loop."""
     findings = list(iteration.findings)
     findings.extend(_criterion_findings(iteration))
@@ -249,10 +245,7 @@ def run_review_loop(
                     diff_reviewed=iteration.diff_reviewed,
                 )
             reauthor_attempts += 1
-        decision = evaluate_review_iteration(
-            iteration,
-            major_only_requires_human=config.major_only_requires_human,
-        )
+        decision = evaluate_review_iteration(iteration)
         if decision is not None:
             return ReviewLoopResult(
                 converged=decision.converged,
@@ -287,7 +280,7 @@ def apply_review_result(candidate: Candidate, result: ReviewLoopResult) -> Candi
     action: Action | None = None
     if result.red_result is not None:
         if result.red_result.status is BaselineStatus.INVALID_RED_BASELINE:
-            state = CandidateState.GATED
+            state = CandidateState.TERMINAL
             reason = ReasonCode.INVALID_RED_BASELINE
         elif result.red_result.status is BaselineStatus.STALE_SKIP:
             state = CandidateState.TERMINAL
@@ -298,10 +291,7 @@ def apply_review_result(candidate: Candidate, result: ReviewLoopResult) -> Candi
         "reason": reason,
         "disagreement_summary": result.disagreement_summary,
         "unresolved_major": reason
-        in {
-            ReasonCode.DISAGREEMENT_UNRESOLVED,
-            ReasonCode.DIFF_REVIEW_INCOMPLETE,
-        },
+        in {ReasonCode.DISAGREEMENT_UNRESOLVED, ReasonCode.DIFF_REVIEW_INCOMPLETE},
         "auto_merge_eligible": (candidate.auto_merge_eligible if result.converged else False),
     }
     if result.red_result is not None:

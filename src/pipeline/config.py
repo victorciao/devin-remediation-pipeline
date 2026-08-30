@@ -28,6 +28,7 @@ SECURITY_ISSUE_MODE = "generic_tracking"
 DEFAULT_BUDGET_N = 10
 DEFAULT_ITERATION_CAP = 5
 DEFAULT_MAX_SESSIONS = DEFAULT_BUDGET_N * (3 + 2 * DEFAULT_ITERATION_CAP)
+DEFAULT_SESSION_TIMEOUT_S = 5400.0
 
 
 class ConfigError(ValueError):
@@ -101,7 +102,7 @@ class PipelineConfig(BaseModel):
     max_sessions: int = Field(default=DEFAULT_MAX_SESSIONS, ge=1, strict=True)
     max_total_acu: float = Field(default=500.0, gt=0, strict=True)
     kpi_sink: KpiSink = KpiSink.LOCAL
-    major_only_requires_human: bool = True
+    reservation_lease_s: float | None = Field(default=None, gt=0, strict=True)
     alert_source: AlertSource = AlertSource.API
     alert_fixture_path: Path = Path("fixtures/codeql_alerts.json")
     ci_evidence_mode: CiEvidenceMode = CiEvidenceMode.LOCAL
@@ -234,6 +235,12 @@ class PipelineConfig(BaseModel):
             raise ConfigError(
                 f"max_sessions={self.max_sessions} is below required floor {required_floor}"
             )
+        lease = self.reservation_lease_s
+        if lease is None:
+            lease = 3 * DEFAULT_SESSION_TIMEOUT_S
+            object.__setattr__(self, "reservation_lease_s", lease)
+        if lease < DEFAULT_SESSION_TIMEOUT_S:
+            raise ConfigError("reservation_lease_s must be at least session_timeout_s")
         return self
 
     @model_validator(mode="wrap")
@@ -316,7 +323,7 @@ def _parse_cli(args: Sequence[str]) -> tuple[dict[str, object], bool]:
             "max_total_acu",
         }:
             values[normalized_key] = _parse_float(normalized_key, raw_value)
-        elif normalized_key in {"major_only_requires_human", "auto_merge_enabled"}:
+        elif normalized_key in {"auto_merge_enabled"}:
             values[normalized_key] = _parse_bool(raw_value)
         else:
             values[normalized_key] = raw_value
@@ -340,7 +347,7 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
         "EOL_MAJOR_LAG": "eol_major_lag",
         "MERGE_RATE_FLOOR": "merge_rate_floor",
         "SESSION_FAILURE_CEILING": "session_failure_ceiling",
-        "MAJOR_ONLY_REQUIRES_HUMAN": "major_only_requires_human",
+        "RESERVATION_LEASE_S": "reservation_lease_s",
         "AUTO_MERGE_ENABLED": "auto_merge_enabled",
         "HAS_ISSUES": "has_issues",
         "CI_WAIT_TIMEOUT_S": "ci_wait_timeout_s",
@@ -386,6 +393,7 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
             "MERGE_RATE_FLOOR",
             "SESSION_FAILURE_CEILING",
             "MAX_TOTAL_ACU",
+            "RESERVATION_LEASE_S",
         }:
             values[field_name] = _parse_float(field_name, raw_value)
         elif name in {"MAJOR_ONLY_REQUIRES_HUMAN", "AUTO_MERGE_ENABLED", "HAS_ISSUES"}:

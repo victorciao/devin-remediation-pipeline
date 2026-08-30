@@ -52,6 +52,11 @@ def render_run_report(
         for reason, count in deferred_by_reason.items()
         if reason not in {"budget_overflow", "session_ceiling"}
     )
+    marker_outcomes = Counter(
+        candidate.marker_search_outcome
+        for candidate in rows
+        if candidate.marker_search_outcome is not None
+    )
     links = [
         f"- `{candidate.candidate_id}`: PR={candidate.pr_url or 'n/a'}, "
         f"issue={candidate.issue_url or 'n/a'}"
@@ -71,6 +76,13 @@ def render_run_report(
     )
     gated_count = sum(candidate.gate_passed is False for candidate in rows)
     unpublished_count = sum(candidate.state is CandidateState.DISPATCHING for candidate in rows)
+    safety_undetermined_count = sum(
+        candidate.marker_search_outcome in {"failed", "orphaned", "unconfigured"}
+        and candidate.issue_url is None
+        and candidate.pr_url is None
+        and candidate.comment_url is None
+        for candidate in rows
+    )
     accounted = {
         candidate.candidate_id
         for candidate in rows
@@ -79,7 +91,10 @@ def render_run_report(
         or candidate.candidate_id in escalated_ids
         or (
             candidate.action in {Action.OPEN_PR, Action.OPEN_ISSUE, Action.REVIEWER_ONLY_DIFF}
-            and candidate.state in dispatched_states
+            and (
+                candidate.state in dispatched_states
+                or candidate.state is CandidateState.DISPATCHING
+            )
         )
         or (
             candidate.tier is not None
@@ -102,6 +117,9 @@ def render_run_report(
             ]
         )
     unaccounted = len(rows) - len(accounted)
+    marker_lines = [
+        f"- `{outcome}`: {count}" for outcome, count in sorted(marker_outcomes.items())
+    ] or ["- None"]
     return "\n".join(
         [
             f"# Run {run_id}",
@@ -120,6 +138,9 @@ def render_run_report(
             "## Capability notes",
             *note_lines,
             "",
+            "## Marker search outcomes",
+            *marker_lines,
+            "",
             "## Gated out",
             *(gated_lines or ["- None"]),
             "",
@@ -133,6 +154,7 @@ def render_run_report(
             f"- Low-tier candidates: {low_tier_count}",
             f"- Gated candidates: {gated_count}",
             f"- Reached dispatching but unpublished: {unpublished_count}",
+            f"- Publication safety undetermined: {safety_undetermined_count}",
             f"- Role attempts: {sum(sum(candidate.role_attempts.values()) for candidate in rows)}",
             f"- Iterations: {sum(candidate.iterations for candidate in rows)}",
             "",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
@@ -76,7 +77,9 @@ def decide_resume(
         CandidateState.COMMENT_CREATED,
         CandidateState.TERMINAL,
     }:
-        return ResumeDecision(ResumeAction.SKIP)
+        if artifacts_present or has_local_artifact(persisted):
+            return ResumeDecision(ResumeAction.SKIP)
+        return ResumeDecision(ResumeAction.RESUME_AT_STEP, "publication")
     if persisted.state is CandidateState.CONVERGED and artifacts_present:
         return ResumeDecision(ResumeAction.SKIP)
     if not has_local_artifact(persisted) and (
@@ -126,15 +129,20 @@ class CandidateStateStore:
         *,
         marker_search: Callable[[str], MarkerArtifact | None] | None = None,
         require_marker_proof: bool = False,
+        reservation_lease_s: float = 16_200.0,
+        artifact_simulated: bool = False,
     ) -> None:
         self._path = path
         self._marker_search = marker_search
         self._require_marker_proof = require_marker_proof
+        self._reservation_lease_s = reservation_lease_s
+        self._artifact_simulated = artifact_simulated
         self.marker_search_failed = False
         self.quarantined_rows = 0
         self._quarantine_seen: set[str] | None = None
         self._marker_results: dict[str, MarkerArtifact | None] = {}
         self._marker_outcomes: dict[str, MarkerSearchOutcome] = {}
+        self.reservation_reason: str | None = None
 
     def _read_rows(self) -> list[Candidate]:
         if not self._path.exists():
@@ -256,7 +264,15 @@ class CandidateStateStore:
 
     def _append_locked(self, candidate: Candidate) -> None:
         """Append one row while the caller owns the state lock."""
+        if self._artifact_simulated:
+            candidate = candidate.model_copy(update={"artifact_simulated": True})
         latest = self.latest().get(candidate.candidate_id)
+        if latest is not None:
+            for field in ("head_sha", "reviewed_head_sha"):
+                previous = getattr(latest, field)
+                current = getattr(candidate, field)
+                if previous is not None and current is None:
+                    raise StatePreservationError(f"state append discarded persisted {field}")
         if latest is not None and latest.model_dump(mode="json") == candidate.model_dump(
             mode="json"
         ):
@@ -276,19 +292,40 @@ class CandidateStateStore:
     def append_if_new_artifact(self, candidate: Candidate) -> bool:
         """Atomically reserve a candidate before the first artifact write."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        marker_exists = self.marker_exists(candidate.candidate_id)
-        if (
-            self.marker_search_unavailable(candidate.candidate_id)
-            or self.marker_search_orphaned(candidate.candidate_id)
-        ) and not has_local_artifact(self.latest().get(candidate.candidate_id)):
-            return False
+        self.reservation_reason = None
         lock_path = self._path.with_suffix(self._path.suffix + ".lock")
         with lock_path.open("a", encoding="utf-8") as lock_handle:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            # The absence proof must be made while the reservation lock is held.
+            self._marker_results.pop(candidate.candidate_id, None)
+            self._marker_outcomes.pop(candidate.candidate_id, None)
+            marker = self.marker_artifact(candidate.candidate_id)
+            marker_outcome = self._marker_outcomes.get(candidate.candidate_id)
             current = self.latest().get(candidate.candidate_id)
-            if has_local_artifact(current) or marker_exists:
+            if has_local_artifact(current) or marker is not None:
                 return False
-            self._append_locked(candidate)
+            if marker_outcome in {
+                MarkerSearchOutcome.FAILED,
+                MarkerSearchOutcome.ORPHANED,
+            } or (
+                marker_outcome is MarkerSearchOutcome.UNCONFIGURED and self._require_marker_proof
+            ):
+                self.reservation_reason = marker_outcome.value if marker_outcome else "unavailable"
+                return False
+            now = time.time()
+            if current is not None and current.reserved_at is not None:
+                age = now - current.reserved_at
+                if age < 0:
+                    # A future timestamp is treated as an unexpired lease.
+                    self.reservation_reason = "reservation_held"
+                    return False
+                if age < self._reservation_lease_s:
+                    self.reservation_reason = "reservation_held"
+                    return False
+            reserved = candidate.model_copy(
+                update={"reserved_at": now, "state": CandidateState.DISPATCHING}
+            )
+            self._append_locked(reserved)
             return True
 
     def supersede(self, previous: Candidate, current: Candidate) -> None:

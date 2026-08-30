@@ -224,7 +224,9 @@ def dispatch_candidates(candidates: Sequence[Candidate], config: PipelineConfig)
             and candidate.action is not Action.HUMAN_REVIEW
             and candidate.state is not CandidateState.TERMINAL
         )
-        if candidate.unresolved_major and config.major_only_requires_human:
+        # §14 invariant: unresolved major findings block auto-merge and require
+        # human review; this policy is not configurable through a parameter.
+        if candidate.unresolved_major:
             labels = _with_label(candidate, NEEDS_HUMAN_REVIEW_LABEL)
         decisions[candidate.candidate_id] = candidate.model_copy(
             update={

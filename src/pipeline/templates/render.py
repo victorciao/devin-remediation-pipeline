@@ -102,6 +102,11 @@ def render_pr_body(
     additional = _section_body(template, "### ADDITIONAL INFORMATION")
     sections = [
         candidate_marker(candidate.candidate_id),
+        *(
+            ["### SIMULATED ARTIFACT", "Writes are suppressed; no remote artifact exists."]
+            if candidate.artifact_simulated
+            else []
+        ),
         prefix,
         "### SUMMARY",
         summary,
@@ -194,9 +199,18 @@ def render_issue_body(
             "### VERIFICATION": verification,
             "### REFERENCES (rule ID only)": candidate.rule_id or "<rule>",
         }
+        simulated_heading_codeql = (
+            ["### SIMULATED ARTIFACT", "Writes are suppressed; no remote artifact exists.", ""]
+            if candidate.artifact_simulated
+            else []
+        )
         return (
             "\n".join(
-                [marker, *sum(([heading, value, ""] for heading, value in values.items()), [])]
+                [
+                    marker,
+                    *simulated_heading_codeql,
+                    *sum(([heading, value, ""] for heading, value in values.items()), []),
+                ]
             ).rstrip()
             + "\n"
         )
@@ -210,7 +224,12 @@ def render_issue_body(
             "Description of the problem to be solved.",
             f"For EM/PM tracking: {generated_summary}",
         )
-        return f"{marker}\n\n{body.rstrip()}\n"
+        simulated_heading = (
+            "\n### SIMULATED ARTIFACT\nWrites are suppressed; no remote artifact exists.\n"
+            if candidate.artifact_simulated
+            else "\n"
+        )
+        return f"{marker}{simulated_heading}\n{body.rstrip()}\n"
 
     headings = [
         "### Bug description",
@@ -227,7 +246,12 @@ def render_issue_body(
         "- [ ] Pipeline-generated remediation",
     ]
     pairs = ([heading, value, ""] for heading, value in zip(headings, content, strict=True))
-    return "\n".join([marker, *sum(pairs, [])]).rstrip() + "\n"
+    simulated = (
+        ["### SIMULATED ARTIFACT", "Writes are suppressed; no remote artifact exists.", ""]
+        if candidate.artifact_simulated
+        else []
+    )
+    return "\n".join([marker, *simulated, *sum(pairs, [])]).rstrip() + "\n"
 
 
 def render_degraded_comment_body(

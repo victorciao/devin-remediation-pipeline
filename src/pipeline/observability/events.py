@@ -110,6 +110,9 @@ def event_from_candidate(candidate: Candidate, *, run_id: str) -> EventRecord:
         lifted_markers=candidate.lifted_markers,
         related_candidate_id=candidate.related_candidate_id,
         disagreement_summary=candidate.disagreement_summary,
+        marker_search_outcome=candidate.marker_search_outcome,
+        artifact_simulated=candidate.artifact_simulated,
+        phase_b_protocol_violation=candidate.phase_b_protocol_violation,
     )
 
 

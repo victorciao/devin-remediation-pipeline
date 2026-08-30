@@ -80,6 +80,9 @@ from pipeline.score import apply_score
 from pipeline.session_client import (
     BranchNotAdvancedError,
     DevinTransport,
+    DiffReviewIncompleteError,
+    PhaseBCorrelationTimeoutError,
+    PhaseBHeadUnavailableError,
     PlannerOutputError,
     RoleCollisionError,
     RuntimeOrchestrator,
@@ -215,14 +218,27 @@ def _publish_live(
             continue
         persisted = state_store.resume(candidate.candidate_id)
         decision = state_store.resume_decision(candidate.candidate_id)
+        marker_outcome = state_store.marker_search_outcome(candidate.candidate_id)
+        candidate = candidate.model_copy(
+            update={
+                "marker_search_outcome": marker_outcome.value,
+                "reason_detail": candidate.reason_detail or marker_outcome.value,
+            }
+        )
         if decision.action is ResumeAction.SKIP:
             published.append(persisted or candidate)
             continue
         if decision.action is ResumeAction.DEFER:
+            marker_reason = {
+                "failed": ReasonCode.MARKER_SEARCH_FAILED,
+                "orphaned": ReasonCode.ARTIFACT_ORPHANED,
+                "unconfigured": ReasonCode.MARKER_SEARCH_UNCONFIGURED,
+            }.get(marker_outcome.value, ReasonCode.CAPABILITY_UNAVAILABLE)
             deferred = (persisted or candidate).model_copy(
                 update={
                     "state": CandidateState.DEFERRED,
-                    "reason": ReasonCode.CAPABILITY_UNAVAILABLE,
+                    "reason": marker_reason,
+                    "reason_detail": marker_outcome.value,
                 }
             )
             state_store.append(deferred)
@@ -233,14 +249,24 @@ def _publish_live(
                 update={"state": CandidateState.DISPATCHING, "base_sha": resolved_base_sha}
             )
             if state_store.append_if_new_artifact(reservation):
-                persisted = reservation
+                persisted = state_store.resume(candidate.candidate_id) or reservation
             else:
                 persisted = state_store.resume(candidate.candidate_id)
         if persisted is None:
+            reservation_reason = state_store.reservation_reason
             deferred = candidate.model_copy(
                 update={
                     "state": CandidateState.DEFERRED,
-                    "reason": ReasonCode.CAPABILITY_UNAVAILABLE,
+                    "reason": (
+                        ReasonCode.RESERVATION_HELD
+                        if reservation_reason == "reservation_held"
+                        else (
+                            ReasonCode(reservation_reason)
+                            if reservation_reason in {item.value for item in ReasonCode}
+                            else ReasonCode.CAPABILITY_UNAVAILABLE
+                        )
+                    ),
+                    "reason_detail": reservation_reason,
                 }
             )
             state_store.append(deferred)
@@ -256,6 +282,8 @@ def _publish_live(
                 "pr_url": persisted.pr_url,
                 "head_branch": persisted.head_branch or candidate.head_branch,
                 "head_sha": candidate.head_sha or persisted.head_sha,
+                "reviewed_head_sha": persisted.reviewed_head_sha,
+                "reserved_at": persisted.reserved_at,
                 "reason": persisted.reason,
                 "reason_detail": persisted.reason_detail,
                 "artifact_degraded": persisted.artifact_degraded,
@@ -276,25 +304,47 @@ def _publish_live(
             requested_labels.append("needs-human-review")
         labels: list[str] = []
         label_failures: list[str] = []
-        for label in requested_labels:
-            if client.ensure_label(label):
-                labels.append(label)
+        try:
+            if config.has_issues:
+                issue_body = render_issue_body(
+                    issue_template,
+                    candidate,
+                    generated_summary=summary,
+                )
             else:
-                label_failures.append(label)
-        if config.has_issues:
-            issue_body = render_issue_body(
-                issue_template,
-                candidate,
-                generated_summary=summary,
+                issue_body = render_degraded_comment_body(
+                    issue_template,
+                    candidate,
+                    generated_summary=summary,
+                )
+            if config.has_issues:
+                validate_issue_body(issue_body, candidate)
+            if candidate.action is Action.OPEN_ISSUE:
+                for label in requested_labels:
+                    if client.ensure_label(label):
+                        labels.append(label)
+                    else:
+                        label_failures.append(label)
+        except (ArtifactValidationError, ArtifactUnavailableError, HttpTransportError) as exc:
+            latest = state_store.resume(candidate.candidate_id) or candidate
+            reason = getattr(exc, "reason", None)
+            if not isinstance(reason, ReasonCode):
+                reason = (
+                    ReasonCode.ARTIFACT_VALIDATION_FAILED
+                    if isinstance(exc, ArtifactValidationError)
+                    else ReasonCode.CAPABILITY_UNAVAILABLE
+                )
+            deferred = latest.model_copy(
+                update={
+                    "state": CandidateState.DEFERRED,
+                    "reason": reason,
+                    "reason_detail": str(exc),
+                    "auto_merge_eligible": False,
+                }
             )
-        else:
-            issue_body = render_degraded_comment_body(
-                issue_template,
-                candidate,
-                generated_summary=summary,
-            )
-        if config.has_issues:
-            validate_issue_body(issue_body, candidate)
+            state_store.append(deferred)
+            published.append(deferred)
+            continue
         issue_title = render_issue_title(candidate, f"Remediate {candidate.stable_locator}")
         issue_number_holder: list[int | None] = [candidate.issue_number]
 
@@ -334,31 +384,65 @@ def _publish_live(
         branch = candidate.head_branch
         if branch is None:
             raise RunAbort("candidate branch was not prepared before publication")
-        pr_body = render_pr_body(
-            (config.templates_dir / "superset/PULL_REQUEST_TEMPLATE.md").read_text(
-                encoding="utf-8"
-            ),
-            candidate,
-            planner_outputs.get(candidate.candidate_id, {}),
-            reviewer_outputs.get(candidate.candidate_id, {}),
-            automation_metadata={
-                "mode": "live",
-                "would_write": False,
-                "ci_evidence_mode": config.ci_evidence_mode.value,
-                "implementer_commands_run": implementer_outputs.get(candidate.candidate_id, {}).get(
-                    "commands_run", "n/a"
+        try:
+            pr_body = render_pr_body(
+                (config.templates_dir / "superset/PULL_REQUEST_TEMPLATE.md").read_text(
+                    encoding="utf-8"
                 ),
-                "reviewer_pre_fix_failure": reviewer_outputs.get(candidate.candidate_id, {}).get(
-                    "red_baseline", "n/a"
-                ),
-                "reviewer_post_fix_result": reviewer_outputs.get(candidate.candidate_id, {}).get(
-                    "green_result", "n/a"
-                ),
-                "diff_range": f"{candidate.base_sha or 'n/a'}..{candidate.head_sha or 'n/a'}",
-            },
-            commit_message=None,
-        )
-        validate_pr_body(pr_body)
+                candidate,
+                planner_outputs.get(candidate.candidate_id, {}),
+                reviewer_outputs.get(candidate.candidate_id, {}),
+                automation_metadata={
+                    "mode": "live",
+                    "writes_suppressed": False,
+                    "ci_evidence_mode": config.ci_evidence_mode.value,
+                    "implementer_commands_run": implementer_outputs.get(
+                        candidate.candidate_id, {}
+                    ).get("commands_run", "n/a"),
+                    "reviewer_pre_fix_failure": reviewer_outputs.get(
+                        candidate.candidate_id, {}
+                    ).get("red_baseline", "n/a"),
+                    "reviewer_post_fix_result": reviewer_outputs.get(
+                        candidate.candidate_id, {}
+                    ).get("green_result", "n/a"),
+                    "diff_range": (
+                        f"{candidate.base_sha or 'n/a'}.."
+                        f"{candidate.reviewed_head_sha or candidate.head_sha or 'n/a'}"
+                    ),
+                },
+                commit_message=None,
+            )
+            validate_pr_body(pr_body)
+        except ArtifactValidationError as exc:
+            deferred = candidate.model_copy(
+                update={
+                    "state": CandidateState.DEFERRED,
+                    "reason": ReasonCode.ARTIFACT_VALIDATION_FAILED,
+                    "reason_detail": str(exc),
+                    "auto_merge_eligible": False,
+                }
+            )
+            state_store.append(deferred)
+            published.append(deferred)
+            continue
+        try:
+            for label in requested_labels:
+                if client.ensure_label(label):
+                    labels.append(label)
+                else:
+                    label_failures.append(label)
+        except ArtifactUnavailableError as exc:
+            deferred = candidate.model_copy(
+                update={
+                    "state": CandidateState.DEFERRED,
+                    "reason": getattr(exc, "reason", ReasonCode.LABEL_CAPABILITY_UNAVAILABLE),
+                    "reason_detail": str(exc),
+                    "auto_merge_eligible": False,
+                }
+            )
+            state_store.append(deferred)
+            published.append(deferred)
+            continue
         pr_title = render_pr_title(candidate)
         regex = (config.templates_dir / "superset/pr_title_regex.txt").read_text(encoding="utf-8")
         if not validate_pr_title(pr_title, regex):
@@ -373,6 +457,8 @@ def _publish_live(
             continue
         ci_reason_holder: list[ReasonCode | None] = [None]
         ci_detail_holder: list[str | None] = [None]
+        label_reason_holder: list[ReasonCode | None] = [None]
+        label_apply_reason_holder: list[ReasonCode | None] = [None]
         pr_url_holder: list[str | None] = [candidate.pr_url]
         pr_number_holder: list[int | None] = [candidate.pr_number]
         head_sha_holder: list[str | None] = [None]
@@ -410,7 +496,7 @@ def _publish_live(
                         "pr_url": pr_url,
                         "head_sha": head_shas[0],
                         "reason": ci_reasons[0],
-                        "reason_detail": ci_details[0],
+                        "reason_detail": ci_details[0] or candidate_for_callback.reason_detail,
                         "comment_url": candidate_for_callback.comment_url,
                         "issue_number": issue_numbers[0],
                         "artifact_degraded": candidate_for_callback.artifact_degraded,
@@ -496,6 +582,9 @@ def _publish_live(
         ) -> None:
             if commit_messages[0] is None:
                 return
+            reviewed_sha = (
+                candidate_for_body.reviewed_head_sha or candidate_for_body.head_sha or "n/a"
+            )
             rendered = render_pr_body(
                 (config.templates_dir / "superset/PULL_REQUEST_TEMPLATE.md").read_text(
                     encoding="utf-8"
@@ -505,15 +594,12 @@ def _publish_live(
                 reviewer_for_body,
                 automation_metadata={
                     "mode": "live",
-                    "would_write": False,
+                    "writes_suppressed": False,
                     "ci_evidence_mode": config.ci_evidence_mode.value,
                     "implementer_commands_run": implementer_for_body.get("commands_run", "n/a"),
                     "reviewer_pre_fix_failure": reviewer_for_body.get("red_baseline", "n/a"),
                     "reviewer_post_fix_result": reviewer_for_body.get("green_result", "n/a"),
-                    "diff_range": (
-                        f"{candidate_for_body.base_sha or 'n/a'}.."
-                        f"{candidate_for_body.head_sha or 'n/a'}"
-                    ),
+                    "diff_range": (f"{candidate_for_body.base_sha or 'n/a'}..{reviewed_sha}"),
                 },
                 issue_number=issue_numbers[0],
                 commit_message=commit_messages[0],
@@ -541,7 +627,7 @@ def _publish_live(
                         "issue_url": issue_url,
                         "head_sha": head_shas[0],
                         "reason": ci_reasons[0],
-                        "reason_detail": ci_details[0],
+                        "reason_detail": ci_details[0] or candidate_for_callback.reason_detail,
                         "comment_url": candidate_for_callback.comment_url,
                         "head_branch": candidate_for_callback.head_branch,
                     }
@@ -602,7 +688,10 @@ def _publish_live(
                     comment_body=issue_body,
                     head=branch,
                     base=base_branch,
+                    existing_pr_number=candidate.pr_number,
+                    existing_pr_url=candidate.pr_url,
                     after_pr_created=after_pr_created,
+                    after_pr_adopted=after_pr_adopted,
                     after_comment_created=after_comment_created,
                 )
                 if links.pr_number is not None:
@@ -650,12 +739,20 @@ def _publish_live(
             PreflightError,
             HttpTransportError,
             OSError,
-        ):
+        ) as exc:
             latest = state_store.resume(candidate.candidate_id) or candidate
+            failure_reason = getattr(exc, "reason", None)
+            if not isinstance(failure_reason, ReasonCode):
+                failure_reason = (
+                    ReasonCode.ARTIFACT_VALIDATION_FAILED
+                    if isinstance(exc, ArtifactValidationError)
+                    else ReasonCode.CAPABILITY_UNAVAILABLE
+                )
             deferred = latest.model_copy(
                 update={
                     "state": CandidateState.DEFERRED,
-                    "reason": ReasonCode.CAPABILITY_UNAVAILABLE,
+                    "reason": failure_reason,
+                    "reason_detail": str(exc),
                     "auto_merge_eligible": False,
                 }
             )
@@ -663,15 +760,21 @@ def _publish_live(
             published.append(deferred)
             continue
         if ci_reason_holder[0] is not None and "needs-human-review" not in labels:
-            if client.ensure_label("needs-human-review"):
-                labels.append("needs-human-review")
-            else:
-                label_failures.append("needs-human-review")
+            try:
+                if client.ensure_label("needs-human-review"):
+                    labels.append("needs-human-review")
+                else:
+                    label_failures.append("needs-human-review")
+            except ArtifactUnavailableError as exc:
+                label_reason_holder[0] = getattr(
+                    exc, "reason", ReasonCode.LABEL_CAPABILITY_UNAVAILABLE
+                )
         if links.pr_number is not None and labels:
             try:
                 client.add_labels(links.pr_number, labels)
             except HttpTransportError:
                 label_failures.extend(label for label in labels if label not in label_failures)
+                label_apply_reason_holder[0] = ReasonCode.LABEL_CAPABILITY_UNAVAILABLE
         comment_url_value: str | None = candidate.comment_url
         if label_failures and links.pr_number is not None:
             try:
@@ -693,6 +796,15 @@ def _publish_live(
                     "auto_merge_eligible": False,
                 }
             )
+        elif label_reason_holder[0] is not None:
+            publication_source = publication_source.model_copy(
+                update={
+                    "state": CandidateState.DEFERRED,
+                    "reason": label_reason_holder[0],
+                    "reason_detail": "required needs-human-review label unavailable",
+                    "auto_merge_eligible": False,
+                }
+            )
         elif label_failures:
             publication_source = publication_source.model_copy(
                 update={
@@ -700,12 +812,25 @@ def _publish_live(
                     "artifact_degraded": True,
                 }
             )
+        if label_apply_reason_holder[0] is not None:
+            publication_source = publication_source.model_copy(
+                update={
+                    "reason": label_apply_reason_holder[0],
+                    "reason_detail": "lifecycle label application unavailable",
+                    "auto_merge_eligible": False,
+                    "artifact_degraded": True,
+                }
+            )
         published_candidate = publication_source.model_copy(
             update={
                 "state": (
-                    CandidateState.ISSUE_PATCHED
-                    if config.has_issues
-                    else CandidateState.COMMENT_CREATED
+                    publication_source.state
+                    if publication_source.state is CandidateState.DEFERRED
+                    else (
+                        CandidateState.ISSUE_PATCHED
+                        if config.has_issues
+                        else CandidateState.COMMENT_CREATED
+                    )
                 ),
                 "issue_number": links.issue_number or publication_source.issue_number,
                 "pr_number": links.pr_number,
@@ -919,12 +1044,19 @@ def _prepare_live_candidate(
     """Reserve and create a candidate branch before any role session starts."""
     persisted = state_store.resume(candidate.candidate_id)
     marker = state_store.marker_artifact(candidate.candidate_id) if persisted is None else None
+    marker_outcome = state_store.marker_search_outcome(candidate.candidate_id)
+    candidate = candidate.model_copy(
+        update={
+            "marker_search_outcome": marker_outcome.value,
+            "reason_detail": candidate.reason_detail or marker_outcome.value,
+        }
+    )
     if persisted is None and state_store.marker_search_orphaned(candidate.candidate_id):
         orphaned = candidate.model_copy(
             update={
                 "state": CandidateState.DEFERRED,
                 "reason": ReasonCode.ARTIFACT_ORPHANED,
-                "reason_detail": "marker search returned a non-unique or malformed artifact",
+                "reason_detail": marker_outcome.value,
             }
         )
         state_store.append(orphaned)
@@ -955,16 +1087,23 @@ def _prepare_live_candidate(
             }
         )
         state_store.append(adopted)
+        persisted = adopted
         if marker.is_pull_request:
             return adopted
     decision = state_store.resume_decision(candidate.candidate_id)
     if decision.action is ResumeAction.SKIP:
         return persisted if persisted is not None else candidate
     if decision.action is ResumeAction.DEFER:
+        reason = {
+            "failed": ReasonCode.MARKER_SEARCH_FAILED,
+            "orphaned": ReasonCode.ARTIFACT_ORPHANED,
+            "unconfigured": ReasonCode.MARKER_SEARCH_UNCONFIGURED,
+        }.get(marker_outcome.value, ReasonCode.CAPABILITY_UNAVAILABLE)
         deferred = (persisted or candidate).model_copy(
             update={
                 "state": CandidateState.DEFERRED,
-                "reason": ReasonCode.CAPABILITY_UNAVAILABLE,
+                "reason": reason,
+                "reason_detail": marker_outcome.value,
             }
         )
         state_store.append(deferred)
@@ -988,7 +1127,12 @@ def _prepare_live_candidate(
                 deferred = candidate.model_copy(
                     update={
                         "state": CandidateState.DEFERRED,
-                        "reason": ReasonCode.CAPABILITY_UNAVAILABLE,
+                        "reason": (
+                            ReasonCode.RESERVATION_HELD
+                            if state_store.reservation_reason == "reservation_held"
+                            else ReasonCode.CAPABILITY_UNAVAILABLE
+                        ),
+                        "reason_detail": state_store.reservation_reason,
                     }
                 )
                 state_store.append(deferred)
@@ -1058,11 +1202,17 @@ def _make_role_prompts(
     """Render role prompts from one candidate and its pinned branch head."""
 
     def phase_b_prompt(committed_diff: str) -> str:
+        resolved_head_sha = pinned_head_holder[0] or candidate.head_sha
+        if resolved_head_sha is None:
+            raise PhaseBHeadUnavailableError(
+                f"cannot render phase-B prompt without a resolved head SHA: "
+                f"{candidate.candidate_id}"
+            )
         return render_reviewer_phase_b_prompt(
             candidate,
             target_repo=target_repo,
             base_sha=base_sha,
-            head_sha=pinned_head_holder[0] or "unknown",
+            head_sha=resolved_head_sha,
             head_branch=head_branch,
             planner_output=planner_output,
             committed_diff=committed_diff,
@@ -1148,6 +1298,8 @@ def run_once(
         / ("candidates-live.jsonl" if config.mode is Mode.LIVE else "candidates.jsonl"),
         marker_search=marker_search,
         require_marker_proof=config.mode is Mode.LIVE,
+        reservation_lease_s=config.reservation_lease_s or 16_200.0,
+        artifact_simulated=config.mode is Mode.SIMULATE,
     )
     valid = baseline.get("baseline_valid_lanes")
     valid_lanes = {str(item) for item in valid} if isinstance(valid, list) else set()
@@ -1443,7 +1595,7 @@ def run_once(
                     else ReasonCode.CAPABILITY_UNAVAILABLE
                 )
             latest = state_store.resume(candidate.candidate_id) or candidate
-            is_terminal_error = isinstance(exc, BranchNotAdvancedError)
+            is_terminal_error = isinstance(exc, (BranchNotAdvancedError, DiffReviewIncompleteError))
             updated = latest.model_copy(
                 update={
                     "state": (
@@ -1459,6 +1611,8 @@ def run_once(
                                 SessionMessageError,
                                 SessionBlockedError,
                                 BranchNotAdvancedError,
+                                PhaseBCorrelationTimeoutError,
+                                PhaseBHeadUnavailableError,
                             ),
                         )
                         else None
@@ -1496,6 +1650,7 @@ def run_once(
                 "iterations": result.review.iterations if result.review is not None else 0,
                 "planner_criteria": planner_criteria_ids,
                 "head_sha": pinned_head_sha[0] or candidate.head_sha,
+                "phase_b_protocol_violation": result.phase_b_protocol_violation,
             }
         )
         if isinstance(reviewer_output, Mapping):
@@ -1525,6 +1680,17 @@ def run_once(
                         for item in reviewer_output.get("lifted_markers", [])
                         if isinstance(item, str)
                     ],
+                    "reviewed_head_sha": (
+                        candidate.reviewed_head_sha
+                        or (
+                            reviewer_output.get("diff_reviewed", {}).get("head_sha")
+                            if isinstance(reviewer_output.get("diff_reviewed"), Mapping)
+                            and isinstance(
+                                reviewer_output.get("diff_reviewed", {}).get("head_sha"), str
+                            )
+                            else None
+                        )
+                    ),
                 }
             )
         persisted_sessions = state_store.resume(candidate.candidate_id)

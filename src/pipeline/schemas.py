@@ -69,6 +69,12 @@ class ReasonCode(str, Enum):
     BRANCH_NOT_ADVANCED = "branch_not_advanced"
     ROLE_COMMIT_MISSING = "role_commit_missing"
     SESSION_BLOCKED = "session_blocked"
+    PHASE_B_CORRELATION_UNAVAILABLE = "phase_b_correlation_unavailable"
+    RESERVATION_HELD = "reservation_held"
+    ARTIFACT_VALIDATION_FAILED = "artifact_validation_failed"
+    LABEL_CAPABILITY_UNAVAILABLE = "label_capability_unavailable"
+    MARKER_SEARCH_FAILED = "marker_search_failed"
+    MARKER_SEARCH_UNCONFIGURED = "marker_search_unconfigured"
 
 
 class CandidateState(str, Enum):
@@ -266,6 +272,10 @@ class Candidate(StrictModel):
     pr_number: int | None = Field(default=None, ge=1)
     head_branch: str | None = None
     head_sha: str | None = None
+    reviewed_head_sha: str | None = None
+    reserved_at: float | None = Field(default=None, ge=0)
+    artifact_simulated: bool = False
+    marker_search_outcome: str | None = None
     unresolved_major: bool = False
     auto_merge_eligible: bool | None = None
     labels: list[str] = Field(default_factory=list)
@@ -286,6 +296,7 @@ class Candidate(StrictModel):
     red_baseline: RedBaselineResult | None = None
     lifted_markers: list[str] = Field(default_factory=list)
     disagreement_summary: str | None = None
+    phase_b_protocol_violation: str | None = None
 
 
 class EventRecord(StrictModel):
@@ -337,6 +348,9 @@ class EventRecord(StrictModel):
     lifted_markers: list[str] = Field(default_factory=list)
     related_candidate_id: str | None = None
     disagreement_summary: str | None = None
+    marker_search_outcome: str | None = None
+    artifact_simulated: bool = False
+    phase_b_protocol_violation: str | None = None
     attempt: int = Field(default=1, ge=1)
     is_new_session_raw: bool | None = None
     retry_decision: RetryDecision = RetryDecision.PROCEED

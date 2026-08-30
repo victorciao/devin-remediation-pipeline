@@ -366,6 +366,12 @@ class GitHubResponseError(ArtifactUnavailableError):
     """Raised when GitHub returns a structurally invalid response."""
 
 
+class LabelCapabilityError(ArtifactUnavailableError):
+    """Raised when a required lifecycle label cannot be read or created."""
+
+    reason = ReasonCode.LABEL_CAPABILITY_UNAVAILABLE
+
+
 class ClosedPullRequestError(ArtifactUnavailableError):
     """Raised when only a closed PR exists for a candidate branch."""
 
@@ -645,7 +651,9 @@ class GitHubClient:
     def ensure_label(self, label: str) -> bool:
         """Ensure a repository label exists, returning false on denied creation."""
         if label in self._ensured_labels:
-            return self._ensured_labels[label]
+            if self._ensured_labels[label]:
+                return True
+            raise LabelCapabilityError(f"required label unavailable: {label}")
         path = f"/repos/{self._config.target_owner}/{self._config.target_repo}/labels/{label}"
         try:
             self._read(path)
@@ -654,16 +662,20 @@ class GitHubClient:
         except HttpTransportError as exc:
             if exc.status_code != 404:
                 self._ensured_labels[label] = False
-                return False
+                raise LabelCapabilityError(
+                    f"cannot read required label {label}: HTTP {exc.status_code}"
+                ) from exc
         try:
             self._write(
                 "post",
                 f"/repos/{self._config.target_owner}/{self._config.target_repo}/labels",
                 {"name": label},
             )
-        except HttpTransportError:
+        except HttpTransportError as exc:
             self._ensured_labels[label] = False
-            return False
+            raise LabelCapabilityError(
+                f"cannot create required label {label}: HTTP {exc.status_code}"
+            ) from exc
         self._ensured_labels[label] = True
         return True
 
@@ -817,7 +829,10 @@ def publish_degraded(
     head: str,
     base: str = "master",
     preflight: Callable[[], None] | None = None,
+    existing_pr_number: int | None = None,
+    existing_pr_url: str | None = None,
     after_pr_created: Callable[[int, str], None] | None = None,
+    after_pr_adopted: Callable[[int, str], None] | None = None,
     after_comment_created: Callable[[str], None] | None = None,
 ) -> ArtifactLinks:
     """Publish a PR and manager-facing comment when issues are disabled."""
@@ -825,14 +840,34 @@ def publish_degraded(
         raise ArtifactUnavailableError("degraded sink requires has_issues=false and pr_comment")
     if preflight is not None:
         preflight()
-    pr_number, pr_url = client.create_pr(
-        pr_title,
-        pr_body,
-        head=head,
-        base=base,
-    )
-    if after_pr_created is not None:
+    created = False
+    if existing_pr_number is not None and existing_pr_url is not None:
+        pr_number, pr_url = existing_pr_number, existing_pr_url
+    else:
+        try:
+            pr_number, pr_url = client.create_pr(
+                pr_title,
+                pr_body,
+                head=head,
+                base=base,
+            )
+            created = True
+        except HttpTransportError as exc:
+            if exc.status_code != 422:
+                raise
+            existing = client.pull_request_for_head(head)
+            if existing is None:
+                raise
+            if existing.state == "open":
+                pr_number, pr_url = existing.number, existing.url
+            elif existing.merged_at is not None:
+                raise MergedPullRequestError(existing) from exc
+            else:
+                raise ClosedPullRequestError(head, existing) from exc
+    if created and after_pr_created is not None:
         after_pr_created(pr_number, pr_url)
+    elif not created and after_pr_adopted is not None:
+        after_pr_adopted(pr_number, pr_url)
     if preflight is not None:
         preflight()
     comment_url = client.comment_pr(pr_number, comment_body)
@@ -849,6 +884,7 @@ __all__ = [
     "ClosedPullRequestError",
     "GitHubClient",
     "GitHubResponseError",
+    "LabelCapabilityError",
     "GitHubTransport",
     "LivePreflight",
     "MergedPullRequestError",

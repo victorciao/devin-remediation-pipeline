@@ -9,7 +9,7 @@ from pipeline.config import Mode, PipelineConfig
 from pipeline.observability.events import EventLog, append_candidate_events
 from pipeline.observability.kpis import write_kpi_report
 from pipeline.observability.report import write_run_report
-from pipeline.schemas import Action, Candidate, Lane, RunEventRecord
+from pipeline.schemas import Action, Candidate, CandidateState, Lane, RunEventRecord
 from pipeline.state import CandidateStateStore
 from pipeline.templates.render import (
     render_degraded_comment_body,
@@ -42,8 +42,32 @@ def render_run_artifacts(
         / ("candidates-live.jsonl" if config.mode is Mode.LIVE else "candidates.jsonl")
     )
     events_path = output_dir / "reports" / "events.jsonl"
-    store = CandidateStateStore(state_path)
-    for candidate in candidates:
+    store = CandidateStateStore(
+        state_path,
+        reservation_lease_s=config.reservation_lease_s or 16_200.0,
+        artifact_simulated=config.mode is Mode.SIMULATE,
+    )
+    rendered_candidates = [
+        candidate.model_copy(
+            update={
+                "artifact_simulated": config.mode is Mode.SIMULATE,
+                "state": (
+                    CandidateState.DISPATCHING
+                    if config.mode is Mode.SIMULATE
+                    and candidate.state
+                    in {
+                        CandidateState.ISSUE_CREATED,
+                        CandidateState.PR_CREATED,
+                        CandidateState.ISSUE_PATCHED,
+                        CandidateState.COMMENT_CREATED,
+                    }
+                    else candidate.state
+                ),
+            }
+        )
+        for candidate in candidates
+    ]
+    for candidate in rendered_candidates:
         store.append(candidate)
 
     planner = planner_outputs or {}
@@ -58,7 +82,7 @@ def render_run_artifacts(
         Lane.DEPRECATIONS: config.templates_dir / "issues/sip.md",
     }
     produced: list[Path] = [state_path, events_path]
-    for candidate in candidates:
+    for candidate in rendered_candidates:
         routed = candidate.action in {Action.OPEN_PR, Action.OPEN_ISSUE}
         if config.mode is Mode.LIVE and not routed:
             continue
@@ -70,7 +94,7 @@ def render_run_artifacts(
         summary = (
             f"Remediation tracking for {candidate.stable_locator}."
             if config.mode is Mode.LIVE
-            else f"Simulated remediation for {candidate.candidate_id}."
+            else f"SIMULATED remediation for {candidate.candidate_id}."
         )
         if not config.has_issues and config.issue_sink.value == "pr_comment":
             issue_body = render_degraded_comment_body(
@@ -96,7 +120,8 @@ def render_run_artifacts(
             if implementer_output is not None and reviewer_output is not None:
                 automation_metadata = {
                     "mode": config.mode.value,
-                    "would_write": config.mode is Mode.SIMULATE,
+                    "writes_suppressed": config.mode is Mode.SIMULATE,
+                    "artifact_simulated": config.mode is Mode.SIMULATE,
                     "ci_evidence_mode": config.ci_evidence_mode.value,
                     "implementer_commands_run": (
                         "simulated: " + str(implementer_output.get("commands_run", "n/a"))
@@ -107,7 +132,10 @@ def render_run_artifacts(
                     "reviewer_post_fix_result": (
                         "simulated: " + str(reviewer_output.get("green_result", "n/a"))
                     ),
-                    "diff_range": (f"{candidate.base_sha or 'n/a'}..{candidate.head_sha or 'n/a'}"),
+                    "diff_range": (
+                        f"{candidate.base_sha or 'n/a'}.."
+                        f"{candidate.reviewed_head_sha or candidate.head_sha or 'n/a'}"
+                    ),
                 }
             pr_body = render_pr_body(
                 pr_template,
@@ -125,7 +153,7 @@ def render_run_artifacts(
     event_log = EventLog(events_path)
     append_candidate_events(
         event_log,
-        candidates,
+        rendered_candidates,
         run_id=run_id,
         token_login=token_login,
         token_scopes=token_scopes,
@@ -134,7 +162,7 @@ def render_run_artifacts(
     run_path = output_dir / "reports" / f"run-{run_id}.md"
     write_run_report(
         run_path,
-        candidates,
+        rendered_candidates,
         run_id=run_id,
         capability_notes=capability_notes,
         mode=config.mode,
@@ -145,7 +173,7 @@ def render_run_artifacts(
             encoding="utf-8",
         )
     kpi_path = output_dir / "reports" / "kpis.md"
-    write_kpi_report(kpi_path, list(candidates), event_log.read(), baseline, config)
+    write_kpi_report(kpi_path, list(rendered_candidates), event_log.read(), baseline, config)
     produced.extend((run_path, kpi_path))
     return tuple(produced)
 

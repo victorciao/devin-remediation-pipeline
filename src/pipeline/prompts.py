@@ -247,7 +247,7 @@ def render_reviewer_phase_b_prompt(
     head_branch: str,
     planner_output: Mapping[str, object],
     committed_diff: str,
-    head_sha: str = "unknown",
+    head_sha: str,
 ) -> str:
     """Render the post-join reviewer diff-review prompt."""
     changed_paths = _changed_files(committed_diff)
@@ -268,8 +268,8 @@ def render_reviewer_phase_b_prompt(
         )
         + "Read the implementer's full diff and complete the §9 findings contract. Findings "
         "must use severity blocking|major|minor|nit, nullable criterion_id, file and line "
-        "range, triggering path, and proposed fix. Set diff_reviewed true only after actually "
-        "reading the diff. The required response object is:\n"
+        "range, triggering path, and proposed fix. Populate the `diff_reviewed` object below; "
+        "a boolean is rejected. The required response object is:\n"
         + json.dumps(
             {
                 "diff_reviewed": {

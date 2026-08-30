@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Protocol
 
-from pipeline.config import ConfigError, Mode, PipelineConfig
+from pipeline.config import DEFAULT_SESSION_TIMEOUT_S, ConfigError, Mode, PipelineConfig
 from pipeline.prompts import PHASE_B_REVIEWER_OUTPUT_SCHEMA, validate_planner_output
 from pipeline.red_baseline import (
     DiffInspection,
@@ -60,7 +60,7 @@ class DevinTransport(Protocol):
 class RoleLimits:
     """Timeout and per-session ACU limit for one role."""
 
-    session_timeout_s: float = 5400.0
+    session_timeout_s: float = DEFAULT_SESSION_TIMEOUT_S
     max_acu_limit: float = 100.0
 
 
@@ -101,6 +101,7 @@ class OrchestrationResult:
     implementer: RoleRun
     reviewer: RoleRun
     review: ReviewLoopResult | None = None
+    phase_b_protocol_violation: str | None = None
 
 
 def validated_diff_review(
@@ -172,6 +173,24 @@ class SessionMessageError(RuntimeError):
     """Raised when a follow-up message cannot be processed by a role session."""
 
     reason = ReasonCode.DIFF_REVIEW_INCOMPLETE
+
+
+class DiffReviewIncompleteError(SessionMessageError):
+    """Raised when one reviewer session exhausts its phase-B exchange."""
+
+    terminal = True
+
+
+class PhaseBCorrelationTimeoutError(TimeoutError):
+    """Raised when a follow-up cannot be correlated to a Devin response."""
+
+    reason = ReasonCode.PHASE_B_CORRELATION_UNAVAILABLE
+
+
+class PhaseBHeadUnavailableError(SessionMessageError):
+    """Raised when the candidate branch head cannot be resolved for phase B."""
+
+    reason = ReasonCode.CAPABILITY_UNAVAILABLE
 
 
 class SessionBlockedError(RuntimeError):
@@ -363,10 +382,12 @@ class SessionClient:
     def _limit(self, role: SessionRole) -> RoleLimits:
         return self._limits.get(role, RoleLimits())
 
-    def _reserve(self) -> None:
+    def _reserve(self, role: SessionRole) -> None:
         with self._lock:
             if self._session_count >= self._max_sessions:
                 raise SessionCeilingError("per-run session ceiling exceeded")
+            if self._total_acu + self._limit(role).max_acu_limit > self._max_total_acu:
+                raise SessionCeilingError("projected per-run ACU ceiling exceeded")
             self._session_count += 1
 
     @staticmethod
@@ -393,7 +414,7 @@ class SessionClient:
         """Create one role session with idempotency and retry evidence."""
         if attempt < 1:
             raise ValueError("attempt must be at least one")
-        self._reserve()
+        self._reserve(role)
         request_prompt = f"attempt:{attempt}\n{prompt}"
         payload: dict[str, object] = {
             "prompt": request_prompt,
@@ -557,17 +578,6 @@ class SessionClient:
                 sent_timestamp=sent_timestamp,
                 previous_message_timestamps=previous_message_timestamps,
             )
-            messages = response.get("messages")
-            has_message_history = (
-                isinstance(messages, Sequence) and not isinstance(messages, str) and bool(messages)
-            )
-            if (
-                not has_message_history
-                and changed_output
-                and isinstance(structured_output, Mapping)
-                and isinstance(structured_output.get("diff_reviewed"), Mapping)
-            ):
-                processed = True
             if status == "expired":
                 raise SessionBlockedError(
                     f"{role.value} session stopped with status {status}: {session_id}"
@@ -590,7 +600,7 @@ class SessionClient:
                 # message is delivered; continue until the correlated answer arrives.
                 pass
             if self._clock() >= deadline:
-                raise TimeoutError(
+                raise PhaseBCorrelationTimeoutError(
                     f"{role.value} session did not process follow-up message: {session_id}"
                 )
             self._sleeper(1.0)
@@ -1036,6 +1046,7 @@ class RuntimeOrchestrator:
             return iteration
 
         phase_b_attempted: set[str] = set()
+        phase_b_protocol_violation: list[str | None] = [None]
 
         def phase_b(result: OrchestrationResult) -> OrchestrationResult:
             nonlocal candidate
@@ -1044,19 +1055,41 @@ class RuntimeOrchestrator:
                 return result
             if candidate is not None and head_sha_resolver is not None:
                 resolved_head_sha = head_sha_resolver()
-                if resolved_head_sha is not None:
-                    candidate = candidate.model_copy(update={"head_sha": resolved_head_sha})
-                    if head_sha_observer is not None:
-                        head_sha_observer(resolved_head_sha)
-                    if candidate.base_sha is not None and resolved_head_sha == candidate.base_sha:
-                        raise BranchNotAdvancedError(
-                            f"candidate branch remained at base SHA: {resolved_head_sha}"
-                        )
+                if resolved_head_sha is None:
+                    raise PhaseBHeadUnavailableError(
+                        f"candidate branch head unavailable for phase-B: {candidate.candidate_id}"
+                    )
+                candidate = candidate.model_copy(update={"head_sha": resolved_head_sha})
+                if head_sha_observer is not None:
+                    head_sha_observer(resolved_head_sha)
+                if candidate.base_sha is not None and resolved_head_sha == candidate.base_sha:
+                    raise BranchNotAdvancedError(
+                        f"candidate branch remained at base SHA: {resolved_head_sha}"
+                    )
+            elif candidate is not None and candidate.head_sha is None:
+                raise PhaseBHeadUnavailableError(
+                    f"candidate branch head unavailable for phase-B: {candidate.candidate_id}"
+                )
             if (
                 _candidate_diff_review_matches(result, candidate)
                 and self._client.config.mode is not Mode.SIMULATE
             ):
-                return result
+                phase_b_protocol_violation[0] = (
+                    "reviewer supplied diff_reviewed before the phase-B message"
+                )
+                payload = dict(result.reviewer.snapshot.payload)
+                structured = payload.get("structured_output")
+                if isinstance(structured, Mapping):
+                    scrubbed = dict(structured)
+                    scrubbed.pop("diff_reviewed", None)
+                    payload["structured_output"] = scrubbed
+                    result = replace(
+                        result,
+                        reviewer=replace(
+                            result.reviewer,
+                            snapshot=replace(result.reviewer.snapshot, payload=payload),
+                        ),
+                    )
             raw_diff = output(result.implementer).get("committed_diff")
             committed_diff = raw_diff if isinstance(raw_diff, str) else ""
             phase_b_renderer = phase_b_prompt
@@ -1086,7 +1119,45 @@ class RuntimeOrchestrator:
                 result.reviewer.snapshot,
                 message_response,
             )
-            return replace(result, reviewer=replace(result.reviewer, snapshot=updated))
+            first = replace(result, reviewer=replace(result.reviewer, snapshot=updated))
+            if _candidate_diff_review_matches(first, candidate):
+                return first
+            reviewer_payload = updated.payload.get("structured_output")
+            defect = "missing or invalid diff_reviewed object"
+            if isinstance(reviewer_payload, Mapping):
+                value = reviewer_payload.get("diff_reviewed")
+                if (
+                    candidate is not None
+                    and isinstance(value, Mapping)
+                    and value.get("head_sha") != candidate.head_sha
+                ):
+                    defect = (
+                        f"unexpected head_sha {value.get('head_sha')!r}; "
+                        f"expected {candidate.head_sha!r}"
+                    )
+                elif isinstance(value, Mapping):
+                    defect = "changed paths are missing from files_read"
+            corrective = (
+                prompt
+                + "\n\nCORRECTIVE REQUEST: the previous response was rejected because "
+                + defect
+                + ". Return the required object verbatim, including the exact head_sha and "
+                "every changed path in files_read."
+            )
+            corrective_response = self._client.send_message(reviewer_session_id, corrective)
+            corrected = self._client.poll_session_after_message(
+                SessionRole.REVIEWER,
+                reviewer_session_id,
+                updated,
+                corrective_response,
+            )
+            final = replace(first, reviewer=replace(first.reviewer, snapshot=corrected))
+            if not _candidate_diff_review_matches(final, candidate):
+                raise DiffReviewIncompleteError(
+                    f"reviewer phase-B response remained invalid after corrective exchange: "
+                    f"{reviewer_session_id}"
+                )
+            return final
 
         current = phase_b(current)
 
@@ -1129,6 +1200,7 @@ class RuntimeOrchestrator:
             current.implementer,
             current.reviewer,
             review,
+            phase_b_protocol_violation[0],
         )
 
 
@@ -1144,6 +1216,9 @@ __all__ = [
     "SessionClient",
     "SessionDedupeError",
     "SessionMessageError",
+    "DiffReviewIncompleteError",
+    "PhaseBCorrelationTimeoutError",
+    "PhaseBHeadUnavailableError",
     "SessionRole",
     "SessionSnapshot",
     "SessionCeilingError",

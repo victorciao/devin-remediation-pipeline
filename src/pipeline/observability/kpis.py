@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeAlias
 
-from pipeline.config import PipelineConfig
+from pipeline.config import Mode, PipelineConfig
 from pipeline.schemas import Candidate, CandidateState, EventRecord, Lane, ReasonCode
 from pipeline.state import has_local_artifact
 
@@ -129,6 +129,17 @@ def compute_kpis(
     )
     rejected = sum(event.reason is ReasonCode.DISAGREEMENT_UNRESOLVED for event in pr_events)
     edited = max(len(pr_events) - merged_clean - rejected, 0)
+    marker_outcomes: dict[str, int] = {}
+    for candidate in candidates:
+        if candidate.marker_search_outcome is not None:
+            marker_outcomes[candidate.marker_search_outcome] = (
+                marker_outcomes.get(candidate.marker_search_outcome, 0) + 1
+            )
+    safety_undetermined = sum(
+        candidate.marker_search_outcome in {"failed", "orphaned", "unconfigured"}
+        and not has_local_artifact(candidate)
+        for candidate in candidates
+    )
     sessions_by_role = {
         "planner": sum(event.planner_session_id is not None for event in events),
         "implementer": sum(event.implementer_session_id is not None for event in events),
@@ -148,6 +159,11 @@ def compute_kpis(
         "dispatched_issue": dispatched_issue,
         "deferred": sum(candidate.state is CandidateState.DEFERRED for candidate in candidates),
         "deferred_by_reason": _deferred_by_reason(candidates),
+        "marker_search_outcomes": marker_outcomes,
+        "unpublished": sum(
+            candidate.state is CandidateState.DISPATCHING for candidate in candidates
+        ),
+        "publication_safety_undetermined": safety_undetermined,
         "verification_pass_rate": (
             verification_passes / len(role_loop_events) if role_loop_events else None
         ),
@@ -274,9 +290,14 @@ def render_kpi_report(
 ) -> str:
     """Render the rolling KPI report with visually distinct alert lines."""
     metrics = compute_kpis(candidates, events, baseline, config)
-    lines = ["# Remediation KPI rollup", "", f"- mode: {config.mode.value}", ""]
+    title = (
+        "SIMULATED Remediation KPI rollup"
+        if config.mode is Mode.SIMULATE
+        else "Remediation KPI rollup"
+    )
+    lines = [f"# {title}", "", f"- mode: {config.mode.value}", ""]
     for name, metric_value in metrics.items():
-        if name == "deferred_by_reason":
+        if name in {"deferred_by_reason", "marker_search_outcomes"}:
             continue
         label = name.replace("_", " ").title()
         if name.endswith("_alert") and metric_value:
@@ -290,6 +311,14 @@ def render_kpi_report(
     if isinstance(deferred_by_reason, dict):
         lines.extend(
             f"- **{reason}:** {count}" for reason, count in sorted(deferred_by_reason.items())
+        )
+    else:
+        lines.append("- None")
+    lines.extend(["", "## Marker search outcomes", ""])
+    marker_outcomes = metrics["marker_search_outcomes"]
+    if isinstance(marker_outcomes, dict):
+        lines.extend(
+            f"- **{outcome}:** {count}" for outcome, count in sorted(marker_outcomes.items())
         )
     else:
         lines.append("- None")
