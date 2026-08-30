@@ -185,6 +185,8 @@ def render_issue_body(
     if candidate.lane is Lane.CODEQL:
         if SECURITY_ISSUE_MODE != "generic_tracking":
             raise ArtifactValidationError("unsupported security issue mode")
+        if template:
+            raise ArtifactValidationError("CodeQL issue rendering does not consume a template")
         values = {
             "### SUMMARY (no exploit detail)": generated_summary,
             "### SCOPE (files or modules only)": candidate.file_path or "<module>",
@@ -192,10 +194,12 @@ def render_issue_body(
             "### VERIFICATION": verification,
             "### REFERENCES (rule ID only)": candidate.rule_id or "<rule>",
         }
-        body = template.rstrip()
-        for heading, value in values.items():
-            body = body.replace(f"{heading}\n", f"{heading}\n{value}\n", 1)
-        return f"{marker}\n{body}\n"
+        return (
+            "\n".join(
+                [marker, *sum(([heading, value, ""] for heading, value in values.items()), [])]
+            ).rstrip()
+            + "\n"
+        )
 
     if candidate.lane is Lane.DEPRECATIONS:
         body = template

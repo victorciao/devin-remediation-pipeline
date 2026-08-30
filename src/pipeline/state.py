@@ -125,9 +125,11 @@ class CandidateStateStore:
         path: Path,
         *,
         marker_search: Callable[[str], MarkerArtifact | None] | None = None,
+        require_marker_proof: bool = False,
     ) -> None:
         self._path = path
         self._marker_search = marker_search
+        self._require_marker_proof = require_marker_proof
         self.marker_search_failed = False
         self.quarantined_rows = 0
         self._quarantine_seen: set[str] | None = None
@@ -235,8 +237,10 @@ class CandidateStateStore:
             self.marker_exists(candidate_id)
         return self._marker_outcomes.get(candidate_id) in {
             MarkerSearchOutcome.FAILED,
-            MarkerSearchOutcome.UNCONFIGURED,
-        }
+        } or (
+            self._marker_outcomes.get(candidate_id) is MarkerSearchOutcome.UNCONFIGURED
+            and self._require_marker_proof
+        )
 
     def marker_search_orphaned(self, candidate_id: str) -> bool:
         """Return whether marker search found an ambiguous or malformed artifact."""

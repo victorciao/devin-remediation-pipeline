@@ -557,6 +557,17 @@ class SessionClient:
                 sent_timestamp=sent_timestamp,
                 previous_message_timestamps=previous_message_timestamps,
             )
+            messages = response.get("messages")
+            has_message_history = (
+                isinstance(messages, Sequence) and not isinstance(messages, str) and bool(messages)
+            )
+            if (
+                not has_message_history
+                and changed_output
+                and isinstance(structured_output, Mapping)
+                and isinstance(structured_output.get("diff_reviewed"), Mapping)
+            ):
+                processed = True
             if status == "expired":
                 raise SessionBlockedError(
                     f"{role.value} session stopped with status {status}: {session_id}"

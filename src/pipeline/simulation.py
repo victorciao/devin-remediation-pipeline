@@ -62,7 +62,11 @@ def render_run_artifacts(
         routed = candidate.action in {Action.OPEN_PR, Action.OPEN_ISSUE}
         if config.mode is Mode.LIVE and not routed:
             continue
-        template_text = issue_templates[candidate.lane].read_text(encoding="utf-8")
+        template_text = (
+            ""
+            if candidate.lane is Lane.CODEQL
+            else issue_templates[candidate.lane].read_text(encoding="utf-8")
+        )
         summary = (
             f"Remediation tracking for {candidate.stable_locator}."
             if config.mode is Mode.LIVE

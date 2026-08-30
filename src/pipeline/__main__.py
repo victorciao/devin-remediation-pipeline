@@ -255,7 +255,7 @@ def _publish_live(
                 "pr_number": persisted.pr_number,
                 "pr_url": persisted.pr_url,
                 "head_branch": persisted.head_branch or candidate.head_branch,
-                "head_sha": persisted.head_sha,
+                "head_sha": candidate.head_sha or persisted.head_sha,
                 "reason": persisted.reason,
                 "reason_detail": persisted.reason_detail,
                 "artifact_degraded": persisted.artifact_degraded,
@@ -1147,6 +1147,7 @@ def run_once(
         / "state"
         / ("candidates-live.jsonl" if config.mode is Mode.LIVE else "candidates.jsonl"),
         marker_search=marker_search,
+        require_marker_proof=config.mode is Mode.LIVE,
     )
     valid = baseline.get("baseline_valid_lanes")
     valid_lanes = {str(item) for item in valid} if isinstance(valid, list) else set()
@@ -1343,7 +1344,6 @@ def run_once(
         prompt_base_sha = candidate.base_sha or base_sha or "unknown"
         prompt_head_branch = candidate.head_branch or head_branch or "candidate"
         pinned_head_sha = [candidate.head_sha]
-        pinned_head_holder = pinned_head_sha
 
         make_prompts = partial(
             _make_role_prompts,
@@ -1351,12 +1351,12 @@ def run_once(
             target_repo=target_repo,
             base_sha=prompt_base_sha,
             head_branch=prompt_head_branch,
-            pinned_head_holder=pinned_head_holder,
+            pinned_head_holder=pinned_head_sha,
         )
 
         def observe_head(
             value: str,
-            holder: list[str | None] = pinned_head_holder,
+            holder: list[str | None] = pinned_head_sha,
         ) -> None:
             holder[0] = value
 
