@@ -668,12 +668,47 @@ like a mapped one.
 the implementer's diff is non-empty, is an incomplete iteration per §2/§9 step 4 — it does not
 count toward `iteration_cap` and cannot satisfy convergence.
 
+**The acceptance predicate must be stated to the party that has to satisfy it.** `diff_reviewed`
+is accepted only as an object whose `base_sha` is non-empty, whose `head_sha` equals the branch
+head the orchestrator resolved for that iteration, and whose `files_read` covers every path in
+the implementer's committed diff. The phase-B prompt therefore renders that object verbatim —
+the literal expected `base_sha` and `head_sha`, the enumerated changed paths, and the rule that
+`files_read` must list all of them. `files_read` has no coarser alternative (no
+"read the whole diff" flag): both forms are self-reports, and enumerating the diff's own paths is
+the only one that evidences having seen the diff. A permitted implementer diff is bounded by
+§14's path rules, so the enumeration is always producible.
+
+Enforcement is by parsing the returned output, not by the API. A session's `structured_output` is
+not fenced by its creation schema and keys are merged across messages, so phase B needs no
+re-scoped schema (`docs/api-probe-2026-08-30.md` P-2); the message endpoint accepts a schema
+field but gives no evidence it is applied, so it must not be treated as a guarantee.
+
 ### §12.2 Polling and cost contract
 
 `GET /v1/sessions/{id}` until a terminal `status_enum`; `session_timeout_s` per role; per-role
 `max_acu_limit`; every creation passes `idempotent: true` and
-`tags: ["devin-remediation", candidate_id, role, "attempt:<n>"]`. Exceeding the per-run
-session/cost ceiling (§14) aborts the run rather than degrading silently.
+`tags: ["devin-remediation", candidate_id, role, "attempt:<n>"]`.
+
+**Terminal status is `finished` or `blocked`-with-output.** A role session that completes its work
+and stops settles at `status_enum: "blocked"` and never reaches `finished`
+(`docs/api-probe-2026-08-30.md` P-1), so treating `blocked` as a failure fails every successful
+role. A `blocked` snapshot is accepted as terminal when its `structured_output` already carries
+the role's required keys; a `blocked` snapshot without them is a genuine block — the session is
+waiting on something it cannot resolve — and fails the candidate with `session_blocked`.
+`expired` fails unconditionally. `structured_output` can be populated while the status is still
+`working`, so its presence alone is never read as terminal.
+
+**A follow-up answer is correlated, not inferred.** Phase-B output is accepted only once the
+session's `messages` array carries a `devin_message` whose `timestamp` postdates the
+`user_message` that delivered the phase-B request (`event_id` + `timestamp` per message, P-3).
+A changed `structured_output` is not by itself evidence that this message was answered.
+
+Exceeding the per-run session/cost ceiling (§14) **defers the candidate in flight** with
+`session_ceiling` and the run continues to publication and reporting, per the §13 `max_sessions`
+row. Every later candidate that cannot obtain a session is deferred with the same reason, so the
+§11 "no candidate unaccounted" invariant holds and artifacts already published in the run are
+still patched and reported. A ceiling never terminates the run silently and never terminates it
+early.
 
 **Idempotent creation must not swallow retries**. `idempotent: true` returns the
 pre-existing session for an identical request, which would defeat the two retry paths the plan
@@ -1007,7 +1042,12 @@ code-review loop converges with green CI.
   the `candidate_id` marker.
 - `test_resume_after_issue_created_pr_failed` — replay creates no second issue.
 - `test_rate_limit_backoff` (429 + reset header → bounded sleep, one retry) and
-  `test_session_ceiling_aborts_run`.
+  `test_session_ceiling_defers_candidate_and_run_continues` (the ceiling candidate and every
+  later one carry `deferred/session_ceiling`, publication and reporting still run).
+- `test_blocked_session_with_output_is_terminal` and
+  `test_blocked_session_without_output_fails_closed`.
+- `test_phase_b_answer_requires_new_devin_message` — a stale `structured_output` change with no
+  newer `devin_message` is not accepted as the phase-B answer.
 - `test_burndown_vs_baseline` against `fixtures/baseline.json`.
 - `test_role_collision_raises_config_error` (build-time and runtime).
 - `test_pr_title_matches_pr_lint_regex`, parameterized across lanes, using the regex loaded from
