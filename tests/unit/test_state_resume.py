@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from pipeline import __main__ as entrypoint
-from pipeline.schemas import Candidate, CandidateState
+from pipeline.schemas import Candidate, CandidateState, ReasonCode
 from pipeline.state import (
     CandidateStateStore,
     ResumeAction,
@@ -346,3 +346,105 @@ def test_both_live_call_sites_resume_through_the_store_only(function: str) -> No
     assert "decide_resume(" not in source
     assert "marker_search_unavailable" not in source
     assert "existing_artifact" not in source
+
+
+# -- identical-row append suppression ----------------------------------------------------
+
+
+def test_an_identical_repeated_row_is_not_appended(tmp_path: Path) -> None:
+    """§14.1 — a row byte-identical to the latest one carries no new information.
+
+    A LIVE run wrote three identical `deferred/capability_unavailable` rows for one
+    candidate; the log records transitions, not retries of the same transition.
+    """
+    store = store_for(tmp_path)
+    deferred = persisted(CandidateState.DEFERRED, reason=ReasonCode.CAPABILITY_UNAVAILABLE)
+
+    store.append(deferred)
+    store.append(deferred)
+    store.append(deferred)
+
+    assert len(store.rows()) == 1
+    assert store.resume(deferred.candidate_id) == deferred
+
+
+def test_an_identical_row_written_from_a_reparsed_copy_is_still_suppressed(
+    tmp_path: Path,
+) -> None:
+    """§14.1 — equality is over the serialised fields, not object identity."""
+    store = store_for(tmp_path)
+    deferred = persisted(CandidateState.DEFERRED, reason=ReasonCode.CAPABILITY_UNAVAILABLE)
+    store.append(deferred)
+    reread = store_for(tmp_path)
+    persisted_row = reread.resume(deferred.candidate_id)
+    assert persisted_row is not None
+
+    reread.append(persisted_row)
+
+    assert len(reread.rows()) == 1
+
+
+@pytest.mark.parametrize(
+    "difference",
+    [
+        {"state": CandidateState.DISPATCHING},
+        {"reason": ReasonCode.BUDGET_OVERFLOW},
+        {"reason_detail": "marker_search_failed"},
+        {"pr_number": 2},
+        {"pr_url": PR_URL},
+        {"issue_url": ISSUE_URL},
+        {"auto_merge_requested": True},
+        {"ci_evidence_mode": "github"},
+        {"merge_verified": True},
+    ],
+)
+def test_any_differing_field_still_appends(tmp_path: Path, difference: dict[str, Any]) -> None:
+    """§14.1 — suppression is exact: one changed field is a new durable row."""
+    store = store_for(tmp_path)
+    first = persisted(CandidateState.DEFERRED, reason=ReasonCode.CAPABILITY_UNAVAILABLE)
+    store.append(first)
+
+    store.append(first.model_copy(update=difference))
+
+    assert len(store.rows()) == 2
+
+
+def test_suppression_leaves_last_write_wins_resume_intact(tmp_path: Path) -> None:
+    """§14.2 — resume still reads the latest row after a suppressed duplicate."""
+    store = store_for(tmp_path)
+    deferred = persisted(CandidateState.DEFERRED, reason=ReasonCode.CAPABILITY_UNAVAILABLE)
+    published = persisted(CandidateState.PR_CREATED, pr_number=2, pr_url=PR_URL)
+
+    store.append(deferred)
+    store.append(deferred)
+    store.append(published)
+    store.append(published)
+
+    assert len(store.rows()) == 2
+    assert store.resume(published.candidate_id) == published
+    assert store.resume_decision(published.candidate_id).action is ResumeAction.RESUME_AT_STEP
+
+
+def test_suppression_is_per_candidate(tmp_path: Path) -> None:
+    """§14.1 — suppression compares a candidate's own latest row, not the log's last line."""
+    store = store_for(tmp_path)
+    first = persisted(CandidateState.DEFERRED, candidate_id="codeql-1")
+    second = persisted(CandidateState.DEFERRED, candidate_id="codeql-2")
+
+    store.append(first)
+    store.append(second)
+    store.append(first)
+    store.append(second.model_copy(update={"state": CandidateState.DISPATCHING}))
+
+    assert [row.candidate_id for row in store.rows()] == ["codeql-1", "codeql-2", "codeql-2"]
+
+
+def test_suppression_does_not_weaken_the_artifact_reservation(tmp_path: Path) -> None:
+    """§14.1 — `append_if_new_artifact` still refuses a second reservation."""
+    store = store_for(tmp_path, marker_search=lambda _marker: False)
+    candidate = persisted(CandidateState.ISSUE_CREATED, issue_url=ISSUE_URL)
+
+    assert store.append_if_new_artifact(candidate) is True
+    assert store.append_if_new_artifact(candidate) is False
+    assert store.append_if_new_artifact(candidate.model_copy(update={"pr_url": PR_URL})) is False
+    assert len(store.rows()) == 1

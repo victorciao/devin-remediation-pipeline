@@ -66,6 +66,12 @@ class FakeGitHubTransport:
     pr_state: str = "open"
     pr_merged_at: str | None = None
     marker_hits: int = 0
+    marker_search_error: HttpTransportError | None = None
+    token_login: str = "devin-bot"
+    has_issues: bool = True
+    code_scanning_alerts: object = ()
+    workflow_count: int = 1
+    completed_workflow_runs: bool = False
     existing_pull_requests: Sequence[Mapping[str, object]] = ()
     labels_present: bool = True
     create_pr_error: HttpTransportError | None = None
@@ -88,7 +94,19 @@ class FakeGitHubTransport:
         self.reads.append(path)
         prefix = self._prefix()
         if path.startswith("/search/issues"):
+            if self.marker_search_error is not None:
+                raise self.marker_search_error
             return {"total_count": self.marker_hits}
+        if path == "/user":
+            return {"login": self.token_login}
+        if path.startswith(f"{prefix}/code-scanning/alerts"):
+            return self.code_scanning_alerts
+        if path.startswith(f"{prefix}/actions/workflows"):
+            return {"total_count": self.workflow_count}
+        if path.startswith(f"{prefix}/actions/runs"):
+            if not self.completed_workflow_runs:
+                return {"workflow_runs": []}
+            return {"workflow_runs": [{"status": "completed", "event": "pull_request"}]}
         if path.startswith(f"{prefix}/git/ref/heads/"):
             branch = path.rsplit("/", 1)[-1]
             sha = self.branch_shas.get(branch, self.base_sha if branch == "master" else None)
@@ -134,7 +152,7 @@ class FakeGitHubTransport:
                 },
             }
         if path == f"{prefix}":
-            return {"has_issues": True}
+            return {"has_issues": self.has_issues}
         return {}
 
     # -- writes --------------------------------------------------------------------------

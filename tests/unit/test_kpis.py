@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from pipeline.config import PipelineConfig
 from pipeline.observability.events import EventLog, append_candidate_events, event_from_candidate
 from pipeline.observability.kpis import (
@@ -18,6 +20,7 @@ from pipeline.observability.kpis import (
 from pipeline.observability.report import render_run_report
 from pipeline.schemas import (
     Action,
+    Candidate,
     CandidateState,
     EventRecord,
     Lane,
@@ -391,6 +394,8 @@ def test_run_report_lists_dispatched_and_deferred() -> None:
             action=Action.OPEN_PR,
             score=70.0,
             gate_passed=True,
+            state=CandidateState.PR_CREATED,
+            pr_number=1,
             pr_url="https://example.invalid/pr/1",
         ),
         codeql_candidate(
@@ -418,6 +423,147 @@ def test_run_report_lists_dispatched_and_deferred() -> None:
     assert "Deferred by budget: 1" in report
     assert ReasonCode.OUT_OF_SCOPE_FRONTEND.value in report
     assert Tier.HIGH.value in report
+
+
+def dispatched_pr_candidate(candidate_id: str, **fields: Any) -> Candidate:  # noqa: ANN401
+    """One high-tier candidate routed to a PR; `state` says whether it got there."""
+    return codeql_candidate(
+        candidate_id=candidate_id,
+        tier=Tier.HIGH,
+        action=Action.OPEN_PR,
+        score=70.0,
+        gate_passed=True,
+        **fields,
+    )
+
+
+def test_dispatch_counts_derive_from_lifecycle_state_not_routing(
+    simulate_config: PipelineConfig,
+) -> None:
+    """§11 — a candidate routed to a PR that never left `deferred` was not dispatched.
+
+    A LIVE run reported `Dispatched Pr: 1` for a candidate whose only durable row was
+    `deferred/capability_unavailable`; the routing decision alone is not evidence of an
+    artifact.
+    """
+    candidates = [
+        dispatched_pr_candidate(
+            "codeql-1",
+            state=CandidateState.DEFERRED,
+            reason=ReasonCode.CAPABILITY_UNAVAILABLE,
+        ),
+        dispatched_pr_candidate(
+            "codeql-2",
+            state=CandidateState.PR_CREATED,
+            pr_number=2,
+            pr_url="https://example.invalid/pr/2",
+        ),
+        codeql_candidate(
+            candidate_id="codeql-3",
+            tier=Tier.MEDIUM,
+            action=Action.OPEN_ISSUE,
+            gate_passed=True,
+            state=CandidateState.DEFERRED,
+            reason=ReasonCode.CAPABILITY_UNAVAILABLE,
+        ),
+        codeql_candidate(
+            candidate_id="codeql-4",
+            tier=Tier.MEDIUM,
+            action=Action.OPEN_ISSUE,
+            gate_passed=True,
+            state=CandidateState.ISSUE_CREATED,
+            issue_number=4,
+            issue_url="https://example.invalid/issues/4",
+        ),
+    ]
+
+    rollup = compute_kpis(candidates, [], {}, simulate_config)
+
+    assert rollup["dispatched_pr"] == 1
+    assert rollup["dispatched_issue"] == 1
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        CandidateState.DISPATCHING,
+        CandidateState.PR_CREATED,
+        CandidateState.ISSUE_PATCHED,
+        CandidateState.COMMENT_CREATED,
+        CandidateState.CONVERGED,
+        CandidateState.TERMINAL,
+    ],
+)
+def test_every_post_dispatch_state_counts_as_dispatched(
+    state: CandidateState,
+    simulate_config: PipelineConfig,
+) -> None:
+    """§11 — dispatch is counted from the point the run committed to the artifact."""
+    rollup = compute_kpis(
+        [dispatched_pr_candidate("codeql-1", state=state)], [], {}, simulate_config
+    )
+
+    assert rollup["dispatched_pr"] == 1
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        CandidateState.ENUMERATED,
+        CandidateState.GATED,
+        CandidateState.SCORED,
+        CandidateState.DEFERRED,
+    ],
+)
+def test_no_pre_dispatch_state_counts_as_dispatched(
+    state: CandidateState,
+    simulate_config: PipelineConfig,
+) -> None:
+    """§11 — nothing before `dispatching` produced an artifact, whatever the routing says."""
+    rollup = compute_kpis(
+        [dispatched_pr_candidate("codeql-1", state=state)], [], {}, simulate_config
+    )
+
+    assert rollup["dispatched_pr"] == 0
+
+
+def test_run_report_excludes_a_routed_but_deferred_candidate_from_its_tiers() -> None:
+    """§11 Layer 2 — "Dispatched by tier" counts artifacts, not routing decisions."""
+    candidates = [
+        dispatched_pr_candidate(
+            "codeql-1",
+            state=CandidateState.DEFERRED,
+            reason=ReasonCode.CAPABILITY_UNAVAILABLE,
+        ),
+        dispatched_pr_candidate(
+            "codeql-2",
+            state=CandidateState.PR_CREATED,
+            pr_number=2,
+            pr_url="https://example.invalid/pr/2",
+        ),
+    ]
+
+    report = render_run_report(candidates, run_id="run-1")
+
+    assert "## Dispatched by tier\n- `high`: 1\n" in report
+    assert "`high`: 2" not in report
+    assert "Deferred by capability/other: 1" in report
+
+
+def test_run_report_reports_no_tier_when_every_dispatch_deferred() -> None:
+    """§11 Layer 2 — a run that published nothing must not claim a dispatched tier."""
+    candidates = [
+        dispatched_pr_candidate(
+            "codeql-1",
+            state=CandidateState.DEFERRED,
+            reason=ReasonCode.CAPABILITY_UNAVAILABLE,
+        )
+    ]
+
+    report = render_run_report(candidates, run_id="run-1")
+
+    assert "## Dispatched by tier\n- None\n" in report
+    assert Tier.HIGH.value not in report
 
 
 def test_run_report_separates_ceiling_and_capability_deferrals() -> None:
