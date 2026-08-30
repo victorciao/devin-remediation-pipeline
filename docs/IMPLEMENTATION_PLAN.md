@@ -438,7 +438,11 @@ Per acceptance criterion the planner emits
 The baseline is **valid iff** running `nodeid` at the pre-fix commit exits `FAILED` (not
 `SKIPPED`, not a collection `ERROR`) **and** the captured exception type equals
 `exception_type` **and** `message_pattern` matches the failure text. Any other outcome is
-`invalid_red_baseline` → re-author once, then escalate. All four expected fields and their
+`invalid_red_baseline` → re-author once, then escalate. **Escalation is terminal**: the candidate
+settles `terminal` / `invalid_red_baseline` / `human_review` with the baseline facts recorded
+alongside. It is never returned to `gated`, a pre-dispatch state — a backwards edge there re-runs
+the gate, the score and three fresh role sessions on a candidate already known to fail, on every
+later run, while reporting it in the cheap pre-dispatch bucket. All four expected fields and their
 observed counterparts are logged so the §11 expected-reason-match KPI is computable.
 
 **Multi-item nodeids** — a locator is not always one-to-one with a collected item:
@@ -702,6 +706,26 @@ waiting on something it cannot resolve — and fails the candidate with `session
 session's `messages` array carries a `devin_message` whose `timestamp` postdates the
 `user_message` that delivered the phase-B request (`event_id` + `timestamp` per message, P-3).
 A changed `structured_output` is not by itself evidence that this message was answered.
+**Non-correlation is refusal, never inference.** A response that carries no usable `messages`
+array does not license acceptance by any other signal: the poller keeps polling and the candidate
+defers with `phase_b_correlation_unavailable` when `session_timeout_s` expires. Accepting output
+because it merely changed and happens to contain the phase-B key converges a candidate on a review
+the pipeline never requested — the reviewer holds the branch, the base SHA and the diff from phase
+A, so it can emit a well-formed object unprompted (P-2 key merging).
+
+**Phase A cannot satisfy the phase-B contract.** A `diff_reviewed` object observed in a snapshot
+that predates the phase-B message is a protocol violation: it is logged and ignored, never read as
+acceptance. Only a reviewer session whose phase-B message was sent and correlated can supply it, so
+phase B is skipped only as a *repeat* — once per reviewer session id.
+
+**A non-conforming phase-B answer earns one correction, not a terminal outcome.** The first answer
+that fails the acceptance predicate is answered with exactly one corrective message to the same
+reviewer session, quoting the required object verbatim and the specific defect (the missing paths,
+or the expected vs. reported `head_sha`); it is correlated like any other. Each phase-B exchange
+counts as an iteration, so `iterations` reflects the sessions actually spent, and only after the
+bounded second exchange does the candidate settle as `diff_review_incomplete`. Phase B is never
+sent without a resolved branch head: an unresolved head defers the candidate with
+`capability_unavailable` rather than stating a `head_sha` the validator must reject.
 
 Exceeding the per-run session/cost ceiling (§14) **defers the candidate in flight** with
 `session_ceiling` and the run continues to publication and reporting, per the §13 `max_sessions`
@@ -751,6 +775,7 @@ README ships a config reference table with default, allowed values, and safety c
 | `version_source` | `.github/ISSUE_TEMPLATE/bug-report.yml` | repo-relative path | drift-tested; yielding no concrete release is a startup error, not an empty lane |
 | `lane2_class_breadth_max` | `5` | integer `>= 1` | **safety-relevant** — `enclosed_tests` above it fails `automatability` as `class_scope_too_broad` (§4) |
 | `max_sessions` | `budget_N × (3 + 2 × iteration_cap)` | `>= 3` | **ceiling, not a run killer** — a config whose value is below that floor is a **startup validation error** naming the computed floor; a ceiling reached mid-run defers the *current candidate* (`session_ceiling`) and the run continues to publication and reporting (§12, §14.1) |
+| `reservation_lease_s` | `3 × session_timeout_s` | integer `> 0` | **safety-relevant** — how long a §14.1 reservation row bars a second writer for the same `candidate_id`; below one role session's timeout it stops excluding the run that holds the claim, so a value under `session_timeout_s` is a startup validation error |
 
 Also configurable: target `owner/repo`, GitHub token, Devin API key, per-lane factor rubrics
 (`config/rubrics.yaml`), artifact templates.
@@ -870,6 +895,42 @@ Before any write the pipeline re-reads state **and** searches the target repo fo
 This covers the §18 failure modes: a mid-run crash resumes from the last recorded state; a
 stuck/timed-out session is retried under the same `candidate_id`; "issue created but PR failed"
 replays without creating a second issue.
+
+**The absence proof and the write share one critical section.** "Before any write" is literal: a
+marker result obtained earlier in the run is not a proof at write time — three role sessions, each
+up to `session_timeout_s`, can elapse in between, and the search index can catch up on an artifact
+this pipeline itself created and crashed before recording. Any cached outcome for the candidate is
+therefore invalidated and the search re-taken **inside** the reservation's critical section, and a
+re-take of `FAILED` / `ORPHANED` / (in LIVE) `UNCONFIGURED` fails closed.
+
+**A reservation is an exclusive lease, not a row.** The reservation row carries `reserved_at`, and
+an unexpired reservation for the same `candidate_id` bars a second writer outright — it must, since
+the row it writes has no artifact link yet and link-based proof cannot see it. Expiry is
+`reservation_lease_s` (§13, default 3 × `session_timeout_s`), after which a crashed run's claim may
+be reclaimed; a live claim defers the second writer with `reservation_held`.
+
+**Skipping a candidate requires artifact proof, not a state value.** A durable row in a terminal or
+post-publication state short-circuits publication only when it carries an artifact link (or the
+marker search finds the artifact); otherwise the candidate resumes at publication. A state value
+alone is written by the pipeline itself before any artifact exists, so treating it as completion
+silently drops the routed candidate and reports it as a finished outcome.
+
+**The reviewed revision is its own durable field.** `reviewed_head_sha` is written once from the
+validated `diff_reviewed.head_sha` and never overwritten; `head_sha` tracks the live branch head.
+The §10.1 local-evidence `diff_range` renders from `reviewed_head_sha`, so a push after the review
+can never make the PR name a revision no review covered. No write may replace a non-`None` durable
+identity with `None` — `StatePreservationError` is the enforcement point.
+
+**A per-candidate failure defers that candidate only.** Rendered-body validation happens once,
+before the first write for that candidate, and validation and HTTP errors are caught per candidate:
+the candidate defers with `artifact_validation_failed` (or the transport's own reason) and the loop
+continues. `capability_unavailable` is reserved for actual capability loss and never asserted over
+candidates that were never attempted. The degraded (`has_issues=false`) path adopts an existing PR
+exactly as the primary path does — persisted number first, then 422 reconciliation against the head
+branch — since on a fork with issues disabled it is the only publication path. The per-candidate
+`MarkerSearchOutcome` is recorded on the row (`reason_detail`) and as its own field on the candidate
+event, with `FAILED` / `ORPHANED` / `UNCONFIGURED` distinguishable in the report, so "not published"
+is never confused with "could not look" (§19).
 
 ---
 
