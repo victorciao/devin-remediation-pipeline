@@ -25,6 +25,16 @@ class StatePreservationError(RuntimeError):
     """Raised when a resume write would discard durable artifact identity."""
 
 
+class MarkerSearchOutcome(str, Enum):
+    """Outcome of one candidate's marker lookup."""
+
+    FOUND = "found"
+    ABSENT = "absent"
+    FAILED = "failed"
+    ORPHANED = "orphaned"
+    UNCONFIGURED = "unconfigured"
+
+
 @dataclass(frozen=True)
 class MarkerArtifact:
     """Unique GitHub artifact found by the candidate marker search."""
@@ -44,11 +54,8 @@ class ResumeDecision:
 
 def has_local_artifact(candidate: Candidate | None) -> bool:
     """Return whether a persisted row proves an artifact already exists."""
-    return candidate is not None and (
-        candidate.issue_url is not None
-        or candidate.pr_url is not None
-        or candidate.state.value
-        in {"issue_created", "pr_created", "issue_patched", "comment_created"}
+    return candidate is not None and any(
+        link is not None for link in (candidate.issue_url, candidate.pr_url, candidate.comment_url)
     )
 
 
@@ -125,8 +132,7 @@ class CandidateStateStore:
         self.quarantined_rows = 0
         self._quarantine_seen: set[str] | None = None
         self._marker_results: dict[str, MarkerArtifact | None] = {}
-        self._marker_search_unconfigured: set[str] = set()
-        self._marker_search_orphaned: set[str] = set()
+        self._marker_outcomes: dict[str, MarkerSearchOutcome] = {}
 
     def _read_rows(self) -> list[Candidate]:
         if not self._path.exists():
@@ -199,19 +205,23 @@ class CandidateStateStore:
         if candidate_id in self._marker_results:
             return self._marker_results[candidate_id]
         if self._marker_search is None:
-            self._marker_search_unconfigured.add(candidate_id)
+            self._marker_outcomes[candidate_id] = MarkerSearchOutcome.UNCONFIGURED
             self._marker_results[candidate_id] = None
             return None
         try:
             result = self._marker_search(f"<!-- devin-remediation-id: {candidate_id} -->")
             self._marker_results[candidate_id] = result
+            self._marker_outcomes[candidate_id] = (
+                MarkerSearchOutcome.FOUND if result is not None else MarkerSearchOutcome.ABSENT
+            )
             return result
         except ValueError:
-            self._marker_search_orphaned.add(candidate_id)
+            self._marker_outcomes[candidate_id] = MarkerSearchOutcome.ORPHANED
             self._marker_results[candidate_id] = None
             return None
         except Exception:
             self.marker_search_failed = True
+            self._marker_outcomes[candidate_id] = MarkerSearchOutcome.FAILED
             self._marker_results[candidate_id] = None
             return None
 
@@ -223,17 +233,33 @@ class CandidateStateStore:
         """Return whether the configured marker lookup failed for one candidate."""
         if candidate_id not in self._marker_results:
             self.marker_exists(candidate_id)
-        return (
-            candidate_id not in self._marker_search_unconfigured
-            and self._marker_results.get(candidate_id) is None
-            and candidate_id not in self._marker_search_orphaned
-        )
+        return self._marker_outcomes.get(candidate_id) in {
+            MarkerSearchOutcome.FAILED,
+            MarkerSearchOutcome.UNCONFIGURED,
+        }
 
     def marker_search_orphaned(self, candidate_id: str) -> bool:
         """Return whether marker search found an ambiguous or malformed artifact."""
         if candidate_id not in self._marker_results:
             self.marker_artifact(candidate_id)
-        return candidate_id in self._marker_search_orphaned
+        return self._marker_outcomes.get(candidate_id) is MarkerSearchOutcome.ORPHANED
+
+    def marker_search_outcome(self, candidate_id: str) -> MarkerSearchOutcome:
+        """Return the recorded marker lookup outcome for one candidate."""
+        if candidate_id not in self._marker_results:
+            self.marker_artifact(candidate_id)
+        return self._marker_outcomes[candidate_id]
+
+    def _append_locked(self, candidate: Candidate) -> None:
+        """Append one row while the caller owns the state lock."""
+        latest = self.latest().get(candidate.candidate_id)
+        if latest is not None and latest.model_dump(mode="json") == candidate.model_dump(
+            mode="json"
+        ):
+            return
+        line = json.dumps(candidate.model_dump(mode="json"), sort_keys=True) + "\n"
+        with self._path.open("a", encoding="utf-8") as handle:
+            handle.write(line)
 
     def append(self, candidate: Candidate) -> None:
         """Append one candidate lifecycle row after rereading current state."""
@@ -241,14 +267,7 @@ class CandidateStateStore:
         lock_path = self._path.with_suffix(self._path.suffix + ".lock")
         with lock_path.open("a", encoding="utf-8") as lock_handle:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-            latest = self.latest().get(candidate.candidate_id)
-            if latest is not None and latest.model_dump(mode="json") == candidate.model_dump(
-                mode="json"
-            ):
-                return
-            line = json.dumps(candidate.model_dump(mode="json"), sort_keys=True) + "\n"
-            with self._path.open("a", encoding="utf-8") as handle:
-                handle.write(line)
+            self._append_locked(candidate)
 
     def append_if_new_artifact(self, candidate: Candidate) -> bool:
         """Atomically reserve a candidate before the first artifact write."""
@@ -265,7 +284,7 @@ class CandidateStateStore:
             current = self.latest().get(candidate.candidate_id)
             if has_local_artifact(current) or marker_exists:
                 return False
-            self.append(candidate)
+            self._append_locked(candidate)
             return True
 
     def supersede(self, previous: Candidate, current: Candidate) -> None:
@@ -294,6 +313,7 @@ __all__ = [
     "ResumeAction",
     "ResumeDecision",
     "StatePreservationError",
+    "MarkerSearchOutcome",
     "MarkerArtifact",
     "decide_resume",
     "has_local_artifact",

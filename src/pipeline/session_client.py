@@ -12,7 +12,7 @@ from enum import Enum
 from typing import Protocol
 
 from pipeline.config import ConfigError, Mode, PipelineConfig
-from pipeline.prompts import validate_planner_output
+from pipeline.prompts import PHASE_B_REVIEWER_OUTPUT_SCHEMA, validate_planner_output
 from pipeline.red_baseline import (
     DiffInspection,
     apply_red_baseline,
@@ -252,6 +252,79 @@ def _message_marker(response: Mapping[str, object]) -> tuple[str | None, str | N
     )
 
 
+def _message_timestamps(response: Mapping[str, object]) -> set[str]:
+    """Return timestamps from the API message history."""
+    messages = response.get("messages")
+    if not isinstance(messages, Sequence) or isinstance(messages, str):
+        return set()
+    return {
+        str(entry["timestamp"])
+        for entry in messages
+        if isinstance(entry, Mapping) and isinstance(entry.get("timestamp"), str)
+    }
+
+
+def _sent_message_timestamp(response: Mapping[str, object] | None) -> str | None:
+    """Extract the timestamp assigned to the sent user message."""
+    if response is None:
+        return None
+    _message_id, timestamp = _message_marker(response)
+    if timestamp is not None:
+        return timestamp
+    messages = response.get("messages")
+    if not isinstance(messages, Sequence) or isinstance(messages, str):
+        return None
+    timestamps = [
+        entry["timestamp"]
+        for entry in messages
+        if isinstance(entry, Mapping)
+        and entry.get("type") == "user_message"
+        and isinstance(entry.get("timestamp"), str)
+    ]
+    return max(timestamps) if timestamps else None
+
+
+def _message_processed(
+    response: Mapping[str, object],
+    *,
+    sent_timestamp: str | None,
+    previous_message_timestamps: set[str],
+) -> bool:
+    """Require a later correlated Devin message before accepting phase B."""
+    if sent_timestamp is None:
+        return False
+    messages = response.get("messages")
+    if not isinstance(messages, Sequence) or isinstance(messages, str):
+        return False
+    return any(
+        isinstance(entry, Mapping)
+        and entry.get("type") == "devin_message"
+        and isinstance(entry.get("timestamp"), str)
+        and entry["timestamp"] > sent_timestamp
+        and entry["timestamp"] not in previous_message_timestamps
+        for entry in messages
+    )
+
+
+def _has_required_role_output(
+    role: SessionRole,
+    response: Mapping[str, object],
+    *,
+    phase_b: bool = False,
+) -> bool:
+    """Check that a terminal session returned its role's required object."""
+    structured = response.get("structured_output")
+    if not isinstance(structured, Mapping):
+        return False
+    schema = PHASE_B_REVIEWER_OUTPUT_SCHEMA if phase_b else ROLE_OUTPUT_SCHEMAS[role]
+    required = schema.get("required")
+    return (
+        isinstance(required, Sequence)
+        and not isinstance(required, str)
+        and all(isinstance(key, str) and key in structured for key in required)
+    )
+
+
 class SessionClient:
     """Create and poll role sessions through one injectable transport seam."""
 
@@ -386,8 +459,8 @@ class SessionClient:
                     "red_baseline": {"observed": []},
                     "green_result": {"passed": True},
                     "diff_reviewed": {
-                        "base_sha": "simulate-base",
-                        "head_sha": "simulate-head",
+                        "base_sha": "0000000",
+                        "head_sha": "1111111",
                         "files_read": [],
                     },
                     "committed_diff": "",
@@ -407,12 +480,17 @@ class SessionClient:
             if not isinstance(status, str):
                 status = "unknown"
             snapshot = SessionSnapshot(session_id, status, response)
-            if status == "finished":
-                self._record_terminal_usage(role, session_id, response)
-                return snapshot
-            if status in {"blocked", "expired"}:
+            if status == "expired":
                 raise SessionBlockedError(
                     f"{role.value} session stopped with status {status}: {session_id}"
+                )
+            if status in {"finished", "blocked"} and _has_required_role_output(role, response):
+                self._record_terminal_usage(role, session_id, response)
+                return snapshot
+            if status in {"finished", "blocked"}:
+                raise SessionBlockedError(
+                    f"{role.value} session stopped with status {status} without required output: "
+                    f"{session_id}"
                 )
             if self._clock() >= deadline:
                 raise TimeoutError(f"{role.value} session timed out: {session_id}")
@@ -465,6 +543,8 @@ class SessionClient:
             raise ConfigError("live session orchestration requires a transport")
         deadline = self._clock() + self._limit(role).session_timeout_s
         previous_output = previous.payload.get("structured_output")
+        sent_timestamp = _sent_message_timestamp(message_response)
+        previous_message_timestamps = _message_timestamps(previous.payload)
         while True:
             response = self._transport.get(f"/v1/sessions/{session_id}")
             status = response.get("status_enum", response.get("status"))
@@ -472,14 +552,32 @@ class SessionClient:
                 status = "unknown"
             structured_output = response.get("structured_output")
             changed_output = structured_output != previous_output
-            if status in {"blocked", "expired"}:
+            processed = _message_processed(
+                response,
+                sent_timestamp=sent_timestamp,
+                previous_message_timestamps=previous_message_timestamps,
+            )
+            if status == "expired":
                 raise SessionBlockedError(
                     f"{role.value} session stopped with status {status}: {session_id}"
                 )
-            if status == "finished" and changed_output:
+            if (
+                status in {"finished", "blocked"}
+                and changed_output
+                and processed
+                and _has_required_role_output(
+                    role,
+                    response,
+                    phase_b=True,
+                )
+            ):
                 snapshot = SessionSnapshot(session_id, status, response)
                 self._record_terminal_usage(role, session_id, response)
                 return snapshot
+            if status == "blocked" and not processed:
+                # A blocked status can be the suspended state before the follow-up
+                # message is delivered; continue until the correlated answer arrives.
+                pass
             if self._clock() >= deadline:
                 raise TimeoutError(
                     f"{role.value} session did not process follow-up message: {session_id}"
@@ -570,26 +668,6 @@ ROLE_OUTPUT_SCHEMAS: Mapping[SessionRole, Mapping[str, object]] = {
             },
             "lifted_markers": {"type": "array", "items": {"type": "string"}},
             "remaining_markers": {"type": "array", "items": {"type": "string"}},
-        },
-    },
-}
-
-PHASE_B_REVIEWER_OUTPUT_SCHEMA: Mapping[str, object] = {
-    "type": "object",
-    "required": ["diff_reviewed", "findings"],
-    "properties": {
-        "diff_reviewed": {
-            "type": "object",
-            "required": ["base_sha", "head_sha", "files_read"],
-            "properties": {
-                "base_sha": {"type": "string"},
-                "head_sha": {"type": "string"},
-                "files_read": {"type": "array", "items": {"type": "string"}},
-            },
-        },
-        "findings": {
-            "type": "array",
-            "items": {"type": "object"},
         },
     },
 }
@@ -702,6 +780,7 @@ class RuntimeOrchestrator:
         attempt: int = 1,
         candidate: Candidate | None = None,
         head_sha_resolver: Callable[[], str | None] | None = None,
+        head_sha_observer: Callable[[str], None] | None = None,
         branch_paths_resolver: Callable[[str, str], Sequence[str]] | None = None,
         prompt_factory: (
             Callable[
@@ -713,6 +792,8 @@ class RuntimeOrchestrator:
         session_created: Callable[[SessionAttempt], None] | None = None,
     ) -> OrchestrationResult:
         """Run the review loop after a planner and concurrent role join."""
+        if self._client.config.mode is Mode.LIVE and prompt_factory is None:
+            raise PlannerOutputError("missing planner prompt factory")
         planner = self.run_planner(
             candidate_id,
             planner_prompt,
@@ -780,14 +861,11 @@ class RuntimeOrchestrator:
 
         def iteration_from(result: OrchestrationResult) -> ReviewIteration:
             nonlocal candidate
-            if candidate is not None and head_sha_resolver is not None:
-                resolved_head_sha = head_sha_resolver()
-                if resolved_head_sha is not None:
-                    candidate = candidate.model_copy(update={"head_sha": resolved_head_sha})
             iteration = review_iteration_from_payload(
                 output(result.planner),
                 output(result.reviewer),
                 output(result.implementer),
+                diff_reviewed=_candidate_diff_review_matches(result, candidate),
             )
             if candidate is not None and candidate.head_sha is not None:
                 iteration = replace(iteration, prior_head_sha=candidate.head_sha)
@@ -951,28 +1029,45 @@ class RuntimeOrchestrator:
         def phase_b(result: OrchestrationResult) -> OrchestrationResult:
             nonlocal candidate
             reviewer_session_id = result.reviewer.attempt.session_id
-            if (
-                reviewer_session_id in phase_b_attempted
-                or self._client.config.mode is Mode.SIMULATE
-            ):
+            if reviewer_session_id in phase_b_attempted:
                 return result
             if candidate is not None and head_sha_resolver is not None:
                 resolved_head_sha = head_sha_resolver()
                 if resolved_head_sha is not None:
                     candidate = candidate.model_copy(update={"head_sha": resolved_head_sha})
+                    if head_sha_observer is not None:
+                        head_sha_observer(resolved_head_sha)
                     if candidate.base_sha is not None and resolved_head_sha == candidate.base_sha:
                         raise BranchNotAdvancedError(
                             f"candidate branch remained at base SHA: {resolved_head_sha}"
                         )
-            if _candidate_diff_review_matches(result, candidate):
+            if (
+                _candidate_diff_review_matches(result, candidate)
+                and self._client.config.mode is not Mode.SIMULATE
+            ):
                 return result
             raw_diff = output(result.implementer).get("committed_diff")
             committed_diff = raw_diff if isinstance(raw_diff, str) else ""
-            if phase_b_prompt is None:
+            phase_b_renderer = phase_b_prompt
+            if phase_b_renderer is None and self._client.config.mode is Mode.SIMULATE:
+
+                def simulate_phase_b_prompt(_diff: str) -> str:
+                    return (
+                        "SIMULATE reviewer phase B: inspect the fixture committed diff "
+                        "and return complete diff_reviewed evidence."
+                    )
+
+                phase_b_renderer = simulate_phase_b_prompt
+            if phase_b_renderer is None:
                 raise PlannerOutputError("missing reviewer phase-B prompt factory")
+            phase_b_attempted.add(reviewer_session_id)
+            prompt = phase_b_renderer(committed_diff)
+            if self._client.config.mode is Mode.SIMULATE:
+                self._client.send_message(reviewer_session_id, prompt)
+                return simulation_result(result, candidate) if candidate is not None else result
             message_response = self._client.send_message(
                 reviewer_session_id,
-                phase_b_prompt(committed_diff),
+                prompt,
             )
             updated = self._client.poll_session_after_message(
                 SessionRole.REVIEWER,
@@ -980,7 +1075,6 @@ class RuntimeOrchestrator:
                 result.reviewer.snapshot,
                 message_response,
             )
-            phase_b_attempted.add(reviewer_session_id)
             return replace(result, reviewer=replace(result.reviewer, snapshot=updated))
 
         current = phase_b(current)

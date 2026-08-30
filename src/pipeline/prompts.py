@@ -12,6 +12,24 @@ if TYPE_CHECKING:
     from pipeline.review_loop import ReviewIteration
 
 
+PHASE_B_REVIEWER_OUTPUT_SCHEMA: Mapping[str, object] = {
+    "type": "object",
+    "required": ["diff_reviewed", "findings"],
+    "properties": {
+        "diff_reviewed": {
+            "type": "object",
+            "required": ["base_sha", "head_sha", "files_read"],
+            "properties": {
+                "base_sha": {"type": "string"},
+                "head_sha": {"type": "string"},
+                "files_read": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+        "findings": {"type": "array", "items": {"type": "object"}},
+    },
+}
+
+
 def _context(candidate: Candidate) -> str:
     if candidate.lane is Lane.CODEQL:
         return (
@@ -229,12 +247,13 @@ def render_reviewer_phase_b_prompt(
     head_branch: str,
     planner_output: Mapping[str, object],
     committed_diff: str,
+    head_sha: str = "unknown",
 ) -> str:
     """Render the post-join reviewer diff-review prompt."""
+    changed_paths = _changed_files(committed_diff)
     diff = committed_diff
     if len(diff) > 60_000:
-        files = _changed_files(diff)
-        file_list = ", ".join(f"`{path}`" for path in files) or "the changed files"
+        file_list = ", ".join(f"`{path}`" for path in changed_paths) or "the changed files"
         diff = (
             "[diff omitted because it exceeds 60000 characters]. Changed files: "
             f"{file_list}. Read `git diff {base_sha}..HEAD` on branch `{head_branch}` instead."
@@ -250,7 +269,21 @@ def render_reviewer_phase_b_prompt(
         + "Read the implementer's full diff and complete the §9 findings contract. Findings "
         "must use severity blocking|major|minor|nit, nullable criterion_id, file and line "
         "range, triggering path, and proposed fix. Set diff_reviewed true only after actually "
-        "reading the diff. Reuse the planner criteria below and do not author unrelated tests.\n\n"
+        "reading the diff. The required response object is:\n"
+        + json.dumps(
+            {
+                "diff_reviewed": {
+                    "base_sha": base_sha,
+                    "head_sha": head_sha,
+                    "files_read": changed_paths,
+                },
+                "findings": [],
+            },
+            indent=2,
+        )
+        + "\nEvery changed path must appear in files_read; do not substitute read_full_diff "
+        "or any other coarse alternative. Reuse the planner criteria below and do not author "
+        "unrelated tests.\n\n"
         "PLANNER SPECIFICATION (verbatim):\n"
         + _planner_text(planner_output)
         + "\n\nIMPLEMENTER COMMITTED DIFF:\n"
@@ -263,5 +296,6 @@ __all__ = [
     "render_planner_prompt",
     "render_reviewer_phase_b_prompt",
     "render_reviewer_prompt",
+    "PHASE_B_REVIEWER_OUTPUT_SCHEMA",
     "validate_planner_output",
 ]

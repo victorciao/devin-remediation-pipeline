@@ -8,6 +8,7 @@ from typing import TypeAlias
 
 from pipeline.config import PipelineConfig
 from pipeline.schemas import Candidate, CandidateState, EventRecord, Lane, ReasonCode
+from pipeline.state import has_local_artifact
 
 
 @dataclass(frozen=True)
@@ -62,10 +63,13 @@ def compute_burndown(
         denominator = int(total_value)
         lane_rows = [candidate for candidate in candidates if candidate.lane is lane]
         progress = sum(
-            candidate.state is CandidateState.CONVERGED
-            or (
-                candidate.state is CandidateState.TERMINAL
-                and candidate.reason is ReasonCode.STALE_SKIP
+            has_local_artifact(candidate)
+            and (
+                candidate.state is CandidateState.CONVERGED
+                or (
+                    candidate.state is CandidateState.TERMINAL
+                    and candidate.reason is ReasonCode.STALE_SKIP
+                )
             )
             for candidate in lane_rows
         )
@@ -159,7 +163,15 @@ def compute_kpis(
             for candidate in candidates
         ),
         "expected_reason_match_rate": _expected_reason_match_rate(events),
-        "disagreement_unresolved_rate": unresolved / len(events) if events else 0.0,
+        "disagreement_unresolved_rate": (
+            (
+                unresolved
+                + sum(event.reason is ReasonCode.DIFF_REVIEW_INCOMPLETE for event in events)
+            )
+            / len(events)
+            if events
+            else 0.0
+        ),
         "diff_review_incomplete_rate": (
             sum(event.reason is ReasonCode.DIFF_REVIEW_INCOMPLETE for event in events) / len(events)
             if events
@@ -281,7 +293,7 @@ def render_kpi_report(
         )
     else:
         lines.append("- None")
-    lines.extend(["", "## Burn-down", ""])
+    lines.extend(["", "## Burn-down — remediation PRs opened against baseline", ""])
     for lane, value in compute_burndown(candidates, baseline).items():
         if isinstance(value.denominator, NotApplicable):
             lines.append(f"- **{lane.value}:** n/a ({value.denominator.reason.value})")

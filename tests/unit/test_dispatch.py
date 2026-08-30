@@ -582,7 +582,6 @@ def test_crosslink_roundtrip() -> None:
     assert links.pr_url is not None and links.pr_url in patched_issue
 
 
-@marker_absence
 def test_resume_after_issue_created_pr_failed(tmp_path: Path) -> None:
     """§14.1 — replaying the `issue created, PR not created` state creates no second issue."""
     store = CandidateStateStore(

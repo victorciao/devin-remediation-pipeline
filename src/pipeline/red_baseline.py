@@ -8,10 +8,8 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from pipeline.schemas import (
-    Action,
     BaselineStatus,
     Candidate,
-    CandidateState,
     ExpectedFailure,
     ItemOutcome,
     PerItemOutcome,
@@ -104,30 +102,9 @@ def apply_red_baseline(
     lifted_markers: Iterable[str] = (),
     remaining_markers: Iterable[str] = (),
 ) -> Candidate:
-    """Apply baseline classification, including reviewer-only stale skips."""
+    """Apply baseline facts without deciding candidate routing."""
     remaining = set(remaining_markers)
     marker_list = [marker for marker in lifted_markers if marker not in remaining]
-    if result.status is BaselineStatus.STALE_SKIP:
-        return candidate.model_copy(
-            update={
-                "action": Action.REVIEWER_ONLY_DIFF,
-                "state": CandidateState.TERMINAL,
-                "reason": ReasonCode.STALE_SKIP,
-                "auto_merge_eligible": False,
-                "red_baseline": result,
-                "lifted_markers": marker_list,
-            }
-        )
-    if result.status is BaselineStatus.INVALID_RED_BASELINE:
-        return candidate.model_copy(
-            update={
-                "state": CandidateState.GATED,
-                "reason": ReasonCode.INVALID_RED_BASELINE,
-                "auto_merge_eligible": False,
-                "red_baseline": result,
-                "lifted_markers": marker_list,
-            }
-        )
     return candidate.model_copy(update={"red_baseline": result, "lifted_markers": marker_list})
 
 

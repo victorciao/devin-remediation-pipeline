@@ -129,7 +129,6 @@ def test_live_does_not_describe_its_artifacts_as_simulated(tmp_path: Path) -> No
         assert LIVE_WORDING in body
 
 
-@marker_absence
 def test_live_pr_bodies_do_not_claim_a_would_write_dry_run(tmp_path: Path) -> None:
     """§14.1 — the PR body's automation metadata reports the mode that actually ran."""
     render(Mode.LIVE, tmp_path / "out")

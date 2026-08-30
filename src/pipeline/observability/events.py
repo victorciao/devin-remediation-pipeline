@@ -6,7 +6,7 @@ import json
 from collections.abc import Iterable
 from pathlib import Path
 
-from pipeline.schemas import Candidate, CandidateState, EventRecord, RetryDecision, RunEventRecord
+from pipeline.schemas import Candidate, CandidateState, EventRecord, RunEventRecord
 
 
 class EventLog:
@@ -134,34 +134,7 @@ def append_candidate_events(
     for run_event in run_events:
         log.append(run_event)
     for candidate in candidates:
-        candidate_event = event_from_candidate(candidate, run_id=run_id)
-        if candidate.role_attempt_evidence:
-            from pipeline.session_client import SessionAttempt, SessionRole, event_with_attempt
-
-            for role_name, evidence in sorted(candidate.role_attempt_evidence.items()):
-                try:
-                    role = SessionRole(role_name)
-                    raw_attempt = evidence["attempt"]
-                    if not isinstance(raw_attempt, int):
-                        continue
-                    attempt = raw_attempt
-                    raw_new = evidence.get("is_new_session_raw")
-                    is_new = raw_new if isinstance(raw_new, bool) else None
-                    decision = RetryDecision(str(evidence["retry_decision"]))
-                    candidate_event = event_with_attempt(
-                        candidate_event,
-                        SessionAttempt(
-                            role,
-                            candidate.candidate_id,
-                            attempt,
-                            getattr(candidate, f"{role_name}_session_id") or "",
-                            is_new,
-                            decision,
-                        ),
-                    )
-                except (KeyError, TypeError, ValueError):
-                    continue
-        log.append(candidate_event)
+        log.append(event_from_candidate(candidate, run_id=run_id))
 
 
 __all__ = ["EventLog", "append_candidate_events", "event_from_candidate"]

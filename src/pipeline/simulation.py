@@ -36,7 +36,11 @@ def render_run_artifacts(
     run_events: Sequence[RunEventRecord] = (),
 ) -> tuple[Path, ...]:
     """Render a complete run without invoking a remote write transport."""
-    state_path = output_dir / "state" / "candidates.jsonl"
+    state_path = (
+        output_dir
+        / "state"
+        / ("candidates-live.jsonl" if config.mode is Mode.LIVE else "candidates.jsonl")
+    )
     events_path = output_dir / "reports" / "events.jsonl"
     store = CandidateStateStore(state_path)
     for candidate in candidates:
@@ -58,11 +62,7 @@ def render_run_artifacts(
         routed = candidate.action in {Action.OPEN_PR, Action.OPEN_ISSUE}
         if config.mode is Mode.LIVE and not routed:
             continue
-        template_text = (
-            ""
-            if candidate.lane is Lane.CODEQL
-            else issue_templates[candidate.lane].read_text(encoding="utf-8")
-        )
+        template_text = issue_templates[candidate.lane].read_text(encoding="utf-8")
         summary = (
             f"Remediation tracking for {candidate.stable_locator}."
             if config.mode is Mode.LIVE

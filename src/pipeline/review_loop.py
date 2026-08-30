@@ -282,11 +282,22 @@ def run_review_loop(
 
 def apply_review_result(candidate: Candidate, result: ReviewLoopResult) -> Candidate:
     """Apply convergence, routing, and auto-merge outcomes to a candidate."""
+    state = result.state
+    reason = result.reason
+    action: Action | None = None
+    if result.red_result is not None:
+        if result.red_result.status is BaselineStatus.INVALID_RED_BASELINE:
+            state = CandidateState.GATED
+            reason = ReasonCode.INVALID_RED_BASELINE
+        elif result.red_result.status is BaselineStatus.STALE_SKIP:
+            state = CandidateState.TERMINAL
+            reason = ReasonCode.STALE_SKIP
+            action = Action.REVIEWER_ONLY_DIFF
     update: dict[str, object] = {
-        "state": result.state,
-        "reason": result.reason,
+        "state": state,
+        "reason": reason,
         "disagreement_summary": result.disagreement_summary,
-        "unresolved_major": result.reason
+        "unresolved_major": reason
         in {
             ReasonCode.DISAGREEMENT_UNRESOLVED,
             ReasonCode.DIFF_REVIEW_INCOMPLETE,
@@ -295,7 +306,9 @@ def apply_review_result(candidate: Candidate, result: ReviewLoopResult) -> Candi
     }
     if result.red_result is not None:
         update["red_baseline"] = result.red_result
-    if result.reviewer_only:
+    if action is not None:
+        update["action"] = action
+    elif result.reviewer_only:
         update["action"] = Action.REVIEWER_ONLY_DIFF
     elif result.needs_human_review:
         update["action"] = Action.HUMAN_REVIEW
@@ -308,6 +321,8 @@ def review_iteration_from_payload(
     planner_output: Mapping[str, object],
     reviewer_output: Mapping[str, object],
     implementer_output: Mapping[str, object] | None = None,
+    *,
+    diff_reviewed: bool = False,
 ) -> ReviewIteration:
     """Normalize role structured outputs into a pure loop input."""
     raw_criteria = planner_output.get("criteria")
@@ -417,25 +432,6 @@ def review_iteration_from_payload(
     )
     if isinstance(raw_addressed, Sequence) and not isinstance(raw_addressed, str):
         addressed = {item for item in raw_addressed if isinstance(item, str)}
-    diff_reviewed_value = reviewer_output.get("diff_reviewed")
-    diff_reviewed = False
-    if isinstance(diff_reviewed_value, Mapping):
-        base_sha = diff_reviewed_value.get("base_sha")
-        head_sha = diff_reviewed_value.get("head_sha")
-        files_read = diff_reviewed_value.get("files_read")
-        has_files = isinstance(files_read, Sequence) and not isinstance(files_read, str)
-        changed = implementer_output.get("files_changed") if implementer_output else None
-        changed_count = (
-            isinstance(changed, Sequence) and not isinstance(changed, str) and bool(changed)
-        )
-        diff_reviewed = (
-            isinstance(base_sha, str)
-            and bool(base_sha)
-            and isinstance(head_sha, str)
-            and bool(head_sha)
-            and has_files
-            and (bool(files_read) or not changed_count)
-        )
     return ReviewIteration(
         red_baseline=baseline_status,
         green=green,

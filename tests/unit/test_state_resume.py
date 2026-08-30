@@ -244,7 +244,6 @@ def store_for(tmp_path: Path, **fields: object) -> CandidateStateStore:
     return CandidateStateStore(tmp_path / "candidates.jsonl", **fields)  # type: ignore[arg-type]
 
 
-@marker_absence
 def test_resume_decision_of_an_unknown_candidate_publishes(tmp_path: Path) -> None:
     """§14.1 — no row and no marker hit is a clean first publication."""
     store = store_for(tmp_path, marker_search=no_marker)
@@ -376,7 +375,6 @@ def test_a_failed_marker_search_blocks_the_first_durable_reservation(tmp_path: P
     assert store.rows() == []
 
 
-@pytest.mark.xfail(strict=True, reason=RESERVATION_DEADLOCK_DEFECT, raises=Deadlock)
 def test_an_unconfigured_marker_search_is_not_a_failed_search(tmp_path: Path) -> None:
     """§14.1 — SIMULATE and local runs have no search to fail; they are not fail-closed."""
     store = store_for(tmp_path)
@@ -387,7 +385,6 @@ def test_an_unconfigured_marker_search_is_not_a_failed_search(tmp_path: Path) ->
     assert within_deadline(lambda: store.append_if_new_artifact(candidate)) is True
 
 
-@marker_absence
 def test_a_reserved_candidate_cannot_be_reserved_twice(tmp_path: Path) -> None:
     """§14.1 — the reservation is atomic: exactly one durable row per first write."""
     store = store_for(tmp_path, marker_search=no_marker)
@@ -569,7 +566,6 @@ def test_suppression_is_per_candidate(tmp_path: Path) -> None:
     assert [row.candidate_id for row in store.rows()] == ["codeql-1", "codeql-2", "codeql-2"]
 
 
-@marker_absence
 def test_suppression_does_not_weaken_the_artifact_reservation(tmp_path: Path) -> None:
     """§14.1 — `append_if_new_artifact` still refuses a second reservation."""
     store = store_for(tmp_path, marker_search=no_marker)

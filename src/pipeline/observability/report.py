@@ -81,7 +81,6 @@ def render_run_report(
             candidate.action in {Action.OPEN_PR, Action.OPEN_ISSUE, Action.REVIEWER_ONLY_DIFF}
             and candidate.state in dispatched_states
         )
-        or candidate.state is CandidateState.DISPATCHING
         or (
             candidate.tier is not None
             and candidate.tier.value == "low"

@@ -26,6 +26,7 @@ import sys
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
+from functools import partial
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -58,7 +59,6 @@ from pipeline.http_transport import HttpTransportError, UrllibDevinTransport, Ur
 from pipeline.lanes.codeql import enumerate_from_config, read_alert_fixture
 from pipeline.lanes.deprecations import enumerate_deprecations, is_eol
 from pipeline.lanes.skipped_tests import enumerate_skipped_tests
-from pipeline.observability.events import event_from_candidate
 from pipeline.prompts import (
     render_implementer_prompt,
     render_planner_prompt,
@@ -89,7 +89,6 @@ from pipeline.session_client import (
     SessionClient,
     SessionDedupeError,
     SessionMessageError,
-    event_with_ceiling,
 )
 from pipeline.simulation import simulate_run
 from pipeline.state import (
@@ -1046,6 +1045,50 @@ def _prepare_live_candidate(
     return prepared
 
 
+def _make_role_prompts(
+    planner_output: Mapping[str, object],
+    previous_iteration: ReviewIteration | None = None,
+    *,
+    candidate: Candidate,
+    target_repo: str,
+    base_sha: str,
+    head_branch: str,
+    pinned_head_holder: list[str | None],
+) -> tuple[str, str, Callable[[str], str]]:
+    """Render role prompts from one candidate and its pinned branch head."""
+
+    def phase_b_prompt(committed_diff: str) -> str:
+        return render_reviewer_phase_b_prompt(
+            candidate,
+            target_repo=target_repo,
+            base_sha=base_sha,
+            head_sha=pinned_head_holder[0] or "unknown",
+            head_branch=head_branch,
+            planner_output=planner_output,
+            committed_diff=committed_diff,
+        )
+
+    return (
+        render_implementer_prompt(
+            candidate,
+            target_repo=target_repo,
+            base_sha=base_sha,
+            head_branch=head_branch,
+            planner_output=planner_output,
+            previous_iteration=previous_iteration,
+        ),
+        render_reviewer_prompt(
+            candidate,
+            target_repo=target_repo,
+            base_sha=base_sha,
+            head_branch=head_branch,
+            planner_output=planner_output,
+            previous_iteration=previous_iteration,
+        ),
+        phase_b_prompt,
+    )
+
+
 def run_once(
     *,
     config: PipelineConfig,
@@ -1100,7 +1143,9 @@ def run_once(
             )
         )
     state_store = CandidateStateStore(
-        output_dir / "state" / "candidates.jsonl",
+        output_dir
+        / "state"
+        / ("candidates-live.jsonl" if config.mode is Mode.LIVE else "candidates.jsonl"),
         marker_search=marker_search,
     )
     valid = baseline.get("baseline_valid_lanes")
@@ -1218,7 +1263,6 @@ def run_once(
     dispatched = dispatch_candidates(selected, config)
     orchestrator = RuntimeOrchestrator(SessionClient(config, transport=session_transport))
     reviewed: list[Candidate] = []
-    ceiling_error: SessionCeilingError | None = None
     session_candidates: list[Candidate] = []
     live_client: GitHubClient | None = None
     if config.mode is Mode.LIVE:
@@ -1261,8 +1305,8 @@ def run_once(
             session_candidates = [
                 candidate.model_copy(
                     update={
-                        "base_sha": candidate.base_sha or "simulate-base",
-                        "head_sha": candidate.head_sha or "simulate-head",
+                        "base_sha": candidate.base_sha or "0000000",
+                        "head_sha": candidate.head_sha or "1111111",
                     }
                 )
                 for candidate in session_candidates
@@ -1298,51 +1342,23 @@ def run_once(
         target_repo = f"{config.target_owner}/{config.target_repo}"
         prompt_base_sha = candidate.base_sha or base_sha or "unknown"
         prompt_head_branch = candidate.head_branch or head_branch or "candidate"
+        pinned_head_sha = [candidate.head_sha]
+        pinned_head_holder = pinned_head_sha
 
-        def make_prompts(
-            planner_output: Mapping[str, object],
-            previous_iteration: ReviewIteration | None = None,
-            candidate: Candidate = candidate,
-            target_repo: str = target_repo,
-            prompt_base_sha: str = prompt_base_sha,
-            prompt_head_branch: str = prompt_head_branch,
-        ) -> tuple[str, str, Callable[[str], str]]:
-            def phase_b_prompt(
-                committed_diff: str,
-                candidate: Candidate = candidate,
-                target_repo: str = target_repo,
-                prompt_base_sha: str = prompt_base_sha,
-                prompt_head_branch: str = prompt_head_branch,
-                planner_output: Mapping[str, object] = planner_output,
-            ) -> str:
-                return render_reviewer_phase_b_prompt(
-                    candidate,
-                    target_repo=target_repo,
-                    base_sha=prompt_base_sha,
-                    head_branch=prompt_head_branch,
-                    planner_output=planner_output,
-                    committed_diff=committed_diff,
-                )
+        make_prompts = partial(
+            _make_role_prompts,
+            candidate=candidate,
+            target_repo=target_repo,
+            base_sha=prompt_base_sha,
+            head_branch=prompt_head_branch,
+            pinned_head_holder=pinned_head_holder,
+        )
 
-            return (
-                render_implementer_prompt(
-                    candidate,
-                    target_repo=target_repo,
-                    base_sha=prompt_base_sha,
-                    head_branch=prompt_head_branch,
-                    planner_output=planner_output,
-                    previous_iteration=previous_iteration,
-                ),
-                render_reviewer_prompt(
-                    candidate,
-                    target_repo=target_repo,
-                    base_sha=prompt_base_sha,
-                    head_branch=prompt_head_branch,
-                    planner_output=planner_output,
-                    previous_iteration=previous_iteration,
-                ),
-                phase_b_prompt,
-            )
+        def observe_head(
+            value: str,
+            holder: list[str | None] = pinned_head_holder,
+        ) -> None:
+            holder[0] = value
 
         def session_created(
             evidence: SessionAttempt,
@@ -1387,6 +1403,7 @@ def run_once(
                 else None,
                 candidate=candidate,
                 head_sha_resolver=head_sha_resolver,
+                head_sha_observer=observe_head,
                 branch_paths_resolver=(
                     live_client.changed_paths_between
                     if config.mode is Mode.LIVE and live_client is not None
@@ -1397,22 +1414,17 @@ def run_once(
             )
         except SessionCeilingError as exc:
             latest = state_store.resume(candidate.candidate_id) or candidate
-            ceiling_event = event_with_ceiling(
-                event_from_candidate(latest, run_id=run_id),
-                exc,
-            )
-            terminal = latest.model_copy(
+            deferred = latest.model_copy(
                 update={
-                    "state": CandidateState.TERMINAL,
-                    "reason": ceiling_event.reason,
+                    "state": CandidateState.DEFERRED,
+                    "reason": ReasonCode.SESSION_CEILING,
                     "reason_detail": str(exc),
                     "auto_merge_eligible": False,
                 }
             )
-            state_store.append(terminal)
-            reviewed.append(terminal)
-            ceiling_error = exc
-            break
+            state_store.append(deferred)
+            reviewed.append(deferred)
+            continue
         except (
             PlannerOutputError,
             SessionDedupeError,
@@ -1483,18 +1495,9 @@ def run_once(
                 "reviewer_session_id": result.reviewer.snapshot.session_id,
                 "iterations": result.review.iterations if result.review is not None else 0,
                 "planner_criteria": planner_criteria_ids,
+                "head_sha": pinned_head_sha[0] or candidate.head_sha,
             }
         )
-        if (
-            config.mode is Mode.LIVE
-            and live_client is not None
-            and candidate.head_branch is not None
-        ):
-            resolved_head = live_client.branch_sha(candidate.head_branch)
-            if resolved_head is not None:
-                reviewed_candidate = reviewed_candidate.model_copy(
-                    update={"head_sha": resolved_head}
-                )
         if isinstance(reviewer_output, Mapping):
             raw_tests = reviewer_output.get("tests")
             tests = raw_tests if isinstance(raw_tests, list) else []
@@ -1577,6 +1580,8 @@ def run_once(
         if github_transport is None or head_branch is None:
             raise RunAbort("LIVE publication transport is unavailable")
         try:
+            for candidate in reviewed:
+                state_store.append(candidate)
             reviewed = _publish_live(
                 reviewed,
                 config=config,
@@ -1655,8 +1660,6 @@ def run_once(
     )
     if config.mode is Mode.LIVE and state_store.marker_search_failed:
         raise RunAbort("capability_unavailable: marker_search_failed")
-    if ceiling_error is not None:
-        raise RunAbort(str(ceiling_error))
     return run_id, produced
 
 

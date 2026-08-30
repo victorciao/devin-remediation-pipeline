@@ -185,8 +185,6 @@ def render_issue_body(
     if candidate.lane is Lane.CODEQL:
         if SECURITY_ISSUE_MODE != "generic_tracking":
             raise ArtifactValidationError("unsupported security issue mode")
-        if template:
-            raise ArtifactValidationError("CodeQL issue rendering does not consume a template")
         values = {
             "### SUMMARY (no exploit detail)": generated_summary,
             "### SCOPE (files or modules only)": candidate.file_path or "<module>",
@@ -194,12 +192,10 @@ def render_issue_body(
             "### VERIFICATION": verification,
             "### REFERENCES (rule ID only)": candidate.rule_id or "<rule>",
         }
-        return (
-            "\n".join(
-                [marker, *sum(([heading, value, ""] for heading, value in values.items()), [])]
-            ).rstrip()
-            + "\n"
-        )
+        body = template.rstrip()
+        for heading, value in values.items():
+            body = body.replace(f"{heading}\n", f"{heading}\n{value}\n", 1)
+        return f"{marker}\n{body}\n"
 
     if candidate.lane is Lane.DEPRECATIONS:
         body = template
@@ -290,6 +286,11 @@ def validate_pr_body(body: str) -> None:
             value = values[-1] if values else ""
             if not value or value.lower() in {"n/a", "none", "null"}:
                 raise ArtifactValidationError(f"local PR body lacks value for {field}")
+            if (
+                field == "diff_range"
+                and re.fullmatch(r"[0-9a-f]{7,40}\.\.[0-9a-f]{7,40}", value) is None
+            ):
+                raise ArtifactValidationError("local PR body has an invalid diff_range")
 
 
 def validate_issue_body(body: str, candidate: Candidate) -> None:
