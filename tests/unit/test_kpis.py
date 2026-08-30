@@ -392,6 +392,8 @@ def test_role_loop_rates_are_denominated_over_candidates_that_entered_the_loop(
             action=Action.OPEN_PR,
             test_added=True,
             red_baseline=VALID_RED_BASELINE,
+            terminal_outcome=CandidateState.CONVERGED,
+            diff_reviewed=True,
             **role_loop("codeql-1"),
         ),
         *(
@@ -404,8 +406,16 @@ def test_role_loop_rates_are_denominated_over_candidates_that_entered_the_loop(
             for index in range(2, 51)
         ),
     ]
+    candidates = [
+        codeql_candidate(
+            candidate_id="codeql-1",
+            planner_criteria=["AC-1"],
+            reviewer_criterion_ids=["AC-1"],
+        ),
+        *(codeql_candidate(candidate_id=f"codeql-{index}") for index in range(2, 51)),
+    ]
 
-    rollup = compute_kpis([], events, {}, simulate_config)
+    rollup = compute_kpis(candidates, events, {}, simulate_config)
 
     assert rollup["test_inclusion_rate"] == 1.0
     assert rollup["criterion_coverage_rate"] == 1.0
@@ -467,15 +477,6 @@ def test_an_unknown_role_loop_rate_renders_as_na_not_zero(
     assert "- **Verification Pass Rate:** n/a" in markdown
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "plan-vs-code: §11 requires an unmeasurable rate to read `n/a`, and the role-loop "
-        "denominator makes criterion coverage unmeasurable when no candidate entered the loop. "
-        "`_criterion_coverage` still returns 0.0 for an empty denominator, so a run that never "
-        "reached a planner reports zero criterion coverage as though the loop had failed."
-    ),
-)
 def test_criterion_coverage_is_unknown_when_no_candidate_entered_the_loop(
     simulate_config: PipelineConfig,
 ) -> None:
@@ -607,6 +608,8 @@ def test_dispatch_counts_derive_from_lifecycle_state_not_routing(
             "codeql-1",
             state=CandidateState.DEFERRED,
             reason=ReasonCode.CAPABILITY_UNAVAILABLE,
+            pr_number=1,
+            pr_url="https://example.invalid/pr/1",
         ),
         dispatched_pr_candidate(
             "codeql-2",
@@ -654,9 +657,19 @@ def test_every_post_dispatch_state_counts_as_dispatched(
     state: CandidateState,
     simulate_config: PipelineConfig,
 ) -> None:
-    """§11 — dispatch is counted from the point the run committed to the artifact."""
+    """§11 — dispatch is counted from the artifact the run holds, in any live state."""
     rollup = compute_kpis(
-        [dispatched_pr_candidate("codeql-1", state=state)], [], {}, simulate_config
+        [
+            dispatched_pr_candidate(
+                "codeql-1",
+                state=state,
+                pr_number=1,
+                pr_url="https://example.invalid/pr/1",
+            )
+        ],
+        [],
+        {},
+        simulate_config,
     )
 
     assert rollup["dispatched_pr"] == 1
@@ -671,11 +684,11 @@ def test_every_post_dispatch_state_counts_as_dispatched(
         CandidateState.DEFERRED,
     ],
 )
-def test_no_pre_dispatch_state_counts_as_dispatched(
+def test_a_candidate_holding_no_artifact_url_is_never_dispatched(
     state: CandidateState,
     simulate_config: PipelineConfig,
 ) -> None:
-    """§11 — nothing before `dispatching` produced an artifact, whatever the routing says."""
+    """§11 — the artifact URL is the evidence; routing and state alone are not."""
     rollup = compute_kpis(
         [dispatched_pr_candidate("codeql-1", state=state)], [], {}, simulate_config
     )
@@ -887,3 +900,123 @@ def test_the_rollup_reports_incomplete_diff_reviews_separately(
 
     assert rollup["diff_review_incomplete_rate"] == 0.5
     assert rollup["disagreement_unresolved_rate"] == 0.5
+
+
+def test_a_terminal_candidate_without_a_role_loop_is_not_an_escalation(
+    simulate_config: PipelineConfig,
+) -> None:
+    """§11 — escalation means a loop ran and failed; a gated candidate has no loop to hand over.
+
+    A terminal row is reached by paths that never created a session (a stale skip, a
+    capability deferral promoted to terminal), and counting those as escalations
+    overstates how much of the run a human must read.
+    """
+    candidates = [
+        codeql_candidate(
+            candidate_id="codeql-1",
+            state=CandidateState.TERMINAL,
+            reason=ReasonCode.STALE_SKIP,
+        ),
+        failed_loop_candidate(),
+    ]
+
+    rollup = compute_kpis(candidates, [], {}, simulate_config)
+
+    assert rollup["escalated"] == 1
+
+
+def test_deferral_counts_come_from_durable_state_not_the_routing_action(
+    simulate_config: PipelineConfig,
+) -> None:
+    """§11 — a candidate routed for dispatch that ended `deferred` is a deferral."""
+    candidates = [
+        dispatched_pr_candidate(
+            "codeql-1",
+            state=CandidateState.DEFERRED,
+            reason=ReasonCode.CAPABILITY_UNAVAILABLE,
+        ),
+        codeql_candidate(
+            candidate_id="codeql-2",
+            action=Action.DEFERRED,
+            state=CandidateState.DEFERRED,
+            reason=ReasonCode.BUDGET_OVERFLOW,
+        ),
+        dispatched_pr_candidate(
+            "codeql-3",
+            state=CandidateState.PR_CREATED,
+            pr_number=3,
+            pr_url="https://example.invalid/pr/3",
+        ),
+    ]
+
+    rollup = compute_kpis(candidates, [], {}, simulate_config)
+
+    assert rollup["deferred"] == 2
+    assert rollup["deferred_by_reason"] == {
+        ReasonCode.CAPABILITY_UNAVAILABLE.value: 1,
+        ReasonCode.BUDGET_OVERFLOW.value: 1,
+    }
+
+
+def test_the_rollup_renders_the_deferral_reasons_it_counted(
+    simulate_config: PipelineConfig,
+) -> None:
+    """§11 — a deferred run has to say why, in the report a human actually reads."""
+    deferred = codeql_candidate(
+        candidate_id="codeql-1",
+        state=CandidateState.DEFERRED,
+        reason=ReasonCode.ARTIFACT_ORPHANED,
+    )
+
+    markdown = render_kpi_report([deferred], [], {}, simulate_config)
+
+    assert f"- **{ReasonCode.ARTIFACT_ORPHANED.value}:** 1" in markdown
+
+
+def test_verification_passes_only_on_convergence_with_a_reviewed_diff(
+    simulate_config: PipelineConfig,
+) -> None:
+    """§11 — the three verification preconditions are conjunctive, not alternatives.
+
+    A converged candidate whose reviewer never read the diff, and one whose red baseline
+    was invalid, are both unverified: counting either inflates the one rate that claims
+    the pipeline's changes were checked.
+    """
+    events = [
+        event(
+            "codeql-1",
+            action=Action.OPEN_PR,
+            terminal_outcome=CandidateState.CONVERGED,
+            red_baseline=VALID_RED_BASELINE,
+            diff_reviewed=True,
+            **role_loop("codeql-1"),
+        ),
+        event(
+            "codeql-2",
+            action=Action.OPEN_PR,
+            terminal_outcome=CandidateState.CONVERGED,
+            red_baseline=VALID_RED_BASELINE,
+            diff_reviewed=False,
+            **role_loop("codeql-2"),
+        ),
+        event(
+            "codeql-3",
+            action=Action.HUMAN_REVIEW,
+            terminal_outcome=CandidateState.TERMINAL,
+            red_baseline=VALID_RED_BASELINE,
+            diff_reviewed=True,
+            **role_loop("codeql-3"),
+        ),
+        event(
+            "codeql-4",
+            action=Action.OPEN_PR,
+            terminal_outcome=CandidateState.CONVERGED,
+            red_baseline=RedBaselineResult(status=BaselineStatus.INVALID_RED_BASELINE),
+            diff_reviewed=True,
+            **role_loop("codeql-4"),
+        ),
+    ]
+
+    rollup = compute_kpis([], events, {}, simulate_config)
+
+    assert rollup["verification_pass_rate"] == pytest.approx(0.25)

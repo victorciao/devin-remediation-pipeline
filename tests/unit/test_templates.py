@@ -10,6 +10,7 @@ import pytest
 from pipeline.config import Mode, PipelineConfig
 from pipeline.schemas import Candidate, Lane, Tier
 from pipeline.templates.render import (
+    ArtifactValidationError,
     candidate_marker,
     compare_template_files,
     render_degraded_comment_body,
@@ -95,12 +96,26 @@ def pr_body(
 
 
 def issue_template(lane: Lane) -> str:
+    """The template text the run passes for one lane.
+
+    §8/§14 — a CodeQL security body is generated from the candidate alone so no upstream
+    template can leak vulnerability detail into it, so its template text is empty.
+    """
+    if lane is Lane.CODEQL:
+        return ""
     names = {
-        Lane.CODEQL: "issues/security_tracking.md",
         Lane.SKIPPED_TESTS: "issues/bug_report.yml",
         Lane.DEPRECATIONS: "issues/sip.md",
     }
     return (TEMPLATES_DIR / names[lane]).read_text(encoding="utf-8")
+
+
+def test_a_codeql_issue_refuses_to_consume_an_upstream_template() -> None:
+    """§8 — the security body is generated; a supplied template is a leak risk, not input."""
+    supplied = (TEMPLATES_DIR / "issues/security_tracking.md").read_text(encoding="utf-8")
+
+    with pytest.raises(ArtifactValidationError, match="does not consume a template"):
+        render_issue_body(supplied, codeql_candidate(), generated_summary="s")
 
 
 # -- PR body -----------------------------------------------------------------------------
@@ -164,6 +179,78 @@ def test_pr_body_keeps_automation_metadata_last() -> None:
 
     validate_pr_body(body)
     assert body.index("### AUTOMATION METADATA") > body.index("### ADDITIONAL INFORMATION")
+
+
+LOCAL_EVIDENCE = {
+    "mode": "live",
+    "candidate_id": "codeql-1",
+    "ci_evidence_mode": "local",
+    "implementer_commands_run": ["pytest tests/unit_tests/mcp_service/test_add_chart.py"],
+    "reviewer_pre_fix_failure": "AssertionError: index 1000000 out of range",
+    "reviewer_post_fix_result": "1 passed",
+    "diff_range": f"{'1' * 40}..{'2' * 40}",
+}
+
+
+def local_evidence_body(**overrides: object) -> str:
+    """A LIVE PR body whose CI evidence is self-reported by the automation (§10.1)."""
+    return render_pr_body(
+        pr_template_text(),
+        codeql_candidate(tier=Tier.HIGH, score=128.0),
+        PLANNER,
+        REVIEWER,
+        automation_metadata={**LOCAL_EVIDENCE, **overrides},
+        issue_number=7,
+    )
+
+
+def test_local_ci_evidence_is_labelled_and_carries_its_own_evidence() -> None:
+    """§10.1 — under `local` evidence the body states who produced it and what it ran."""
+    body = local_evidence_body()
+
+    validate_pr_body(body)
+    assert "- **evidence_label**: self-reported by automation" in body
+    assert "pytest tests/unit_tests/mcp_service/test_add_chart.py" in body
+    assert "- **reviewer_pre_fix_failure**: AssertionError: index 1000000 out of range" in body
+    assert "- **reviewer_post_fix_result**: 1 passed" in body
+    assert f"- **diff_range**: {'1' * 40}..{'2' * 40}" in body
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "implementer_commands_run",
+        "reviewer_pre_fix_failure",
+        "reviewer_post_fix_result",
+        "diff_range",
+    ],
+)
+@pytest.mark.parametrize("value", ["", "n/a", "None", "null"])
+def test_local_ci_evidence_without_a_value_is_rejected(field: str, value: str) -> None:
+    """§10.1 — a `local` body claiming evidence it does not carry must never be published.
+
+    A reviewer reading `reviewer_pre_fix_failure: n/a` cannot tell an unverified change
+    from a verified one, which is the whole purpose of the self-reported label.
+    """
+    body = local_evidence_body(**{field: value})
+
+    with pytest.raises(ArtifactValidationError, match=field):
+        validate_pr_body(body)
+
+
+def test_github_ci_evidence_needs_no_self_reported_block() -> None:
+    """§10.1 — the evidence block is required only where CI did not observe the result."""
+    body = render_pr_body(
+        pr_template_text(),
+        codeql_candidate(tier=Tier.HIGH, score=128.0),
+        PLANNER,
+        REVIEWER,
+        automation_metadata={"mode": "live", "ci_evidence_mode": "github"},
+        issue_number=7,
+    )
+
+    validate_pr_body(body)
+    assert "evidence_label" not in body
 
 
 def test_crosslink_is_rendered_into_the_pr_body() -> None:

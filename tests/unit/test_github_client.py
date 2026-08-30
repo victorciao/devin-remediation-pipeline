@@ -112,12 +112,13 @@ def wait(
     is_fork: bool = False,
     ci_mode: CiEvidenceMode | None = None,
     on_mode_transition: Callable[[CiModeTransition], None] | None = None,
+    client: FakeGitHubTransport | None = None,
 ) -> CiWaitResult:
     """Wait for required contexts against an in-memory status mapping."""
     timer = clock or Clock()
     return wait_for_required_contexts(
         config,
-        client=FakeGitHubTransport(),
+        client=client or FakeGitHubTransport(),
         elapsed_s=elapsed_s,
         reported_contexts=statuses,
         poll=poll,
@@ -316,7 +317,7 @@ def test_check_run_status_is_used_when_no_conclusion_exists() -> None:
     assert result.detail == "awaiting_workflow_approval"
 
 
-def test_fork_pr_reporting_no_context_is_awaiting_approval_after_one_interval() -> None:
+def test_a_fork_with_a_workflow_run_but_no_context_is_awaiting_approval() -> None:
     """§10.1 (line 601) — the fork gate reports *no* context, and that is not silence-as-green."""
     clock = Clock()
 
@@ -325,11 +326,35 @@ def test_fork_pr_reporting_no_context_is_awaiting_approval_after_one_interval() 
         statuses={},
         clock=clock,
         is_fork=True,
+        client=FakeGitHubTransport(completed_workflow_runs=True),
     )
 
     assert clock.slept == [15.0]
     assert result.reason is ReasonCode.CI_EVIDENCE_UNAVAILABLE
     assert result.detail == "awaiting_workflow_approval"
+
+
+def test_a_fork_with_no_workflow_run_at_all_reports_absent_workflows() -> None:
+    """§10.1 — a repository that never started a run is not a repository awaiting approval.
+
+    Both leave CI evidence unavailable, but only one is unblocked by a human clicking
+    approve; conflating them sent a LIVE run looking for an approval gate that a fork
+    without workflows does not have.
+    """
+    clock = Clock()
+
+    result = wait(
+        wait_config(ci_wait_timeout_s=600),
+        statuses={},
+        clock=clock,
+        is_fork=True,
+        client=FakeGitHubTransport(completed_workflow_runs=False),
+    )
+
+    assert clock.slept == [15.0]
+    assert result.reason is ReasonCode.CI_WORKFLOWS_ABSENT
+    assert result.detail == "ci_workflows_absent"
+    assert result.auto_merge_eligible is False
 
 
 def test_non_fork_pr_reporting_no_context_polls_to_the_deadline() -> None:

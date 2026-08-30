@@ -171,6 +171,105 @@ def test_an_incomplete_diff_review_outranks_an_unresolved_major() -> None:
     assert result.reason is ReasonCode.DIFF_REVIEW_INCOMPLETE
 
 
+def test_a_missing_role_commit_outranks_an_incomplete_diff_review() -> None:
+    """§9.2 — with no role commit on the branch there is no diff for anyone to have read.
+
+    Reporting `diff_review_incomplete` here would send a human looking for a review that
+    could not have existed, when the branch itself never received the work.
+    """
+    missing = iteration(
+        diff_reviewed=False,
+        findings=(
+            ReviewFinding(
+                FindingSeverity.BLOCKING,
+                None,
+                "no production commit on devin/codeql-1",
+                reason=ReasonCode.ROLE_COMMIT_MISSING,
+            ),
+        ),
+    )
+
+    result = run_review_loop(PipelineConfig(), missing, lambda _ordinal: missing)
+    applied = apply_review_result(eligible_candidate(), result)
+
+    assert result.reason is ReasonCode.ROLE_COMMIT_MISSING
+    assert applied.state is CandidateState.TERMINAL
+    assert applied.auto_merge_eligible is False
+
+
+def test_an_implementer_test_edit_outranks_a_missing_role_commit() -> None:
+    """§9.2 — the test-authorship violation is the most severe structural failure."""
+    both = iteration(
+        diff_reviewed=False,
+        findings=(
+            ReviewFinding(
+                FindingSeverity.BLOCKING,
+                None,
+                "no test commit on devin/codeql-1",
+                reason=ReasonCode.ROLE_COMMIT_MISSING,
+            ),
+            ReviewFinding(
+                FindingSeverity.BLOCKING,
+                None,
+                "implementer edited tests/x.py",
+                reason=ReasonCode.IMPLEMENTER_TEST_EDIT,
+            ),
+        ),
+    )
+
+    result = run_review_loop(PipelineConfig(), both, lambda _ordinal: both)
+
+    assert result.reason is ReasonCode.IMPLEMENTER_TEST_EDIT
+
+
+def test_a_detected_disagreement_is_named_even_before_a_diff_review() -> None:
+    """§9.2 — a gate that positively detected a disagreement reports what it detected.
+
+    The empty-`committed_diff` and `base_sha == head_sha` gates raise a
+    `disagreement_unresolved` finding without needing a diff review; that detection is
+    more specific than the absence of a review and must not be relabelled.
+    """
+    detected = iteration(
+        diff_reviewed=False,
+        findings=(
+            ReviewFinding(
+                FindingSeverity.BLOCKING,
+                None,
+                "implementer reported criteria addressed with an empty committed diff",
+                reason=ReasonCode.DISAGREEMENT_UNRESOLVED,
+            ),
+        ),
+    )
+
+    result = run_review_loop(PipelineConfig(), detected, lambda _ordinal: detected)
+
+    assert result.reason is ReasonCode.DISAGREEMENT_UNRESOLVED
+
+
+def test_a_finding_carries_the_file_and_line_it_was_raised_against() -> None:
+    """§12.1 — a rerun prompt can only cite a finding's location if the loop kept it."""
+    normalized = review_iteration_from_payload(
+        {"criteria": []},
+        {
+            "tests": [],
+            "red_baseline": {"status": "valid"},
+            "green_result": {"passed": True},
+            "findings": [
+                {
+                    "severity": "blocking",
+                    "criterion_id": None,
+                    "note": "off-by-one",
+                    "file": "superset/x.py",
+                    "line": 42,
+                }
+            ],
+        },
+    )
+
+    assert normalized.findings[0].file == "superset/x.py"
+    assert normalized.findings[0].line == "42"
+
+
 def test_a_reviewed_unresolved_major_still_reports_a_disagreement() -> None:
     """§12.1 — with `diff_reviewed` true the reviewer really did disagree."""
     reviewed_major = iteration(

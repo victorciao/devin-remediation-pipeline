@@ -10,7 +10,7 @@ import pytest
 from pipeline.dedupe import can_link_drift, find_drift_match, weak_key
 from pipeline.lanes.codeql import candidate_id, position_digest
 from pipeline.schemas import Candidate, CandidateState, Lane
-from pipeline.state import CandidateStateStore, repository_marker_search
+from pipeline.state import CandidateStateStore, MarkerArtifact, github_marker_search
 from pipeline.templates.render import candidate_marker
 from tests.factories import TARGET_REPO, codeql_candidate, lane2_candidate
 
@@ -241,19 +241,28 @@ def test_existing_artifact_blocks_a_duplicate_write(tmp_path: Path) -> None:
 
 
 def test_marker_search_finds_an_existing_target_artifact(tmp_path: Path) -> None:
-    """§14.1 — the pre-write check also searches the target repository for the marker."""
-    repository = tmp_path / "superset"
-    (repository / "docs").mkdir(parents=True)
-    (repository / "docs" / "note.md").write_text(
-        candidate_marker("codeql-5"),
-        encoding="utf-8",
-    )
+    """§14.1 — the pre-write check searches the target repository's artifacts for the marker."""
+    published = {
+        candidate_marker("codeql-5"): {
+            "number": 5,
+            "html_url": "https://github.test/victorciao/superset/issues/5",
+        }
+    }
+
+    def search(marker: str) -> object:
+        item = published.get(marker)
+        return {"total_count": 1, "items": [item]} if item else {"total_count": 0, "items": []}
+
     store = CandidateStateStore(
         tmp_path / "candidates.jsonl",
-        marker_search=repository_marker_search(repository),
+        marker_search=github_marker_search(search),
     )
 
-    assert store.marker_exists("codeql-5") is True
+    assert store.marker_artifact("codeql-5") == MarkerArtifact(
+        number=5,
+        url="https://github.test/victorciao/superset/issues/5",
+        is_pull_request=False,
+    )
     assert store.marker_exists("codeql-6") is False
     assert store.append_if_new_artifact(codeql_candidate(candidate_id="codeql-5")) is False
 

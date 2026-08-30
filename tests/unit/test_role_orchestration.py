@@ -14,12 +14,19 @@ import pytest
 from pydantic import SecretStr
 
 from pipeline.config import Mode, PipelineConfig
+from pipeline.prompts import render_implementer_prompt, render_reviewer_prompt
+from pipeline.review_loop import ReviewIteration
 from pipeline.schemas import Candidate, ReasonCode
 from pipeline.session_client import (
+    BranchNotAdvancedError,
     PlannerOutputError,
     RuntimeOrchestrator,
+    SessionAttempt,
+    SessionBlockedError,
+    SessionCeilingError,
     SessionClient,
     SessionMessageError,
+    SessionRole,
 )
 from tests.factories import codeql_candidate
 
@@ -74,13 +81,16 @@ def implementer_output() -> Mapping[str, object]:
 
 
 def reviewer_output(
-    *, diff_reviewed: bool, red_baseline_valid: bool = True
+    *,
+    diff_reviewed: bool,
+    red_baseline_valid: bool = True,
+    reviewed_head_sha: str = HEAD_SHA,
 ) -> Mapping[str, object]:
     """A reviewer payload whose `diff_reviewed` evidence is present only after phase B."""
     review: Mapping[str, object] | bool = (
         {
             "base_sha": BASE_SHA,
-            "head_sha": HEAD_SHA,
+            "head_sha": reviewed_head_sha,
             "files_read": [PRODUCTION_PATH],
         }
         if diff_reviewed
@@ -127,7 +137,14 @@ class ScriptedDevinTransport:
         invalid_baseline_attempts: frozenset[int] = frozenset(),
         message_detail: str = "queued",
         acknowledges_message: bool = True,
+        reviewed_head_sha: str = HEAD_SHA,
+        reviews_before_message: bool = False,
+        status: str = "finished",
     ) -> None:
+        self.reviewed_head_sha = reviewed_head_sha
+        self.reviews_before_message = reviews_before_message
+        self.status = status
+        self.prompts: list[tuple[str, int, str]] = []
         self.reviews_after_message = reviews_after_message
         self.message_detail = message_detail
         self.acknowledges_message = acknowledges_message
@@ -157,6 +174,11 @@ class ScriptedDevinTransport:
         role = str(tags[2])
         attempt = int(str(tags[3]).removeprefix("attempt:"))
         self.created.append((role, attempt))
+        prompt = payload["prompt"]
+        assert isinstance(prompt, str)
+        self.prompts.append((role, attempt, prompt))
+        if self.reviews_before_message and role == "reviewer":
+            self._reviewed.add(f"{role}-{attempt}")
         return {"session_id": f"{role}-{attempt}", "is_new_session": True}
 
     def get(self, path: str) -> Mapping[str, object]:
@@ -174,6 +196,7 @@ class ScriptedDevinTransport:
             reviewed = reviewer_output(
                 diff_reviewed=session_id in self._reviewed,
                 red_baseline_valid=attempt not in self.invalid_baseline_attempts,
+                reviewed_head_sha=self.reviewed_head_sha,
             )
             output = (
                 {**reviewed, "phase_b_acknowledged": True}
@@ -181,7 +204,7 @@ class ScriptedDevinTransport:
                 else reviewed
             )
         return {
-            "status_enum": "finished",
+            "status_enum": self.status,
             "acu_used": 1.0,
             "session_id": session_id,
             "structured_output": output,
@@ -205,6 +228,7 @@ def phase_b_prompt(committed_diff: str) -> str:
 
 def prompt_factory(
     planner_output: Mapping[str, object],
+    previous_iteration: ReviewIteration | None = None,
 ) -> tuple[str, str, Callable[[str], str]]:
     """Stand in for `__main__`'s renderer wiring; the planner output must arrive here."""
     assert planner_output == PLANNER_OUTPUT
@@ -215,10 +239,37 @@ def prompt_factory(
     )
 
 
+def rendering_prompt_factory(
+    planner_output: Mapping[str, object],
+    previous_iteration: ReviewIteration | None = None,
+) -> tuple[str, str, Callable[[str], str]]:
+    """`__main__`'s real renderer wiring, so a rerun prompt is the text a role receives."""
+    return (
+        render_implementer_prompt(
+            candidate(),
+            target_repo=TARGET_REPO,
+            base_sha=BASE_SHA,
+            head_branch=HEAD_BRANCH,
+            planner_output=planner_output,
+            previous_iteration=previous_iteration,
+        ),
+        render_reviewer_prompt(
+            candidate(),
+            target_repo=TARGET_REPO,
+            base_sha=BASE_SHA,
+            head_branch=HEAD_BRANCH,
+            planner_output=planner_output,
+            previous_iteration=previous_iteration,
+        ),
+        phase_b_prompt,
+    )
+
+
 def orchestrator(
     transport: ScriptedDevinTransport | None,
     *,
     mode: Mode = Mode.LIVE,
+    budget: Mapping[str, Any] | None = None,
     **overrides: Any,  # noqa: ANN401
 ) -> RuntimeOrchestrator:
     """Build an orchestrator over a scripted transport with no real clock."""
@@ -241,6 +292,7 @@ def orchestrator(
             transport=transport,
             clock=clock,
             sleeper=lambda _seconds: None,
+            **(budget or {}),
         )
     )
 
@@ -250,15 +302,18 @@ def run(
     *,
     mode: Mode = Mode.LIVE,
     factory: Any = prompt_factory,  # noqa: ANN401
+    budget: Mapping[str, Any] | None = None,
+    **overrides: Any,  # noqa: ANN401
 ) -> Any:  # noqa: ANN401
     """Run one candidate through planner, the concurrent join and the review loop."""
-    return orchestrator(transport, mode=mode).run_candidate(
+    return orchestrator(transport, mode=mode, budget=budget).run_candidate(
         "codeql-0",
         "PLANNER PROMPT",
         "IMPLEMENTER PLACEHOLDER",
         "REVIEWER PLACEHOLDER",
         candidate=candidate(),
         prompt_factory=factory,
+        **overrides,
     )
 
 
@@ -427,6 +482,7 @@ def test_an_unusable_planner_output_never_reaches_the_other_roles() -> None:
 
     def empty_criteria(
         _planner_output: Mapping[str, object],
+        _previous_iteration: ReviewIteration | None = None,
     ) -> tuple[str, str, Callable[[str], str]]:
         raise AssertionError("prompts may not be rendered from unusable planner output")
 
@@ -444,3 +500,214 @@ def test_an_unusable_planner_output_never_reaches_the_other_roles() -> None:
 
     assert [role for role, _ in transport.created] == ["planner"]
     assert transport.messaged == []
+
+
+# -- the candidate-aware diff-review predicate -----------------------------------------
+
+
+def test_a_well_formed_review_of_the_wrong_head_does_not_suppress_phase_b() -> None:
+    """§9.3 — a review must identify the revision under review, not merely be structural.
+
+    A reviewer reporting a syntactically complete `diff_reviewed` for a stale head has read
+    a different tree than the one about to be published; accepting it would let phase B be
+    skipped on evidence that does not describe the candidate.
+    """
+    transport = ScriptedDevinTransport(
+        reviews_before_message=True,
+        reviewed_head_sha="c" * 40,
+        reviews_after_message=False,
+    )
+
+    result = run(transport)
+
+    assert [session_id for session_id, _ in transport.messaged] == ["reviewer-1"]
+    assert result.review is not None
+    assert result.review.converged is False
+    assert result.review.reason is ReasonCode.DIFF_REVIEW_INCOMPLETE
+
+
+# -- server-side branch verification ---------------------------------------------------
+
+
+def test_a_branch_still_at_its_base_sha_is_not_advanced() -> None:
+    """§9.3 — role sessions reporting success on an unmoved branch committed nothing."""
+    transport = ScriptedDevinTransport()
+
+    with pytest.raises(BranchNotAdvancedError, match=BASE_SHA):
+        run(transport, head_sha_resolver=lambda: BASE_SHA)
+
+
+def test_the_server_observed_head_sha_replaces_the_reported_one() -> None:
+    """§9.3 — the reviewed head is re-resolved from the server every iteration."""
+    transport = ScriptedDevinTransport(reviewed_head_sha="d" * 40)
+
+    result = run(transport, head_sha_resolver=lambda: "d" * 40)
+
+    assert result.review is not None
+    assert result.review.converged is True
+
+
+@pytest.mark.parametrize(
+    "branch_paths",
+    [
+        ("tests/unit_tests/db_engine_specs/test_base.py",),
+        ("superset/db_engine_specs/base.py",),
+    ],
+)
+def test_a_branch_missing_one_role_commit_is_a_role_commit_missing_finding(
+    branch_paths: tuple[str, ...],
+) -> None:
+    """§9.3 — both roles must have committed to the shared branch, as the server sees it.
+
+    Structured output claiming a commit is self-reported; the changed paths between
+    `base_sha..head_sha` are the only evidence that the commit exists.
+    """
+    transport = ScriptedDevinTransport()
+
+    result = run(transport, branch_paths_resolver=lambda _base, _head: branch_paths)
+
+    assert result.review is not None
+    assert result.review.converged is False
+    assert result.review.reason is ReasonCode.ROLE_COMMIT_MISSING
+    assert result.review.needs_human_review is True
+
+
+def test_a_branch_carrying_both_role_commits_raises_no_finding() -> None:
+    """§9.3 — verification passes when the branch carries a production and a test path."""
+    transport = ScriptedDevinTransport()
+
+    result = run(
+        transport,
+        branch_paths_resolver=lambda _base, _head: (
+            PRODUCTION_PATH,
+            "tests/unit_tests/db_engine_specs/test_base.py",
+        ),
+    )
+
+    assert result.review is not None
+    assert result.review.converged is True
+    assert result.review.reason is None
+
+
+# -- rerun prompt context --------------------------------------------------------------
+
+
+def test_a_rerun_prompt_carries_the_previous_iterations_failure() -> None:
+    """§9.3 — a retry that repeats the original prompt re-rolls the same failed attempt.
+
+    Without the prior findings, the failing test and the head SHA the previous attempt was
+    observed at, the second attempt is a fresh dice roll rather than a correction.
+    """
+    transport = ScriptedDevinTransport(invalid_baseline_attempts=frozenset({1}))
+
+    run(transport, factory=rendering_prompt_factory)
+
+    first = [prompt for role, attempt, prompt in transport.prompts if role == "implementer"][0]
+    rerun = [prompt for role, attempt, prompt in transport.prompts if role == "implementer"][1]
+    assert "PREVIOUS ITERATION FAILURE" not in first
+    assert "PREVIOUS ITERATION FAILURE" in rerun
+    assert NODEID in rerun
+    assert HEAD_SHA in rerun
+    reviewer_rerun = [prompt for role, _, prompt in transport.prompts if role == "reviewer"][1]
+    assert "PREVIOUS ITERATION FAILURE" in reviewer_rerun
+
+
+# -- session evidence is persisted as sessions are created -----------------------------
+
+
+def test_every_role_session_id_is_recorded_as_it_is_created() -> None:
+    """§13 — a candidate whose loop fails still carries the ids needed to audit it."""
+    transport = ScriptedDevinTransport()
+    seen: list[SessionAttempt] = []
+
+    run(transport, session_created=seen.append)
+
+    assert seen[0].role is SessionRole.PLANNER
+    assert {attempt.role for attempt in seen} == {
+        SessionRole.PLANNER,
+        SessionRole.IMPLEMENTER,
+        SessionRole.REVIEWER,
+    }
+    assert all(attempt.session_id for attempt in seen)
+    assert all(attempt.attempt >= 1 for attempt in seen)
+
+
+def test_a_reviewer_that_times_out_still_reports_its_three_session_ids() -> None:
+    """§13 — evidence recorded only on success loses exactly the failures worth auditing."""
+
+    class NeverFinishingReviewer(ScriptedDevinTransport):
+        def get(self, path: str) -> Mapping[str, object]:
+            response = dict(super().get(path))
+            if "reviewer" in path:
+                response["status_enum"] = "running"
+            return response
+
+    transport = NeverFinishingReviewer()
+    seen: list[SessionAttempt] = []
+
+    with pytest.raises(TimeoutError):
+        run(transport, session_created=seen.append)
+
+    assert {attempt.role for attempt in seen} == {
+        SessionRole.PLANNER,
+        SessionRole.IMPLEMENTER,
+        SessionRole.REVIEWER,
+    }
+
+
+# -- blocked sessions are never read as finished ---------------------------------------
+
+
+@pytest.mark.parametrize("status", ["blocked", "expired"])
+def test_a_blocked_or_expired_session_is_not_a_finished_session(status: str) -> None:
+    """§9.3 — a session that stopped without answering has produced no evidence at all.
+
+    Treating it as terminal accepted whatever partial structured output it happened to
+    carry, so a blocked session could converge a candidate.
+    """
+    transport = ScriptedDevinTransport(status=status)
+
+    with pytest.raises(SessionBlockedError, match=status):
+        run(transport)
+
+
+def test_only_finished_is_accepted_as_a_terminal_status() -> None:
+    """§9.3 — every non-`finished` status keeps polling until the deadline."""
+    transport = ScriptedDevinTransport(status="stopped")
+
+    with pytest.raises(TimeoutError):
+        run(transport)
+
+
+# -- the session ceiling aborts rather than deferring ----------------------------------
+
+
+def test_the_session_ceiling_aborts_the_candidate_instead_of_deferring_it() -> None:
+    """§13 — the ceiling is a run-scoped budget, so it stops the run, not one candidate.
+
+    Deferring each remaining candidate turned one exhausted budget into fifty deferrals
+    and hid the single fact worth reporting: the run ran out of sessions.
+    """
+    transport = ScriptedDevinTransport()
+
+    with pytest.raises(SessionCeilingError, match="session ceiling"):
+        run(transport, budget={"max_sessions": 2})
+
+
+def test_a_ceiling_reached_mid_candidate_leaves_the_later_roles_uncreated() -> None:
+    """§13 — nothing is dispatched after the budget is gone, not even the reviewer."""
+    transport = ScriptedDevinTransport()
+
+    with pytest.raises(SessionCeilingError):
+        run(transport, budget={"max_sessions": 1})
+
+    assert transport.created == [("planner", 1)]
+    assert transport.messaged == []
+
+
+def test_the_acu_ceiling_is_also_an_abort() -> None:
+    """§13 — an ACU budget exhausted by a running session ends the run the same way."""
+    transport = ScriptedDevinTransport()
+
+    with pytest.raises(SessionCeilingError, match="ACU"):
+        run(transport, budget={"max_total_acu": 0.5})

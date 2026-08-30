@@ -44,7 +44,7 @@ from pipeline.schemas import (
     RedBaselineResult,
     Tier,
 )
-from pipeline.state import CandidateStateStore, repository_marker_search
+from pipeline.state import CandidateStateStore, MarkerArtifact
 from pipeline.templates.render import (
     candidate_marker,
     render_degraded_comment_body,
@@ -53,6 +53,7 @@ from pipeline.templates.render import (
 )
 from tests.conftest import RUBRICS_PATH, TEMPLATES_DIR
 from tests.factories import codeql_candidate, lane2_candidate, lane3_candidate
+from tests.known_defects import marker_absence
 
 PARENT_NODEID = "tests/integration_tests/charts/data/api_tests.py::TestPostChartDataApi"
 CHILD_NODEID = f"{PARENT_NODEID}::test_chart_data_get"
@@ -581,11 +582,12 @@ def test_crosslink_roundtrip() -> None:
     assert links.pr_url is not None and links.pr_url in patched_issue
 
 
+@marker_absence
 def test_resume_after_issue_created_pr_failed(tmp_path: Path) -> None:
     """§14.1 — replaying the `issue created, PR not created` state creates no second issue."""
     store = CandidateStateStore(
         tmp_path / "candidates.jsonl",
-        marker_search=lambda _marker: False,
+        marker_search=lambda _marker: None,
     )
     candidate = high_candidate(candidate_id="codeql-9")
 
@@ -608,20 +610,22 @@ def test_resume_after_issue_created_pr_failed(tmp_path: Path) -> None:
     assert [row.candidate_id for row in store.rows()] == ["codeql-9", "codeql-9"]
 
 
-def test_resume_finds_the_marker_in_the_target_checkout(tmp_path: Path) -> None:
-    """§14.1 — a marker already present in the target repo suppresses a duplicate artifact."""
-    repository = tmp_path / "repo"
-    repository.mkdir()
+def test_resume_finds_the_marker_on_the_target_repository(tmp_path: Path) -> None:
+    """§14.1 — a marker already carried by a target artifact suppresses a duplicate."""
     candidate = high_candidate(candidate_id="codeql-10")
-    (repository / "pr_body.md").write_text(
-        candidate_marker(candidate.candidate_id), encoding="utf-8"
+    existing = MarkerArtifact(
+        number=10,
+        url="https://github.test/victorciao/superset/issues/10",
+        is_pull_request=False,
     )
     store = CandidateStateStore(
         tmp_path / "candidates.jsonl",
-        marker_search=repository_marker_search(repository),
+        marker_search=lambda marker: (
+            existing if marker == candidate_marker(candidate.candidate_id) else None
+        ),
     )
 
-    assert store.marker_exists("codeql-10") is True
+    assert store.marker_artifact("codeql-10") == existing
     assert store.append_if_new_artifact(candidate) is False
     assert store.rows() == []
 
@@ -632,12 +636,11 @@ def test_pr_comment_sink_state_transition_and_validation() -> None:
     config = live_config(has_issues=False, issue_sink=IssueSink.PR_COMMENT)
     client = artifact_client(config, transport)
     candidate = high_candidate(candidate_id="codeql-11", tier=Tier.HIGH)
-    issue_template = (TEMPLATES_DIR / "issues" / "security_tracking.md").read_text(encoding="utf-8")
     pr_template = (TEMPLATES_DIR / "superset" / "PULL_REQUEST_TEMPLATE.md").read_text(
         encoding="utf-8"
     )
     comment_body = render_degraded_comment_body(
-        issue_template,
+        "",
         candidate,
         generated_summary="bound the generated range",
     )

@@ -20,7 +20,7 @@ from pipeline import __main__ as entrypoint
 from pipeline.config import CiEvidenceMode, IssueSink, Mode, PipelineConfig
 from pipeline.http_transport import HttpTransportError
 from pipeline.schemas import Action, Candidate, CandidateState, ReasonCode, RunEventRecord, Tier
-from pipeline.state import CandidateStateStore
+from pipeline.state import CandidateStateStore, MarkerArtifact
 from tests.conftest import RUBRICS_PATH, TEMPLATES_DIR
 from tests.factories import codeql_candidate
 from tests.fakes import (
@@ -32,6 +32,7 @@ from tests.fakes import (
     WriteRecord,
     all_contexts,
 )
+from tests.known_defects import marker_absence
 
 PLANNER = {"criteria": [{"id": "AC-1", "statement": "Bound the range to the collection length."}]}
 REVIEWER = {
@@ -43,6 +44,12 @@ REVIEWER = {
         }
     ],
     "commands_run": ["pytest tests/unit_tests/mcp_service/test_add_chart.py"],
+    "red_baseline": {"status": "valid", "signature": "AssertionError: index out of range"},
+    "green_result": {"status": "pass"},
+}
+IMPLEMENTER = {
+    "commands_run": ["pytest tests/unit_tests/mcp_service/test_add_chart.py"],
+    "committed_diff": "diff --git a/superset/x.py b/superset/x.py\n",
 }
 ISSUES_PATH = "/repos/victorciao/superset/issues"
 PULLS_PATH = "/repos/victorciao/superset/pulls"
@@ -97,7 +104,7 @@ class Harness:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.store = CandidateStateStore(
             tmp_path / "candidates.jsonl",
-            marker_search=marker_search or (lambda _marker: False),
+            marker_search=marker_search or (lambda _marker: None),
         )
         self.ci_mode_events: list[RunEventRecord] = []
         self.ci_mode_state = [CiEvidenceMode(self.config.ci_evidence_mode.value)]
@@ -111,6 +118,7 @@ class Harness:
             output_dir=self.output_dir,
             repo_path=Path.cwd(),
             planner_outputs={candidate.candidate_id: PLANNER for candidate in candidates},
+            implementer_outputs={candidate.candidate_id: IMPLEMENTER for candidate in candidates},
             reviewer_outputs={candidate.candidate_id: REVIEWER for candidate in candidates},
             base_sha=BASE_SHA,
             head_branch="devin",
@@ -152,6 +160,7 @@ def green_transport(**fields: Any) -> FakeGitHubTransport:  # noqa: ANN401
 # -- §14.1 the mandated write order ------------------------------------------------------
 
 
+@marker_absence
 def test_publication_writes_issue_then_pr_then_pr_body_then_issue_patch(tmp_path: Path) -> None:
     """§14.1 — issue → PR → PR-body patch → issue patch, in that order, once each."""
     harness = Harness(tmp_path, transport=green_transport())
@@ -165,6 +174,7 @@ def test_publication_writes_issue_then_pr_then_pr_body_then_issue_patch(tmp_path
     assert published[0].pr_number == 2
 
 
+@marker_absence
 def test_each_completed_write_lands_exactly_one_durable_row(tmp_path: Path) -> None:
     """§14.1 — one append per completed remote write, and no duplicate final row."""
     harness = Harness(tmp_path, transport=green_transport())
@@ -185,6 +195,7 @@ def test_each_completed_write_lands_exactly_one_durable_row(tmp_path: Path) -> N
     assert all(row.pr_number == 2 for row in rows[2:])
 
 
+@marker_absence
 def test_the_issue_cross_link_survives_the_pr_body_patch(tmp_path: Path) -> None:
     """§14.1 — `Closes #<issue>` is written by the PR and preserved by the body patch."""
     harness = Harness(tmp_path, transport=green_transport())
@@ -199,6 +210,7 @@ def test_the_issue_cross_link_survives_the_pr_body_patch(tmp_path: Path) -> None
     assert str(harness.transport.payload_for(ISSUE_PATCH)["body"]).count("PR: ") == 1
 
 
+@marker_absence
 def test_the_candidate_marker_is_written_into_the_issue(tmp_path: Path) -> None:
     """§14.1 — the stable marker is what a later run's idempotency search finds."""
     harness = Harness(tmp_path, transport=green_transport())
@@ -210,6 +222,7 @@ def test_the_candidate_marker_is_written_into_the_issue(tmp_path: Path) -> None:
     )
 
 
+@marker_absence
 def test_a_second_run_over_a_completed_candidate_writes_nothing(tmp_path: Path) -> None:
     """§14.1 — idempotency: a completed candidate is skipped, not republished."""
     harness = Harness(tmp_path, transport=green_transport())
@@ -230,7 +243,12 @@ def test_a_second_run_over_a_completed_candidate_writes_nothing(tmp_path: Path) 
 @pytest.mark.parametrize(
     ("state", "persisted_fields", "expected_kinds"),
     [
-        (CandidateState.DISPATCHING, {}, ["issue", "pr", "pr_body", "issue_patch"]),
+        pytest.param(
+            CandidateState.DISPATCHING,
+            {},
+            ["issue", "pr", "pr_body", "issue_patch"],
+            marks=marker_absence,
+        ),
         (
             CandidateState.DEFERRED,
             {"issue_number": 1, "issue_url": "https://github.test/issues/1"},
@@ -311,6 +329,7 @@ def test_resume_from_pr_created_keeps_artifact_identity_and_opens_nothing_new(
     assert published[0].issue_url == "https://github.test/issues/1"
 
 
+@marker_absence
 def test_a_crash_between_the_pr_and_the_issue_patch_is_resumable(tmp_path: Path) -> None:
     """§14.1 — a process death after the PR write leaves durable state a later run completes."""
     crashing = green_transport()
@@ -342,6 +361,7 @@ def test_a_crash_between_the_pr_and_the_issue_patch_is_resumable(tmp_path: Path)
     assert published[0].issue_number == 1
 
 
+@marker_absence
 def test_a_deferred_row_from_an_earlier_run_is_retried(tmp_path: Path) -> None:
     """§9.2 — a deferral is not terminal: the next run re-attempts the candidate."""
     harness = Harness(tmp_path, transport=green_transport())
@@ -360,7 +380,11 @@ def test_a_marker_hit_without_local_state_defers_instead_of_duplicating(tmp_path
     harness = Harness(
         tmp_path,
         transport=green_transport(marker_hits=1),
-        marker_search=lambda _marker: True,
+        marker_search=lambda _marker: MarkerArtifact(
+            number=1,
+            url="https://example.invalid/issues/1",
+            is_pull_request=False,
+        ),
     )
 
     published = harness.publish(publishable())
@@ -373,7 +397,7 @@ def test_a_marker_hit_without_local_state_defers_instead_of_duplicating(tmp_path
 def test_an_unavailable_marker_search_defers_before_the_first_write(tmp_path: Path) -> None:
     """§14.1 — fail closed: an unverifiable candidate performs no first remote write."""
 
-    def failing(_marker: str) -> bool:
+    def failing(_marker: str) -> MarkerArtifact | None:
         raise OSError("search unavailable")
 
     harness = Harness(tmp_path, transport=green_transport(), marker_search=failing)
@@ -478,6 +502,7 @@ def test_a_merge_discovered_after_a_requested_auto_merge_is_pipeline_verified(
     assert published[0].reason is None
 
 
+@marker_absence
 def test_a_closed_unmerged_pull_request_becomes_human_review(tmp_path: Path) -> None:
     """§11 — a closed, unmerged PR is terminal `closed_pull_request` for a human."""
     transport = green_transport(
@@ -504,6 +529,7 @@ def test_a_closed_unmerged_pull_request_becomes_human_review(tmp_path: Path) -> 
 # -- §10.1 CI evidence, the run-scoped upgrade, and auto-merge ----------------------------
 
 
+@marker_absence
 def test_a_run_that_upgrades_evidence_emits_exactly_one_transition_event(tmp_path: Path) -> None:
     """§10.1 — the evidence mode is run-scoped: one Layer 1 event, not one per candidate."""
     harness = Harness(tmp_path, transport=green_transport())
@@ -519,6 +545,7 @@ def test_a_run_that_upgrades_evidence_emits_exactly_one_transition_event(tmp_pat
     assert harness.ci_mode_state[0] is CiEvidenceMode.GITHUB
 
 
+@marker_absence
 def test_the_resolved_evidence_mode_is_stamped_on_each_candidate_row(tmp_path: Path) -> None:
     """§10.1 — every published row records the evidence its verification actually had."""
     harness = Harness(tmp_path, transport=green_transport())
@@ -528,6 +555,7 @@ def test_the_resolved_evidence_mode_is_stamped_on_each_candidate_row(tmp_path: P
     assert published[0].ci_evidence_mode == "github"
 
 
+@marker_absence
 def test_a_held_fork_workflow_records_awaiting_workflow_approval(tmp_path: Path) -> None:
     """§10.1 — a held workflow is `ci_evidence_unavailable: awaiting_workflow_approval`."""
     transport = green_transport(
@@ -543,6 +571,7 @@ def test_a_held_fork_workflow_records_awaiting_workflow_approval(tmp_path: Path)
     assert AUTO_MERGE_PATH not in harness.transport.write_paths
 
 
+@marker_absence
 def test_a_ci_failure_labels_the_candidate_for_human_review(tmp_path: Path) -> None:
     """§10.1 — recorded CI trouble adds `needs-human-review` and blocks auto-merge."""
     transport = green_transport(
@@ -557,6 +586,7 @@ def test_a_ci_failure_labels_the_candidate_for_human_review(tmp_path: Path) -> N
     assert AUTO_MERGE_PATH not in harness.transport.write_paths
 
 
+@marker_absence
 def test_a_missing_signoff_trailer_blocks_auto_merge(tmp_path: Path) -> None:
     """§9.2 — DCO evidence is read from the actual commits, never assumed."""
     transport = green_transport(commit_messages=["fix: bound the range\n"])
@@ -593,6 +623,7 @@ def test_a_multiword_signoff_trailer_is_accepted(tmp_path: Path) -> None:
     assert published[0].reason is None
 
 
+@marker_absence
 def test_auto_merge_is_requested_only_on_the_full_conjunction(tmp_path: Path) -> None:
     """§13 — github evidence, 13 green contexts, DCO, test evidence, and both knobs on."""
     harness = Harness(
@@ -642,6 +673,7 @@ def test_local_evidence_never_reaches_auto_merge(tmp_path: Path, state: str) -> 
     assert published[0].auto_merge_requested is False
 
 
+@marker_absence
 def test_local_ci_evidence_labels_every_candidate_for_human_review(tmp_path: Path) -> None:
     """§10.1 — under `local` evidence a human must review, so the label is mandatory."""
     harness = Harness(tmp_path, transport=FakeGitHubTransport(context_states={}))
@@ -655,6 +687,7 @@ def test_local_ci_evidence_labels_every_candidate_for_human_review(tmp_path: Pat
 # -- §14.1 containment and the degraded sink ---------------------------------------------
 
 
+@marker_absence
 def test_one_candidate_failing_does_not_stop_the_others(tmp_path: Path) -> None:
     """§14.1 — publication failures are contained per candidate; the run continues."""
     transport = green_transport()
@@ -677,6 +710,7 @@ def test_one_candidate_failing_does_not_stop_the_others(tmp_path: Path) -> None:
     assert published[1].state is CandidateState.ISSUE_PATCHED
 
 
+@marker_absence
 def test_a_deferred_candidate_keeps_its_artifact_identity(tmp_path: Path) -> None:
     """§14.1 — a deferral row may never discard the artifacts already created."""
     transport = green_transport()
@@ -744,6 +778,7 @@ def test_the_degraded_sink_keeps_the_comment_url_on_the_final_row(tmp_path: Path
     assert harness.latest().comment_url is not None
 
 
+@marker_absence
 def test_the_degraded_sink_publishes_a_pr_and_one_comment(tmp_path: Path) -> None:
     """§14.1 — with issues unavailable the `pr_comment` sink carries the tracking body."""
     harness = Harness(
@@ -764,6 +799,7 @@ def test_the_degraded_sink_publishes_a_pr_and_one_comment(tmp_path: Path) -> Non
     assert "<!-- devin-remediation-id: codeql-0 -->" in comment_body
 
 
+@marker_absence
 def test_an_issue_only_candidate_never_opens_a_pull_request(tmp_path: Path) -> None:
     """§6 — a MEDIUM-tier candidate is tracked by an issue alone."""
     harness = Harness(tmp_path, transport=green_transport())

@@ -12,6 +12,7 @@ from pipeline.config import ConfigError, Mode, PipelineConfig
 from pipeline.red_baseline import classify_implementer_diff, inspect_reviewer_diff
 from pipeline.schemas import EventRecord, Lane, ReasonCode, RetryDecision
 from pipeline.session_client import (
+    PHASE_B_REVIEWER_OUTPUT_SCHEMA,
     ROLE_OUTPUT_SCHEMAS,
     RoleCollisionError,
     RoleLimits,
@@ -279,7 +280,6 @@ def test_reviewer_output_schema_binds_every_test_to_a_criterion() -> None:
         "tests",
         "red_baseline",
         "green_result",
-        "diff_reviewed",
         "findings",
         "committed_diff",
     ]
@@ -290,10 +290,24 @@ def test_reviewer_output_schema_binds_every_test_to_a_criterion() -> None:
     ]
 
 
-def test_reviewer_output_schema_requires_the_reviewed_diff_identity() -> None:
-    """§12.1 — `diff_reviewed` records which commit range the reviewer actually read."""
-    reviewed = node(SessionRole.REVIEWER, "properties", "diff_reviewed")
+def test_the_phase_a_reviewer_is_never_asked_for_a_diff_it_cannot_have_read() -> None:
+    """§9.3 — phase A runs concurrently with the implementer, so no diff exists yet.
 
+    Requiring `diff_reviewed` in phase A forces the reviewer to invent a commit range,
+    which is precisely the fabricated evidence the phase split exists to prevent.
+    """
+    reviewer = ROLE_OUTPUT_SCHEMAS[SessionRole.REVIEWER]
+
+    assert "diff_reviewed" not in cast(list[str], reviewer["required"])
+    assert "diff_reviewed" not in node(SessionRole.REVIEWER, "properties")
+
+
+def test_phase_b_reviewer_schema_requires_the_reviewed_diff_identity() -> None:
+    """§12.1 — `diff_reviewed` records which commit range the reviewer actually read."""
+    schema = cast(Mapping[str, Any], PHASE_B_REVIEWER_OUTPUT_SCHEMA)
+    reviewed = cast(Mapping[str, Any], schema["properties"]["diff_reviewed"])
+
+    assert schema["required"] == ["diff_reviewed", "findings"]
     assert reviewed["required"] == ["base_sha", "head_sha", "files_read"]
 
 

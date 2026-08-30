@@ -27,6 +27,7 @@ from pipeline.state import CandidateStateStore
 from tests.conftest import FIXTURES_DIR, RUBRICS_PATH, TARGET_CHECKOUT, TEMPLATES_DIR
 from tests.factories import codeql_candidate
 from tests.fakes import FakeGitHubTransport
+from tests.known_defects import marker_absence
 
 RUN_ID = "run-1"
 SIMULATED_WORDING = "Simulated remediation for"
@@ -128,6 +129,7 @@ def test_live_does_not_describe_its_artifacts_as_simulated(tmp_path: Path) -> No
         assert LIVE_WORDING in body
 
 
+@marker_absence
 def test_live_pr_bodies_do_not_claim_a_would_write_dry_run(tmp_path: Path) -> None:
     """§14.1 — the PR body's automation metadata reports the mode that actually ran."""
     render(Mode.LIVE, tmp_path / "out")

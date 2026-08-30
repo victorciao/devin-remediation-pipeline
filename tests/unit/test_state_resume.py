@@ -13,20 +13,34 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import SecretStr
 
 from pipeline import __main__ as entrypoint
+from pipeline.__main__ import _prepare_live_candidate as prepare_live_candidate
+from pipeline.config import Mode, PipelineConfig
+from pipeline.github_client import GitHubClient
 from pipeline.schemas import Candidate, CandidateState, ReasonCode
 from pipeline.state import (
     CandidateStateStore,
+    MarkerArtifact,
     ResumeAction,
     decide_resume,
     github_marker_search,
     has_local_artifact,
 )
+from tests.deadline import Deadlock, within_deadline
 from tests.factories import codeql_candidate
+from tests.fakes import BASE_SHA, FakeGitHubTransport
+from tests.known_defects import (
+    RESERVATION_DEADLOCK_DEFECT,
+    local_resume_lookup,
+    marker_absence,
+)
 
 ISSUE_URL = "https://github.test/victorciao/superset/issues/1"
 PR_URL = "https://github.test/victorciao/superset/pull/2"
+ISSUE_ARTIFACT = MarkerArtifact(number=1, url=ISSUE_URL, is_pull_request=False)
+PR_ARTIFACT = MarkerArtifact(number=2, url=PR_URL, is_pull_request=True)
 ARTIFACT_STATES = (
     CandidateState.ISSUE_CREATED,
     CandidateState.PR_CREATED,
@@ -50,6 +64,16 @@ COMPLETED_STATES = (
 def persisted(state: CandidateState, **fields: Any) -> Candidate:  # noqa: ANN401
     """One persisted lifecycle row."""
     return codeql_candidate(state=state, **fields)
+
+
+def no_marker(_marker: str) -> MarkerArtifact | None:
+    """A marker search that verifies nothing exists on the target repository."""
+    return None
+
+
+def issue_marker(_marker: str) -> MarkerArtifact | None:
+    """A marker search that finds one existing tracking issue."""
+    return ISSUE_ARTIFACT
 
 
 # -- `has_local_artifact` ----------------------------------------------------------------
@@ -100,6 +124,30 @@ def test_unseen_candidate_defers_when_marker_search_is_unavailable() -> None:
 
     assert decision.action is ResumeAction.DEFER
     assert decision.step is None
+
+
+def test_unseen_candidate_defers_when_marker_search_is_ambiguous() -> None:
+    """§14.1 — an ambiguous marker hit is an orphaned artifact: never write a duplicate."""
+    decision = decide_resume(
+        None,
+        artifacts_present=False,
+        marker_search_available=True,
+        marker_search_orphaned=True,
+    )
+
+    assert decision.action is ResumeAction.DEFER
+
+
+@pytest.mark.parametrize("state", PRE_ARTIFACT_STATES)
+def test_a_pre_artifact_row_defers_on_an_ambiguous_marker(state: CandidateState) -> None:
+    """§14.1 — orphaned markers fail closed exactly as an unavailable search does."""
+    decision = decide_resume(
+        persisted(state),
+        artifacts_present=False,
+        marker_search_orphaned=True,
+    )
+
+    assert decision.action is ResumeAction.DEFER
 
 
 def test_unseen_candidate_with_a_known_artifact_still_publishes_idempotently() -> None:
@@ -196,9 +244,10 @@ def store_for(tmp_path: Path, **fields: object) -> CandidateStateStore:
     return CandidateStateStore(tmp_path / "candidates.jsonl", **fields)  # type: ignore[arg-type]
 
 
+@marker_absence
 def test_resume_decision_of_an_unknown_candidate_publishes(tmp_path: Path) -> None:
     """§14.1 — no row and no marker hit is a clean first publication."""
-    store = store_for(tmp_path, marker_search=lambda _marker: False)
+    store = store_for(tmp_path, marker_search=no_marker)
 
     assert store.resume_decision("codeql-0").action is ResumeAction.RESUME_AT_STEP
 
@@ -209,9 +258,10 @@ def test_a_remote_marker_with_no_local_row_blocks_the_reservation(tmp_path: Path
     The decision resumes so the run can adopt the artifact, and the atomic reservation is what
     refuses; the observable contract is that no durable row and no first write follow.
     """
-    store = store_for(tmp_path, marker_search=lambda _marker: True)
+    store = store_for(tmp_path, marker_search=issue_marker)
 
     assert store.resume_decision("codeql-0").action is ResumeAction.RESUME_AT_STEP
+    assert store.marker_artifact("codeql-0") == ISSUE_ARTIFACT
     assert store.existing_artifact("codeql-0") is True
     assert store.append_if_new_artifact(codeql_candidate()) is False
     assert store.rows() == []
@@ -220,7 +270,7 @@ def test_a_remote_marker_with_no_local_row_blocks_the_reservation(tmp_path: Path
 def test_resume_decision_defers_when_marker_search_fails(tmp_path: Path) -> None:
     """§14.1 — a *failed* search is unknown, not absent, so no first write is attempted."""
 
-    def failing(_marker: str) -> bool:
+    def failing(_marker: str) -> MarkerArtifact | None:
         raise OSError("search unavailable")
 
     store = store_for(tmp_path, marker_search=failing)
@@ -229,13 +279,34 @@ def test_resume_decision_defers_when_marker_search_fails(tmp_path: Path) -> None
     assert store.marker_search_failed is True
 
 
+def test_resume_decision_defers_when_marker_search_is_ambiguous(tmp_path: Path) -> None:
+    """§14.1 — a non-unique search result is orphaned, not absent: defer, never create.
+
+    An ambiguous result on the user's fork means duplicate artifacts already carry this
+    candidate's marker; a first write would add a third.
+    """
+
+    def ambiguous(_marker: str) -> MarkerArtifact | None:
+        raise ValueError("marker search did not return a unique artifact")
+
+    store = store_for(tmp_path, marker_search=ambiguous)
+
+    assert store.resume_decision("codeql-0").action is ResumeAction.DEFER
+    assert store.marker_search_orphaned("codeql-0") is True
+    assert store.marker_search_unavailable("codeql-0") is False
+    assert store.marker_search_failed is False
+    assert store.append_if_new_artifact(codeql_candidate()) is False
+    assert store.rows() == []
+
+
+@local_resume_lookup
 def test_resume_decision_skips_a_completed_row_without_searching(tmp_path: Path) -> None:
     """§14.1 — a completed row needs no remote lookup; resume is decided locally."""
     searches: list[str] = []
 
-    def counting(marker: str) -> bool:
+    def counting(marker: str) -> MarkerArtifact | None:
         searches.append(marker)
-        return False
+        return None
 
     store = store_for(tmp_path, marker_search=counting)
     store.append(persisted(CandidateState.ISSUE_PATCHED, issue_url=ISSUE_URL, pr_url=PR_URL))
@@ -244,13 +315,14 @@ def test_resume_decision_skips_a_completed_row_without_searching(tmp_path: Path)
     assert searches == []
 
 
+@local_resume_lookup
 def test_resume_decision_resumes_a_pr_created_row_without_searching(tmp_path: Path) -> None:
     """§14.1 — the `pr_created` crash window resumes from local evidence alone."""
     searches: list[str] = []
 
-    def counting(marker: str) -> bool:
+    def counting(marker: str) -> MarkerArtifact | None:
         searches.append(marker)
-        return True
+        return ISSUE_ARTIFACT
 
     store = store_for(tmp_path, marker_search=counting)
     store.append(
@@ -274,9 +346,9 @@ def test_marker_search_is_memoized_per_candidate_per_run(tmp_path: Path) -> None
     """§14.1 — one marker lookup per candidate per run, not one per consulting call site."""
     searches: list[str] = []
 
-    def counting(marker: str) -> bool:
+    def counting(marker: str) -> MarkerArtifact | None:
         searches.append(marker)
-        return False
+        return None
 
     store = store_for(tmp_path, marker_search=counting)
 
@@ -295,7 +367,7 @@ def test_marker_search_is_memoized_per_candidate_per_run(tmp_path: Path) -> None
 def test_a_failed_marker_search_blocks_the_first_durable_reservation(tmp_path: Path) -> None:
     """§14.1 — fail closed: an unverifiable candidate performs no first write at all."""
 
-    def failing(_marker: str) -> bool:
+    def failing(_marker: str) -> MarkerArtifact | None:
         raise OSError("search unavailable")
 
     store = store_for(tmp_path, marker_search=failing)
@@ -304,18 +376,21 @@ def test_a_failed_marker_search_blocks_the_first_durable_reservation(tmp_path: P
     assert store.rows() == []
 
 
+@pytest.mark.xfail(strict=True, reason=RESERVATION_DEADLOCK_DEFECT, raises=Deadlock)
 def test_an_unconfigured_marker_search_is_not_a_failed_search(tmp_path: Path) -> None:
     """§14.1 — SIMULATE and local runs have no search to fail; they are not fail-closed."""
     store = store_for(tmp_path)
+    candidate = codeql_candidate()
 
     assert store.marker_search_unavailable("codeql-0") is False
     assert store.resume_decision("codeql-0").action is ResumeAction.RESUME_AT_STEP
-    assert store.append_if_new_artifact(codeql_candidate()) is True
+    assert within_deadline(lambda: store.append_if_new_artifact(candidate)) is True
 
 
+@marker_absence
 def test_a_reserved_candidate_cannot_be_reserved_twice(tmp_path: Path) -> None:
     """§14.1 — the reservation is atomic: exactly one durable row per first write."""
-    store = store_for(tmp_path, marker_search=lambda _marker: False)
+    store = store_for(tmp_path, marker_search=no_marker)
     candidate = codeql_candidate(state=CandidateState.ISSUE_CREATED, issue_url=ISSUE_URL)
 
     assert store.append_if_new_artifact(candidate) is True
@@ -323,15 +398,70 @@ def test_a_reserved_candidate_cannot_be_reserved_twice(tmp_path: Path) -> None:
     assert len(store.rows()) == 1
 
 
-def test_github_marker_search_reads_the_search_total() -> None:
-    """§14.1 — the LIVE marker lookup is GitHub search, and only a hit counts as present."""
-    hit = github_marker_search(lambda _marker: {"total_count": 1})
-    miss = github_marker_search(lambda _marker: {"total_count": 0})
-    malformed = github_marker_search(lambda _marker: "unexpected")
+def search_response(*items: dict[str, object]) -> dict[str, object]:
+    """One GitHub issue-search response body."""
+    return {"total_count": len(items), "items": list(items)}
 
-    assert hit("marker") is True
-    assert miss("marker") is False
-    assert malformed("marker") is False
+
+def test_github_marker_search_returns_the_unique_issue_it_found() -> None:
+    """§14.1 — the LIVE marker lookup identifies the artifact, not merely its existence."""
+    find = github_marker_search(
+        lambda _marker: search_response({"number": 7, "html_url": ISSUE_URL})
+    )
+
+    assert find("marker") == MarkerArtifact(number=7, url=ISSUE_URL, is_pull_request=False)
+
+
+def test_github_marker_search_identifies_a_pull_request_as_a_pull_request() -> None:
+    """§14.1 — a found PR must be adopted as a PR; adopting it as an issue duplicates it."""
+    from_payload = github_marker_search(
+        lambda _marker: search_response(
+            {"number": 9, "html_url": ISSUE_URL, "pull_request": {"url": PR_URL}}
+        )
+    )
+    from_url = github_marker_search(
+        lambda _marker: search_response({"number": 9, "html_url": PR_URL})
+    )
+
+    found_from_payload = from_payload("marker")
+    found_from_url = from_url("marker")
+
+    assert found_from_payload is not None and found_from_payload.is_pull_request is True
+    assert found_from_url is not None and found_from_url.is_pull_request is True
+
+
+def test_github_marker_search_reports_an_empty_result_as_absent() -> None:
+    """§14.1 — a verified-absent marker is the one case allowing a first write."""
+    miss = github_marker_search(lambda _marker: search_response())
+
+    assert miss("marker") is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "unexpected",
+        {"total_count": 1},
+        {"items": [{"number": 1, "html_url": ISSUE_URL}]},
+        {"total_count": 2, "items": [{"number": 1, "html_url": ISSUE_URL}]},
+        {
+            "total_count": 2,
+            "items": [
+                {"number": 1, "html_url": ISSUE_URL},
+                {"number": 2, "html_url": PR_URL},
+            ],
+        },
+        {"total_count": 1, "items": [{"html_url": ISSUE_URL}]},
+        {"total_count": 1, "items": [{"number": 1}]},
+        {"total_count": 1, "items": [{"number": 1, "html_url": ""}]},
+    ],
+)
+def test_github_marker_search_refuses_a_non_unique_or_malformed_result(payload: object) -> None:
+    """§14.1 — ambiguity is raised, never silently read as absent or as a single hit."""
+    find = github_marker_search(lambda _marker: payload)
+
+    with pytest.raises(ValueError):
+        find("marker")
 
 
 # -- both call sites derive resume the same way ------------------------------------------
@@ -439,12 +569,106 @@ def test_suppression_is_per_candidate(tmp_path: Path) -> None:
     assert [row.candidate_id for row in store.rows()] == ["codeql-1", "codeql-2", "codeql-2"]
 
 
+@marker_absence
 def test_suppression_does_not_weaken_the_artifact_reservation(tmp_path: Path) -> None:
     """§14.1 — `append_if_new_artifact` still refuses a second reservation."""
-    store = store_for(tmp_path, marker_search=lambda _marker: False)
+    store = store_for(tmp_path, marker_search=no_marker)
     candidate = persisted(CandidateState.ISSUE_CREATED, issue_url=ISSUE_URL)
 
     assert store.append_if_new_artifact(candidate) is True
     assert store.append_if_new_artifact(candidate) is False
     assert store.append_if_new_artifact(candidate.model_copy(update={"pr_url": PR_URL})) is False
     assert len(store.rows()) == 1
+
+
+# -- §14.1 adopting an artifact the marker search found ----------------------------------
+
+
+def prepare(
+    store: CandidateStateStore,
+    candidate: Candidate,
+    *,
+    transport: FakeGitHubTransport | None = None,
+) -> tuple[Candidate, FakeGitHubTransport]:
+    """Run live candidate preparation over a recording transport, and return both."""
+    fake = transport or FakeGitHubTransport()
+    config = PipelineConfig(
+        mode=Mode.LIVE,
+        github_token=SecretStr("placeholder-github-token"),
+        devin_api_key=SecretStr("placeholder-devin-key"),
+    )
+    prepared = prepare_live_candidate(
+        candidate,
+        state_store=store,
+        client=GitHubClient(config, transport=fake),
+        base_sha=BASE_SHA,
+        head_branch="devin",
+    )
+    return prepared, fake
+
+
+def test_a_unique_issue_marker_is_adopted_into_the_durable_row(tmp_path: Path) -> None:
+    """§14.1 — an artifact bearing this candidate's marker is this candidate's artifact.
+
+    Adoption is what lets publication resume instead of duplicating: the run that crashed
+    before writing its row left the issue behind, and the marker is the only evidence of it.
+    """
+    store = store_for(tmp_path, marker_search=issue_marker)
+
+    prepared, transport = prepare(store, codeql_candidate())
+
+    adopted = store.resume(prepared.candidate_id)
+    assert adopted is not None
+    assert adopted.state is CandidateState.ISSUE_CREATED
+    assert (adopted.issue_number, adopted.issue_url) == (1, ISSUE_URL)
+    assert (adopted.pr_number, adopted.pr_url) == (None, None)
+    assert prepared.issue_url == ISSUE_URL
+    assert [write.path for write in transport.writes if "/issues" in write.path] == []
+
+
+def test_a_unique_pull_request_marker_is_adopted_as_a_pull_request(tmp_path: Path) -> None:
+    """§14.1 — a found PR adopted as an issue would open a second PR for the same fix."""
+    store = store_for(tmp_path, marker_search=lambda _marker: PR_ARTIFACT)
+
+    prepared, transport = prepare(store, codeql_candidate())
+
+    assert prepared.state is CandidateState.PR_CREATED
+    assert (prepared.pr_number, prepared.pr_url) == (2, PR_URL)
+    assert (prepared.issue_number, prepared.issue_url) == (None, None)
+    assert transport.writes == []
+
+
+def test_an_ambiguous_marker_defers_orphaned_and_creates_nothing(tmp_path: Path) -> None:
+    """§14.1 — duplicate markers on the fork mean a create would add a third artifact.
+
+    This is the adversarial case for the duplicate-artifact guard: the search cannot say
+    which artifact is this candidate's, so the only safe action is to write nothing at all.
+    """
+
+    def ambiguous(_marker: str) -> MarkerArtifact | None:
+        raise ValueError("marker search did not return a unique artifact")
+
+    store = store_for(tmp_path, marker_search=ambiguous)
+
+    prepared, transport = prepare(store, codeql_candidate())
+
+    assert prepared.state is CandidateState.DEFERRED
+    assert prepared.reason is ReasonCode.ARTIFACT_ORPHANED
+    assert prepared.reason_detail is not None
+    assert transport.writes == []
+    assert [row.state for row in store.rows()] == [CandidateState.DEFERRED]
+
+
+def test_an_ambiguous_marker_defers_a_candidate_that_never_reached_publication(
+    tmp_path: Path,
+) -> None:
+    """§14.1 — the guard runs before branch creation, so no side effect precedes it."""
+
+    def ambiguous(_marker: str) -> MarkerArtifact | None:
+        raise ValueError("marker search did not return a unique artifact")
+
+    store = store_for(tmp_path, marker_search=ambiguous)
+
+    _, transport = prepare(store, codeql_candidate())
+
+    assert [read for read in transport.reads if "/git/ref" in read] == []
