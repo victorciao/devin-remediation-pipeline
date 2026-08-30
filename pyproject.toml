@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "devin-remediation-pipeline"
+version = "0.1.0"
+description = "Event-driven Devin remediation pipeline"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic==2.11.7",
+  "PyYAML==6.0.2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy==2.3.1",
+  "pytest==9.1.1",
+  "pytest-cov==7.1.0",
+  "ruff==0.16.4",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ANN"]
+ignore = ["UP042"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+mypy_path = "src"
+packages = ["pipeline"]
+
+[[tool.mypy.overrides]]
+module = ["yaml"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+include = [
+  "src/pipeline/gate.py",
+  "src/pipeline/score.py",
+  "src/pipeline/dispatch.py",
+  "src/pipeline/dedupe.py",
+  "src/pipeline/templates/render.py",
+  "src/pipeline/observability/kpis.py",
+]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true

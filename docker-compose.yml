@@ -1,0 +1,18 @@
+services:
+  remediation:
+    build:
+      context: .
+    user: "${PIPELINE_UID:-10001}:${PIPELINE_GID:-10001}"
+    network_mode: none
+    environment:
+      PIPELINE_MODE: simulate
+      PIPELINE_ALERT_SOURCE: sarif_file
+    command:
+      - --repo-path
+      - /target-repo
+      - --output-dir
+      - /output
+      - --baseline
+      - /app/fixtures/baseline.json
+    volumes:
+      - ./docker-output:/output
