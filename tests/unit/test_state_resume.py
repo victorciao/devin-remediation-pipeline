@@ -432,12 +432,13 @@ def test_a_failed_marker_search_blocks_the_first_durable_reservation(tmp_path: P
 
 
 def test_an_unconfigured_marker_search_never_looked_so_it_fails_closed(tmp_path: Path) -> None:
-    """§14.1 — "never looked" is not "proven absent", so no first write is reserved.
+    """§14.1 — "never looked" is not "proven absent", so no remote write is reserved.
 
     The distinct outcomes are what keeps the polarity right: `absent` is the one state that
-    licences a first write, and `unconfigured` is as unverifiable as a search that raised.
+    licences a first write, and for a store that publishes remotely `unconfigured` is as
+    unverifiable as a search that raised.
     """
-    store = store_for(tmp_path)
+    store = store_for(tmp_path, require_marker_proof=True)
     candidate = codeql_candidate()
 
     assert store.marker_search_outcome("codeql-0") is MarkerSearchOutcome.UNCONFIGURED
@@ -446,6 +447,22 @@ def test_an_unconfigured_marker_search_never_looked_so_it_fails_closed(tmp_path:
     assert store.resume_decision("codeql-0").action is ResumeAction.DEFER
     assert within_deadline(lambda: store.append_if_new_artifact(candidate)) is False
     assert store.rows() == []
+
+
+def test_a_store_that_publishes_nothing_needs_no_marker_proof(tmp_path: Path) -> None:
+    """§14.1 — SIMULATE writes to no remote, so an unconfigured search deduplicates nothing.
+
+    Demanding proof there would defer every simulated candidate and make the dry run report
+    a dedupe outage it could not have had.
+    """
+    store = store_for(tmp_path)
+    candidate = codeql_candidate()
+
+    assert store.marker_search_outcome("codeql-0") is MarkerSearchOutcome.UNCONFIGURED
+    assert store.marker_search_unavailable("codeql-0") is False
+    assert store.resume_decision("codeql-0").action is ResumeAction.RESUME_AT_STEP
+    assert within_deadline(lambda: store.append_if_new_artifact(candidate)) is True
+    assert [row.candidate_id for row in store.rows()] == [candidate.candidate_id]
 
 
 @pytest.mark.parametrize(

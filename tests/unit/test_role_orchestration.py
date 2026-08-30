@@ -27,6 +27,7 @@ from pipeline.session_client import (
     SessionClient,
     SessionMessageError,
     SessionRole,
+    validated_diff_review,
 )
 from tests.factories import codeql_candidate
 
@@ -486,6 +487,30 @@ def test_an_unusable_planner_output_never_reaches_the_other_roles() -> None:
     ) -> tuple[str, str, Callable[[str], str]]:
         raise AssertionError("prompts may not be rendered from unusable planner output")
 
+    class BlankCriterionTransport(ScriptedDevinTransport):
+        def get(self, path: str) -> Mapping[str, object]:
+            response = dict(super().get(path))
+            if path.endswith("planner-1"):
+                criterion = {**PLANNER_OUTPUT["criteria"][0], "statement": "   "}  # type: ignore[index]
+                response["structured_output"] = {**PLANNER_OUTPUT, "criteria": [criterion]}
+            return response
+
+    transport = BlankCriterionTransport()
+
+    with pytest.raises(PlannerOutputError, match="statement"):
+        run(transport, factory=empty_criteria)
+
+    assert [role for role, _ in transport.created] == ["planner"]
+    assert transport.messaged == []
+
+
+def test_a_planner_that_answered_without_criteria_at_all_is_a_blocked_session() -> None:
+    """§9.3 — the required-output fence catches a missing schema key before validation.
+
+    A planner snapshot with no `criteria` key has not answered its schema, so it is a
+    blocked session rather than an unusable planner output.
+    """
+
     class NoCriteriaTransport(ScriptedDevinTransport):
         def get(self, path: str) -> Mapping[str, object]:
             response = dict(super().get(path))
@@ -495,8 +520,8 @@ def test_an_unusable_planner_output_never_reaches_the_other_roles() -> None:
 
     transport = NoCriteriaTransport()
 
-    with pytest.raises(PlannerOutputError, match="criteria"):
-        run(transport, factory=empty_criteria)
+    with pytest.raises(SessionBlockedError, match="without required output"):
+        run(transport)
 
     assert [role for role, _ in transport.created] == ["planner"]
     assert transport.messaged == []
@@ -655,24 +680,52 @@ def test_a_reviewer_that_times_out_still_reports_its_three_session_ids() -> None
     }
 
 
-# -- blocked sessions are never read as finished ---------------------------------------
+# -- terminality is the required output, not the status word ---------------------------
+
+
+@pytest.mark.parametrize("status", ["finished", "blocked"])
+def test_a_stopped_session_that_answered_is_a_terminal_session(status: str) -> None:
+    """§9.3 (l.692) — a role that completed its work settles at `blocked`, never `finished`.
+
+    The evidence is the required structured output, not the status word: reading `blocked`
+    as a failure fails every successful role.
+    """
+    transport = ScriptedDevinTransport(status=status)
+
+    result = run(transport)
+
+    assert [
+        role.snapshot.status_enum for role in (result.planner, result.implementer, result.reviewer)
+    ] == [
+        status,
+        status,
+        status,
+    ]
+    assert validated_diff_review(result) is True
 
 
 @pytest.mark.parametrize("status", ["blocked", "expired"])
-def test_a_blocked_or_expired_session_is_not_a_finished_session(status: str) -> None:
-    """§9.3 — a session that stopped without answering has produced no evidence at all.
+def test_a_stopped_session_without_its_output_has_produced_no_evidence(status: str) -> None:
+    """§9.3 (l.695) — a session waiting on something it cannot resolve fails the candidate.
 
-    Treating it as terminal accepted whatever partial structured output it happened to
+    Accepting it as terminal accepted whatever partial structured output it happened to
     carry, so a blocked session could converge a candidate.
     """
-    transport = ScriptedDevinTransport(status=status)
+
+    class SilentTransport(ScriptedDevinTransport):
+        def get(self, path: str) -> Mapping[str, object]:
+            response = dict(super().get(path))
+            response.pop("structured_output")
+            return response
+
+    transport = SilentTransport(status=status)
 
     with pytest.raises(SessionBlockedError, match=status):
         run(transport)
 
 
-def test_only_finished_is_accepted_as_a_terminal_status() -> None:
-    """§9.3 — every non-`finished` status keeps polling until the deadline."""
+def test_a_status_that_has_not_stopped_keeps_polling() -> None:
+    """§9.3 — a status that is neither stop nor answer keeps polling until the deadline."""
     transport = ScriptedDevinTransport(status="stopped")
 
     with pytest.raises(TimeoutError):
