@@ -20,6 +20,22 @@ from pipeline.schemas import Candidate, CandidateState, EventRecord, MergeMode
 
 _SHORT_ID_LENGTH = 12
 _KPI_SECTION_KEYS = ("deferred_by_reason",)
+LIFECYCLE_PROGRESS: dict[CandidateState, int] = {
+    CandidateState.ENUMERATED: 0,
+    CandidateState.GATED: 1,
+    CandidateState.SCORED: 2,
+    CandidateState.DEFERRED: 3,
+    CandidateState.BLOCKED_BY_ENCLOSING_SKIP: 4,
+    CandidateState.SUPPRESSED_BY_CONTAINMENT: 5,
+    CandidateState.DISPATCHING: 6,
+    CandidateState.ISSUE_CREATED: 7,
+    CandidateState.SESSION_DONE: 8,
+    CandidateState.VERIFIED: 9,
+    CandidateState.PR_CREATED: 10,
+    CandidateState.TERMINAL: 11,
+    CandidateState.AWAITING_HUMAN_MERGE: 12,
+    CandidateState.MERGED: 13,
+}
 
 
 class ResultsInputError(RuntimeError):
@@ -75,14 +91,17 @@ def read_run(run_dir: Path) -> RunArtifacts:
 
 
 def aggregate(runs: Sequence[RunArtifacts]) -> tuple[list[Candidate], list[EventRecord]]:
-    """Merge runs in argument order: a later run's row supersedes an earlier one."""
-    latest: dict[str, Candidate] = {}
+    """Merge runs by lifecycle progress, breaking ties in favor of later runs."""
+    latest: dict[str, tuple[int, int, Candidate]] = {}
     events: list[EventRecord] = []
-    for run in runs:
+    for run_index, run in enumerate(runs):
         for candidate in run.candidates:
-            latest[candidate.candidate_id] = candidate
+            rank = LIFECYCLE_PROGRESS[candidate.state]
+            previous = latest.get(candidate.candidate_id)
+            if previous is None or (rank, run_index) >= (previous[0], previous[1]):
+                latest[candidate.candidate_id] = (rank, run_index, candidate)
         events.extend(run.events)
-    return list(latest.values()), events
+    return [candidate for _, _, candidate in latest.values()], events
 
 
 def _sorted_candidates(candidates: Iterable[Candidate]) -> list[Candidate]:
