@@ -145,13 +145,17 @@ def compute_kpis(
         for event in pr_events
     )
     rejected = sum(event.reason is ReasonCode.CI_CHECK_FAILED for event in pr_events)
-    edited = max(len(pr_events) - merged_clean - rejected, 0)
+    merged_total = sum(event.merged_at is not None for event in pr_events)
+    edited = max(merged_total - merged_clean, 0)
     manual_merge_pending = len(
         {
             event.candidate_id
             for event in events
             if event.terminal_outcome is CandidateState.AWAITING_HUMAN_MERGE
         }
+    )
+    awaiting_merge = sum(
+        event.terminal_outcome is CandidateState.AWAITING_HUMAN_MERGE for event in pr_events
     )
     issue_rows = _latest_issue_rows(candidates, events)
     issues_created = sum(
@@ -222,6 +226,7 @@ def compute_kpis(
         "sessions_created": len(session_ids),
         "sessions_per_candidate": (len(session_ids) / len(candidates) if candidates else 0.0),
         "manual_merge_pending": manual_merge_pending,
+        "awaiting_merge": awaiting_merge,
         "issues_created": issues_created,
         "issues_adopted": issues_adopted,
         "issues_created_by_tier": issues_created_by_tier,
@@ -329,7 +334,7 @@ def _deferred_by_reason(candidates: list[Candidate]) -> dict[str, int]:
     return result
 
 
-def _expected_reason_match_rate(events: list[EventRecord]) -> float:
+def _expected_reason_match_rate(events: list[EventRecord]) -> float | None:
     """Return expected-red-reason agreement over recorded item outcomes."""
     outcomes = [
         outcome
@@ -341,7 +346,7 @@ def _expected_reason_match_rate(events: list[EventRecord]) -> float:
     return (
         sum(outcome.expected_reason_match is True for outcome in outcomes) / len(outcomes)
         if outcomes
-        else 0.0
+        else None
     )
 
 

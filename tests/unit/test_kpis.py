@@ -200,6 +200,33 @@ def test_merge_rate_alert_is_suppressed_for_an_empty_run(
     assert rollup[SESSION_FAILURE_ALERT] == 0
 
 
+def test_awaiting_human_merge_is_not_counted_as_edited(
+    simulate_config: PipelineConfig,
+) -> None:
+    """Awaiting a human merge is neither an edit nor an automated merge."""
+    pending = event(
+        "pending",
+        terminal_outcome=CandidateState.AWAITING_HUMAN_MERGE,
+        pr_url=PR_URL,
+    )
+
+    rollup = compute_kpis([], [pending], {}, simulate_config)
+
+    assert rollup["edited"] == 0
+    assert rollup["awaiting_merge"] == 1
+    assert rollup["manual_merge_pending"] == 1
+
+
+def test_expected_reason_match_rate_is_unknown_without_observations(
+    simulate_config: PipelineConfig,
+) -> None:
+    """No expected-reason observations are reported as unavailable, not disagreement."""
+    rollup = compute_kpis([], [], {}, simulate_config)
+
+    assert rollup["expected_reason_match_rate"] is None
+    assert "**Expected Reason Match Rate:** n/a" in render_kpi_report([], [], {}, simulate_config)
+
+
 def test_session_failure_at_the_ceiling_does_not_alert(simulate_config: PipelineConfig) -> None:
     """§11 — the alert is `> ceiling`, so exactly 0.30 is quiet."""
     events = [event(f"c{index}", reason=ReasonCode.SESSION_CEILING) for index in range(3)]
