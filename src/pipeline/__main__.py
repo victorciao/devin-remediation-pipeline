@@ -346,6 +346,18 @@ class CandidateRunner:
                     )
         return self._run_session(prepared)
 
+    def _observe_terminal_head(self, candidate: Candidate) -> Candidate:
+        """Preserve a pushed branch head when a session terminates early."""
+        if self.live is None or candidate.head_branch is None:
+            return candidate
+        try:
+            observed = self.live.client.branch_sha(candidate.head_branch)
+        except (ArtifactUnavailableError, HttpTransportError, OSError):
+            return candidate
+        if observed is not None and observed != (candidate.base_sha or self.base_sha):
+            return candidate.model_copy(update={"head_sha": observed})
+        return candidate
+
     def _run_session(self, candidate: Candidate) -> Candidate:
         """Create and poll exactly one session per attempt, up to the ceiling."""
         prompt_branch = candidate.head_branch or "devin/remediation"
@@ -381,18 +393,29 @@ class CandidateRunner:
             except SessionCeilingError as exc:
                 return self._deferred(candidate, ReasonCode.SESSION_CEILING, str(exc))
             except SessionInfeasibleError as exc:
+                terminal = self._observe_terminal_head(
+                    candidate.model_copy(update={"session_id": candidate.session_id})
+                )
                 return self._terminal(
-                    candidate.model_copy(update={"session_id": candidate.session_id}),
+                    terminal,
                     ReasonCode.SESSION_FAILED,
-                    exc.output.infeasible_reason or str(exc),
+                    "session claim: " + (exc.output.infeasible_reason or str(exc)),
                 )
             except SessionDedupeError as exc:
-                return self._terminal(candidate, ReasonCode.SESSION_FAILED, str(exc))
+                return self._terminal(
+                    self._observe_terminal_head(candidate),
+                    ReasonCode.SESSION_FAILED,
+                    str(exc),
+                )
             except (SessionBlockedError, SessionOutputError, TimeoutError) as exc:
                 last_detail = str(exc)
                 continue
             return self._apply_fix_output(candidate, run)
-        return self._terminal(candidate, ReasonCode.SESSION_BLOCKED, last_detail)
+        return self._terminal(
+            self._observe_terminal_head(candidate),
+            ReasonCode.SESSION_BLOCKED,
+            last_detail,
+        )
 
     def _apply_fix_output(self, candidate: Candidate, run: object) -> Candidate:
         """Record the validated session output as the candidate's session row."""
@@ -434,7 +457,7 @@ class CandidateRunner:
 
     def _verify(self, candidate: Candidate) -> Candidate:
         """Evaluate the candidate's criterion from the orchestrator's own runs."""
-        evidence, baseline = verify_candidate(
+        evidence, _ = verify_candidate(
             candidate,
             base_sha=candidate.base_sha or self.base_sha,
             head_sha=candidate.head_sha or self.base_sha,
@@ -442,9 +465,6 @@ class CandidateRunner:
             config=self.config,
         )
         update: dict[str, object] = {"criterion_evidence": evidence}
-        if baseline is not None:
-            update["red_baseline"] = baseline
-            update["lifted_markers"] = list(baseline.still_skipped_descendants)
         if evidence.satisfied is True and candidate.lane is Lane.SKIPPED_TESTS:
             update["test_added"] = True
             update["test_nodeid"] = candidate.nodeid
@@ -454,9 +474,6 @@ class CandidateRunner:
             Lane.DEPRECATIONS,
         }:
             update["test_exempt_reason"] = ReasonCode.TEST_NOT_REQUIRED
-        if evidence.reason is ReasonCode.STALE_SKIP:
-            update["test_added"] = False
-            update["test_exempt_reason"] = ReasonCode.STALE_SKIP
         if evidence.satisfied is False:
             return self._terminal(
                 candidate.model_copy(update=update),
@@ -585,7 +602,7 @@ class CandidateRunner:
                 repo_path=self.checkout.repo_path if self.checkout is not None else None,
             )
             observers.probe_alerts = alerts.probe
-            observers.read_ci_suite = self.live.client.read_named_suite
+            observers.read_ci_suite = self.live.client.wait_for_named_suite
         return observers
 
     def _watch_ci(self, candidate: Candidate) -> CiWaitResult | None:

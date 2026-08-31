@@ -20,6 +20,7 @@ from pipeline.config import (
     PipelineConfig,
 )
 from pipeline.github_client import (
+    ACCEPTED_CONCLUSIONS,
     ArtifactUnavailableError,
     CiModeTransition,
     CiWaitResult,
@@ -30,13 +31,16 @@ from pipeline.github_client import (
     MergedPullRequestError,
     PreflightError,
     SimulationWriteError,
+    evaluate_check_runs,
     publish_artifacts,
     read_check_runs,
     run_live_preflight,
     wait_for_check_runs,
+    wait_for_named_suite,
 )
 from pipeline.http_transport import HttpTransportError
 from pipeline.schemas import CheckRunConclusion, MergeMode, ReasonCode, Tier
+from pipeline.verify import SuiteResult
 from tests.factories import codeql_candidate
 from tests.fakes import (
     BASE_SHA,
@@ -370,6 +374,169 @@ def test_check_read_page_cap_fails_closed() -> None:
 
     with pytest.raises(PreflightError, match="pagination exceeded"):
         read_check_runs(PipelineConfig(), TooManyPages(), HEAD_SHA)
+
+
+class SuiteSequence(FakeGitHubTransport):
+    """Return one scripted check-run collection per polling read."""
+
+    def __init__(self, sequences: list[Mapping[str, str | None]]) -> None:
+        super().__init__(context_states={})
+        self.sequences = sequences
+        self.sequence_index = 0
+
+    def get(self, path: str) -> object:
+        self.reads.append(path)
+        if "/check-runs" in path:
+            states = self.sequences[min(self.sequence_index, len(self.sequences) - 1)]
+            self.sequence_index += 1
+            return {
+                "check_runs": [
+                    {
+                        "name": name,
+                        "conclusion": (
+                            state if state in ACCEPTED_CONCLUSIONS | set(FAILED_STATES) else None
+                        ),
+                        "status": state,
+                    }
+                    for name, state in states.items()
+                ]
+            }
+        if "/status" in path:
+            return {"statuses": []}
+        return super().get(path)
+
+
+def wait_for_suite(
+    transport: FakeGitHubTransport,
+    *,
+    config: PipelineConfig | None = None,
+    clock: Clock | None = None,
+) -> SuiteResult:
+    """Run named-suite polling with a deterministic clock."""
+    timer = clock or Clock()
+    return wait_for_named_suite(
+        config or wait_config(),
+        transport,
+        HEAD_SHA,
+        sleep=timer.sleep,
+        clock=timer,
+    )
+
+
+def test_named_suite_polls_pending_then_succeeds() -> None:
+    clock = Clock()
+    result = wait_for_suite(
+        SuiteSequence([{"unit-tests-required": "in_progress"}, {"unit-tests-required": "success"}]),
+        clock=clock,
+    )
+
+    assert result.passed is True
+    assert result.conclusion == "success"
+    assert clock.slept == [15.0]
+
+
+def test_named_suite_absent_while_another_check_is_pending_keeps_polling() -> None:
+    clock = Clock()
+    result = wait_for_suite(
+        SuiteSequence(
+            [
+                {"pre-commit (current)": "in_progress"},
+                {"pre-commit (current)": "success", "unit-tests-required": "success"},
+            ]
+        ),
+        clock=clock,
+    )
+
+    assert result.passed is True
+    assert result.conclusion == "success"
+    assert clock.slept == [15.0]
+
+
+def test_named_suite_absent_after_all_checks_settle_is_unavailable() -> None:
+    clock = Clock()
+    result = wait_for_suite(
+        SuiteSequence([{"pre-commit (current)": "success"}]),
+        clock=clock,
+    )
+
+    assert result.passed is False
+    assert result.reason is ReasonCode.CI_EVIDENCE_UNAVAILABLE
+    assert clock.slept == []
+
+
+def test_named_suite_rejected_target_is_ci_check_failed() -> None:
+    result = wait_for_suite(
+        SuiteSequence([{"unit-tests-required": "failure"}]),
+    )
+
+    assert result.passed is False
+    assert result.reason is ReasonCode.CI_CHECK_FAILED
+    assert result.failing_nodeids == ("unit-tests-required",)
+    assert result.conclusion == "failure"
+
+
+def test_named_suite_transport_failure_is_immediately_unavailable() -> None:
+    class Interrupted(FakeGitHubTransport):
+        def get(self, path: str) -> object:
+            if "/check-runs" in path:
+                raise HttpTransportError("connection interrupted")
+            return super().get(path)
+
+    clock = Clock()
+    result = wait_for_suite(Interrupted(), clock=clock)
+
+    assert result.reason is ReasonCode.CI_EVIDENCE_UNAVAILABLE
+    assert clock.slept == []
+
+
+def test_named_suite_approval_status_is_immediately_unavailable() -> None:
+    clock = Clock()
+    result = wait_for_suite(
+        SuiteSequence([{"Approve patch-level bump": "action_required"}]),
+        clock=clock,
+    )
+
+    assert result.reason is ReasonCode.CI_EVIDENCE_UNAVAILABLE
+    assert result.detail == "awaiting_workflow_approval"
+    assert clock.slept == []
+
+
+def test_named_suite_deadline_expiry_is_unavailable() -> None:
+    clock = Clock()
+    result = wait_for_suite(
+        SuiteSequence([{"unit-tests-required": "in_progress"}]),
+        config=wait_config(ci_wait_timeout_s=20),
+        clock=clock,
+    )
+
+    assert result.reason is ReasonCode.CI_EVIDENCE_UNAVAILABLE
+    assert clock.slept == [15.0, 5.0]
+
+
+def test_rejected_check_waits_for_pending_checks_to_settle() -> None:
+    result = evaluate_check_runs(
+        [
+            CheckRunConclusion(name="rejected", conclusion="failure", status="completed"),
+            CheckRunConclusion(name="pending", conclusion=None, status="in_progress"),
+        ],
+        required_contexts=(),
+    )
+
+    assert result.settled is False
+    assert result.reason is ReasonCode.CI_EVIDENCE_UNAVAILABLE
+
+
+def test_rejected_check_is_reported_once_all_checks_settle() -> None:
+    result = evaluate_check_runs(
+        [
+            CheckRunConclusion(name="rejected", conclusion="failure", status="completed"),
+            CheckRunConclusion(name="accepted", conclusion="success", status="completed"),
+        ],
+        required_contexts=(),
+    )
+
+    assert result.settled is True
+    assert result.reason is ReasonCode.CI_CHECK_FAILED
 
 
 def test_a_fork_with_a_workflow_run_but_no_context_is_awaiting_approval() -> None:

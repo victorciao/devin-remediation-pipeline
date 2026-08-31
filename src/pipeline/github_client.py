@@ -111,15 +111,6 @@ def evaluate_check_runs(
             reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
             detail="awaiting_workflow_approval",
         )
-    rejected = [name for name, state in states.items() if state in REJECTED_CONCLUSIONS]
-    if rejected:
-        return CheckRunEvidence(
-            observed,
-            settled=True,
-            passed=False,
-            reason=ReasonCode.CI_CHECK_FAILED,
-            detail=", ".join(sorted(rejected)),
-        )
     unsettled = [
         name for name, state in states.items() if state is None or state in PENDING_STATUSES
     ]
@@ -130,6 +121,15 @@ def evaluate_check_runs(
             passed=False,
             reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
             detail=", ".join(sorted(unsettled)),
+        )
+    rejected = [name for name, state in states.items() if state in REJECTED_CONCLUSIONS]
+    if rejected:
+        return CheckRunEvidence(
+            observed,
+            settled=True,
+            passed=False,
+            reason=ReasonCode.CI_CHECK_FAILED,
+            detail=", ".join(sorted(rejected)),
         )
     if any(state not in ACCEPTED_CONCLUSIONS for state in states.values()):
         return CheckRunEvidence(
@@ -213,6 +213,80 @@ def read_named_suite(
         reason=reason,
         conclusion=conclusion,
     )
+
+
+def wait_for_named_suite(
+    config: PipelineConfig,
+    client: GitHubTransport,
+    sha: str,
+    *,
+    elapsed_s: float = 0.0,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    poll_interval_s: float = 15.0,
+) -> SuiteResult:
+    """Poll one named Actions check until it settles or the wait budget expires."""
+    context = config.suite_check_context
+    command = f"GET {_path(config, f'/commits/{sha}/check-runs')} context={context}"
+    deadline = clock() + max(config.ci_wait_timeout_s - elapsed_s, 0)
+    while True:
+        try:
+            conclusions = read_check_runs(config, client, sha)
+        except (ArtifactUnavailableError, HttpTransportError, PreflightError):
+            return SuiteResult(
+                passed=False,
+                command=command,
+                reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+            )
+        states = {item.name: _check_run_state(item) for item in conclusions}
+        if any(state in APPROVAL_STATUSES for state in states.values()):
+            return SuiteResult(
+                passed=False,
+                command=command,
+                reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+                detail="awaiting_workflow_approval",
+            )
+        observed = next((item for item in conclusions if item.name == context), None)
+        if observed is not None:
+            state = _check_run_state(observed)
+            if state in ACCEPTED_CONCLUSIONS:
+                return SuiteResult(
+                    passed=True,
+                    command=command,
+                    conclusion=state,
+                )
+            if state in REJECTED_CONCLUSIONS:
+                return SuiteResult(
+                    passed=False,
+                    command=command,
+                    failing_nodeids=(context,),
+                    reason=ReasonCode.CI_CHECK_FAILED,
+                    conclusion=state,
+                )
+            if state not in PENDING_STATUSES and state is not None:
+                return SuiteResult(
+                    passed=False,
+                    command=command,
+                    failing_nodeids=(context,),
+                    reason=ReasonCode.CI_CHECK_FAILED,
+                    conclusion=state,
+                )
+        else:
+            unsettled = any(state is None or state in PENDING_STATUSES for state in states.values())
+            if not unsettled and conclusions:
+                return SuiteResult(
+                    passed=False,
+                    command=command,
+                    reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+                )
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return SuiteResult(
+                passed=False,
+                command=command,
+                reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+            )
+        sleep(min(poll_interval_s, remaining))
 
 
 def _mapping(value: object, description: str) -> dict[str, object]:
@@ -662,6 +736,17 @@ class GitHubClient:
                 reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
             )
         return read_named_suite(self._config, self._transport, sha)
+
+    def wait_for_named_suite(self, sha: str) -> SuiteResult:
+        """Poll the configured Actions suite check at a revision."""
+        context = self._config.suite_check_context
+        if self._transport is None:
+            return SuiteResult(
+                passed=False,
+                command=f"GET check-runs context={context}",
+                reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+            )
+        return wait_for_named_suite(self._config, self._transport, sha)
 
     @staticmethod
     def _url(response: Mapping[str, object]) -> str:
@@ -1114,5 +1199,6 @@ __all__ = [
     "reconcile_pull_request",
     "run_live_preflight",
     "upgrade_ci_mode",
+    "wait_for_named_suite",
     "wait_for_check_runs",
 ]

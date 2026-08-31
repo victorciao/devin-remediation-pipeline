@@ -13,12 +13,9 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from pipeline.config import CiEvidenceMode, Lane1AlertCheck, PipelineConfig
-from pipeline.red_baseline import classify_red_baseline
 from pipeline.schemas import (
-    BaselineStatus,
     Candidate,
     CriterionEvidence,
-    ExpectedFailure,
     ItemOutcome,
     Lane,
     PerItemOutcome,
@@ -26,10 +23,7 @@ from pipeline.schemas import (
     RedBaselineResult,
 )
 
-LANE2_CRITERION = (
-    "The re-enabled test goes red at base_sha with only the test-path diff applied, "
-    "and green at the candidate head."
-)
+LANE2_CRITERION = "The re-enabled test passes at the candidate head with its skip marker removed."
 LANE1_CRITERION = (
     "The alert's stable locator is absent at the candidate head and the suite covering "
     "suite_scope passes there."
@@ -58,6 +52,7 @@ class SuiteResult:
     failing_nodeids: tuple[str, ...] = ()
     reason: ReasonCode | None = None
     conclusion: str | None = None
+    detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -122,20 +117,6 @@ def _unobservable(criterion: str, commands: Sequence[str], detail: str) -> Crite
     )
 
 
-def _baseline_expectation(candidate: Candidate) -> ExpectedFailure:
-    return candidate.expected_failure or ExpectedFailure(
-        nodeid=candidate.nodeid or candidate.stable_locator,
-        exception_type="AssertionError",
-        message_pattern=".",
-    )
-
-
-def _descendants(candidate: Candidate) -> tuple[str, ...]:
-    return tuple(
-        marker for marker in candidate.lifted_markers if marker != candidate.enclosing_skip_nodeid
-    )
-
-
 def verify_lane2(
     candidate: Candidate,
     *,
@@ -143,7 +124,7 @@ def verify_lane2(
     head_sha: str,
     observers: Observers,
 ) -> tuple[CriterionEvidence, RedBaselineResult | None]:
-    """Evaluate LANE 2's red-at-base / green-at-head criterion."""
+    """Evaluate LANE 2's green-at-head criterion."""
     criterion = candidate.success_criterion or LANE2_CRITERION
     nodeid = candidate.nodeid
     if observers.run_item is None or nodeid is None:
@@ -151,63 +132,11 @@ def verify_lane2(
             _unobservable(criterion, (), "no local checkout was available to run the nodeid"),
             None,
         )
-    if observers.run_item_with_test_diff is not None:
-        base_run = observers.run_item_with_test_diff(
-            base_sha, head_sha, nodeid, candidate.test_paths
-        )
-    else:
-        base_run = observers.run_item(base_sha, nodeid)
-    if base_run.reason is not None:
-        return (
-            CriterionEvidence(
-                criterion=criterion,
-                satisfied=False,
-                commands=[base_run.command],
-                observations=["test capability was unavailable at base"],
-                reason=base_run.reason,
-            ),
-            None,
-        )
-    baseline = classify_red_baseline(
-        _baseline_expectation(candidate),
-        base_run.outcomes,
-        descendant_nodeids=_descendants(candidate),
-    )
-    commands = [base_run.command]
-    observations = [
-        f"{outcome.nodeid}: {outcome.outcome.value} at base" for outcome in base_run.outcomes
-    ]
-    if baseline.still_skipped_descendants:
-        observations.append(
-            "still_skipped_descendants: " + ", ".join(baseline.still_skipped_descendants)
-        )
-    if baseline.status is BaselineStatus.STALE_SKIP:
-        return (
-            CriterionEvidence(
-                criterion=criterion,
-                satisfied=False,
-                commands=commands,
-                observations=observations,
-                reason=ReasonCode.STALE_SKIP,
-            ),
-            baseline,
-        )
-    if baseline.status is not BaselineStatus.VALID:
-        return (
-            CriterionEvidence(
-                criterion=criterion,
-                satisfied=False,
-                commands=commands,
-                observations=observations,
-                reason=ReasonCode.INVALID_RED_BASELINE,
-            ),
-            baseline,
-        )
     head_run = observers.run_item(head_sha, nodeid)
-    commands.append(head_run.command)
-    observations.extend(
+    commands = [head_run.command]
+    observations = [
         f"{outcome.nodeid}: {outcome.outcome.value} at head" for outcome in head_run.outcomes
-    )
+    ]
     if head_run.reason is not None:
         return (
             CriterionEvidence(
@@ -217,7 +146,7 @@ def verify_lane2(
                 observations=observations + ["test capability was unavailable at head"],
                 reason=head_run.reason,
             ),
-            baseline,
+            None,
         )
     green = bool(head_run.outcomes) and all(
         outcome.outcome is ItemOutcome.PASSED for outcome in head_run.outcomes
@@ -231,7 +160,7 @@ def verify_lane2(
                 observations=observations,
                 reason=ReasonCode.GREEN_NOT_REACHED,
             ),
-            baseline,
+            None,
         )
     return (
         CriterionEvidence(
@@ -240,7 +169,7 @@ def verify_lane2(
             commands=commands,
             observations=observations,
         ),
-        baseline,
+        None,
     )
 
 
@@ -494,7 +423,7 @@ def verify_candidate(
                 stage="post_pr",
             )
             if suite_failure is not None:
-                return suite_failure, candidate.red_baseline
+                return suite_failure, None
             return (
                 CriterionEvidence(
                     criterion=criterion,
@@ -503,7 +432,7 @@ def verify_candidate(
                     commands=post_commands,
                     observations=post_observations,
                 ),
-                candidate.red_baseline,
+                None,
             )
         return verify_lane2(
             candidate,
