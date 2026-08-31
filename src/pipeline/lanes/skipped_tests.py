@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from pipeline.schemas import Candidate, DefinitionKind, Lane
+from pipeline.verify import declare_success_criterion
 
 Record = dict[str, str | int | None]
 LiveCountProvider = Callable[[str], int | None]
@@ -209,6 +210,8 @@ def enumerate_skipped_tests(
                             resolved_decorator=resolved,
                             line=node.lineno,
                             decorator_line=decorator.lineno,
+                            success_criterion=declare_success_criterion(Lane.SKIPPED_TESTS),
+                            suite_scope=[nodeid.split("::", 1)[0]],
                         )
                     )
                     record.update(

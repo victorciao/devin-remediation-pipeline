@@ -1,301 +1,140 @@
-"""Pure role prompt renderers for target-repository remediation."""
+"""Pure fix-prompt rendering for the single per-candidate remediation session."""
 
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from collections.abc import Mapping, Sequence
 
 from pipeline.schemas import Candidate, Lane
 
-if TYPE_CHECKING:
-    from pipeline.review_loop import ReviewIteration
-
-
-PHASE_B_REVIEWER_OUTPUT_SCHEMA: Mapping[str, object] = {
+FIX_OUTPUT_SCHEMA: Mapping[str, object] = {
     "type": "object",
-    "required": ["diff_reviewed", "findings"],
+    "required": [
+        "files_changed",
+        "test_nodeid",
+        "test_paths",
+        "verify_command",
+        "head_sha",
+        "suite_scope",
+        "fix_summary",
+        "testing_notes",
+        "criterion_notes",
+        "feasible",
+        "infeasible_reason",
+    ],
     "properties": {
-        "diff_reviewed": {
-            "type": "object",
-            "required": ["base_sha", "head_sha", "files_read"],
-            "properties": {
-                "base_sha": {"type": "string"},
-                "head_sha": {"type": "string"},
-                "files_read": {"type": "array", "items": {"type": "string"}},
-            },
-        },
-        "findings": {"type": "array", "items": {"type": "object"}},
+        "files_changed": {"type": "array", "items": {"type": "string"}},
+        "test_nodeid": {"type": ["string", "null"]},
+        "test_paths": {"type": "array", "items": {"type": "string"}},
+        "verify_command": {"type": "string"},
+        "head_sha": {"type": "string"},
+        "suite_scope": {"type": "array", "items": {"type": "string"}},
+        "fix_summary": {"type": "string"},
+        "testing_notes": {"type": "string"},
+        "criterion_notes": {"type": "string"},
+        "feasible": {"type": "boolean"},
+        "infeasible_reason": {"type": ["string", "null"]},
     },
 }
 
 
-def _context(candidate: Candidate) -> str:
+def _locator(candidate: Candidate) -> str:
+    """Describe the lane locator the session must act on."""
     if candidate.lane is Lane.CODEQL:
         return (
-            f"CodeQL rule: {candidate.rule_id or '<unknown>'}; alert number: "
-            f"{candidate.alert_number or '<unknown>'}; file: {candidate.file_path or '<unknown>'}; "
-            f"line: {candidate.line or '<unknown>'}; symbol: "
-            f"{candidate.normalized_symbol or '<unknown>'}."
+            f"CodeQL rule {candidate.rule_id or '<unknown>'} in "
+            f"{candidate.file_path or '<unknown>'} at line {candidate.line or '<unknown>'} "
+            f"(symbol {candidate.normalized_symbol or '<unknown>'}, "
+            f"region {candidate.position_digest or '<unknown>'})"
         )
     if candidate.lane is Lane.SKIPPED_TESTS:
         return (
-            f"Skipped test nodeid: {candidate.nodeid or '<unknown>'}; skip reason: "
-            f"{candidate.skip_reason or '<unknown>'}; enclosed tests: "
-            f"{candidate.enclosed_tests if candidate.enclosed_tests is not None else '<unknown>'}."
+            f"unconditionally skipped test {candidate.nodeid or '<unknown>'} "
+            f"(skip reason: {candidate.skip_reason or '<none recorded>'}, "
+            f"enclosed tests: "
+            f"{candidate.enclosed_tests if candidate.enclosed_tests is not None else '<unknown>'})"
         )
     return (
-        f"Deprecated symbol: {candidate.qualname or '<unknown>'}; deprecated in: "
-        f"{candidate.deprecated_in or '<unknown>'}; removed in: "
-        f"{candidate.removed_in or '<unknown>'}; "
-        "this site is EOL-passed under the configured major-version lag."
+        f"EOL deprecated symbol {candidate.module or '<unknown>'}:"
+        f"{candidate.qualname or '<unknown>'} "
+        f"(deprecated in {candidate.deprecated_in or '<unknown>'}, "
+        f"removed in {candidate.removed_in or '<unset>'})"
     )
 
 
-def _preamble(
+def _objective(candidate: Candidate) -> str:
+    """Describe the lane's fix objective."""
+    if candidate.lane is Lane.CODEQL:
+        return "Fix the alerted defect so the alert no longer holds at the candidate head."
+    if candidate.lane is Lane.SKIPPED_TESTS:
+        return (
+            "Fix the underlying defect and re-enable the skipped test by removing its "
+            "unconditional skip marker."
+        )
+    return "Remove the EOL deprecated symbol and every internal reference to it."
+
+
+def _test_requirement(candidate: Candidate) -> str:
+    """State the regression-test requirement for the candidate's lane."""
+    if candidate.lane is Lane.DEPRECATIONS:
+        return (
+            "No new test is required: the evidence for a deletion is that the existing suite "
+            "still passes. Report `test_nodeid: null` and say so in criterion_notes."
+        )
+    if candidate.lane is Lane.SKIPPED_TESTS:
+        return (
+            "The re-enabled test is the regression test. Report its collectable nodeid in "
+            "`test_nodeid`; do not weaken, delete or re-skip it."
+        )
+    return (
+        "Add a regression test at the narrowest level that can express the fix — a unit test "
+        "is preferred to an integration test, and re-enabling an existing test counts. If the "
+        "alert class admits no such test, report `test_nodeid: null` and say why in "
+        "criterion_notes."
+    )
+
+
+def render_fix_prompt(
     candidate: Candidate,
     *,
     target_repo: str,
     base_sha: str,
     head_branch: str,
-    role: str,
+    success_criterion: str,
+    attempt: int = 1,
+    suite_scope: Sequence[str] = (),
 ) -> str:
+    """Render the §9 prompt for the one session that fixes this candidate."""
+    scope = list(suite_scope) or list(candidate.suite_scope)
     return (
-        f"You are the {role} for candidate {candidate.candidate_id} in target repository "
-        f"{target_repo}. The base SHA is {base_sha}; the head branch is {head_branch}. "
-        "Your default environment is REPO A, not the target checkout. Do not assume the target "
-        "checkout is present: clone the target repository and check out the base SHA if needed. "
-        f"Defect context: {_context(candidate)}\n"
+        f"attempt:{attempt}\n"
+        f"You are the single remediation session for candidate {candidate.candidate_id} in "
+        f"target repository {target_repo}. Work on branch `{head_branch}`, which already "
+        f"exists and is pinned at base SHA {base_sha}.\n\n"
+        "Your default environment is REPO A, not the target checkout: clone the target "
+        "repository if it is absent, then `git fetch origin` and "
+        f"`git checkout {head_branch}`. Never work detached and never touch another branch.\n\n"
+        f"LANE: {candidate.lane.value}\n"
+        f"LOCATOR: {_locator(candidate)}\n"
+        f"OBJECTIVE: {_objective(candidate)}\n\n"
+        "SUCCESS CRITERION (verbatim; the orchestrator, not you, evaluates it):\n"
+        f"{success_criterion}\n\n"
+        "EVIDENCE YOU MUST LEAVE BEHIND: the fix and its test committed on "
+        f"`{head_branch}`, the exact verify command you ran, the resulting head SHA, and the "
+        "suite scope that covers the change. Nothing you report about your own results is "
+        "evidence; the orchestrator re-runs the commands itself.\n"
+        f"REGRESSION TEST: {_test_requirement(candidate)}\n"
+        f"SUITE SCOPE: {', '.join(scope) if scope else 'the narrowest suite covering the fix'}\n\n"
+        "COMMANDS: create a virtualenv if the checkout lacks one, run the verify command and "
+        "the suite over the suite scope, and report only commands you actually ran.\n"
+        "Commit every change with `git commit -s` so each commit carries the Signed-off-by "
+        f"trailer, then push to `{head_branch}` only.\n\n"
+        "PROHIBITIONS: do not open or comment on a pull request or issue, do not touch any "
+        "other branch, do not edit unrelated tests or code, and do not force-push.\n\n"
+        "Answer with the required structured output object:\n"
+        + json.dumps(FIX_OUTPUT_SCHEMA, indent=2, sort_keys=True)
+        + "\n`feasible: false` with an `infeasible_reason` is a legitimate answer."
     )
 
 
-def _branch_contract(head_branch: str) -> str:
-    """Describe the shared branch handoff both coding roles must honor."""
-    return (
-        f"Run `git fetch origin {head_branch}` and `git checkout {head_branch}` for the existing "
-        "pinned branch; do not create a branch or work detached. The implementer and reviewer "
-        "are working concurrently on "
-        "this same branch. Commit only your own permitted paths with `git commit -s`, then "
-        f"pull --rebase origin `{head_branch}` and push origin `{head_branch}`. If the push is "
-        "rejected, repeat pull-rebase-push. Never force-push. Report the resulting head_sha."
-    )
-
-
-def render_planner_prompt(
-    candidate: Candidate,
-    *,
-    target_repo: str,
-    base_sha: str,
-    head_branch: str,
-) -> str:
-    """Render the planner's acceptance-criteria prompt."""
-    return (
-        _preamble(
-            candidate,
-            target_repo=target_repo,
-            base_sha=base_sha,
-            head_branch=head_branch,
-            role="PLANNER",
-        )
-        + "Write explicit acceptance criteria with expected_failure and verify_command fields, "
-        "plus files_in_scope and out_of_scope. Planner commits nothing. Do not open a PR or issue."
-    )
-
-
-def _planner_text(planner_output: Mapping[str, object]) -> str:
-    return json.dumps(dict(planner_output), indent=2, sort_keys=True)
-
-
-def _findings_text(previous_iteration: ReviewIteration | None) -> str:
-    """Render prior review evidence so retries correct the failed attempt."""
-    if previous_iteration is None:
-        return ""
-    findings = [
-        {
-            "severity": finding.severity.value,
-            "criterion_id": finding.criterion_id,
-            "file": finding.file,
-            "line": finding.line,
-            "note": finding.note,
-        }
-        for finding in previous_iteration.findings
-    ]
-    payload = {
-        "findings": findings,
-        "failing_test": previous_iteration.failing_test,
-        "pre_fix_signature": previous_iteration.pre_fix_signature,
-        "prior_head_sha": previous_iteration.prior_head_sha,
-    }
-    return "\n\nPREVIOUS ITERATION FAILURE (correct this, do not re-roll it):\n" + json.dumps(
-        payload, indent=2, sort_keys=True
-    )
-
-
-def validate_planner_output(planner_output: Mapping[str, object]) -> None:
-    """Reject planner output that cannot act as a shared test oracle."""
-    criteria = planner_output.get("criteria")
-    if not isinstance(criteria, list) or not criteria:
-        raise ValueError("missing planner output: criteria")
-    for index, criterion in enumerate(criteria):
-        if not isinstance(criterion, Mapping):
-            raise ValueError(f"missing planner output: criteria[{index}]")
-        for key in ("id", "statement", "verify_command", "expected_failure"):
-            if key not in criterion:
-                raise ValueError(f"missing planner output: criteria[{index}].{key}")
-        for key in ("id", "statement", "verify_command"):
-            if not isinstance(criterion[key], str) or not criterion[key].strip():
-                raise ValueError(f"missing planner output: criteria[{index}].{key}")
-        expected = criterion["expected_failure"]
-        if not isinstance(expected, Mapping):
-            raise ValueError(f"missing planner output: criteria[{index}].expected_failure")
-        for key in ("nodeid", "exception_type", "message_pattern"):
-            if key not in expected:
-                raise ValueError(
-                    f"missing planner output: criteria[{index}].expected_failure.{key}"
-                )
-            if not isinstance(expected[key], str) or not expected[key].strip():
-                raise ValueError(
-                    f"missing planner output: criteria[{index}].expected_failure.{key}"
-                )
-        if "assert_location" in expected and not isinstance(expected["assert_location"], str):
-            raise ValueError(
-                f"missing planner output: criteria[{index}].expected_failure.assert_location"
-            )
-    for key in ("files_in_scope", "out_of_scope"):
-        values = planner_output.get(key)
-        if not isinstance(values, list) or not all(
-            isinstance(value, str) and value.strip() for value in values
-        ):
-            raise ValueError(f"missing planner output: {key}")
-
-
-def _changed_files(diff: str) -> list[str]:
-    """Extract changed paths for the large-diff handoff without reading the tree."""
-    paths: list[str] = []
-    for line in diff.splitlines():
-        if not line.startswith("+++ b/"):
-            continue
-        path = line[6:]
-        if path != "/dev/null" and path not in paths:
-            paths.append(path)
-    return paths
-
-
-def render_implementer_prompt(
-    candidate: Candidate,
-    *,
-    target_repo: str,
-    base_sha: str,
-    head_branch: str,
-    planner_output: Mapping[str, object],
-    previous_iteration: ReviewIteration | None = None,
-) -> str:
-    """Render the production-only implementer prompt with planner output."""
-    return (
-        _preamble(
-            candidate,
-            target_repo=target_repo,
-            base_sha=base_sha,
-            head_branch=head_branch,
-            role="IMPLEMENTER",
-        )
-        + _branch_contract(head_branch)
-        + "\nImplement the planner specification below. Touch production files only; never edit "
-        "tests or skip markers. Run every verify_command (create a venv if the environment "
-        "lacks one), report only commands actually run, commit with `git commit -s`, "
-        "and do not open a PR or issue.\n\n"
-        "PLANNER SPECIFICATION (verbatim):\n"
-        + _planner_text(planner_output)
-        + _findings_text(previous_iteration)
-    )
-
-
-def render_reviewer_prompt(
-    candidate: Candidate,
-    *,
-    target_repo: str,
-    base_sha: str,
-    head_branch: str,
-    planner_output: Mapping[str, object],
-    previous_iteration: ReviewIteration | None = None,
-) -> str:
-    """Render the phase-A reviewer prompt with planner output."""
-    return (
-        _preamble(
-            candidate,
-            target_repo=target_repo,
-            base_sha=base_sha,
-            head_branch=head_branch,
-            role="REVIEWER",
-        )
-        + _branch_contract(head_branch)
-        + "\nAuthor tests only, at exactly the planner expected_failure nodeids. Run every "
-        "verify_command (create a venv if the environment lacks one) and report only executed "
-        "commands. Every test maps to a planner criterion; findings carry a criterion id or "
-        "null for a genuine off-criterion defect. Do not open a PR or issue.\n\n"
-        "PLANNER SPECIFICATION (verbatim):\n"
-        + _planner_text(planner_output)
-        + _findings_text(previous_iteration)
-    )
-
-
-def render_reviewer_phase_b_prompt(
-    candidate: Candidate,
-    *,
-    target_repo: str,
-    base_sha: str,
-    head_branch: str,
-    planner_output: Mapping[str, object],
-    committed_diff: str,
-    head_sha: str,
-) -> str:
-    """Render the post-join reviewer diff-review prompt."""
-    changed_paths = _changed_files(committed_diff)
-    diff = committed_diff
-    if len(diff) > 60_000:
-        file_list = ", ".join(f"`{path}`" for path in changed_paths) or "the changed files"
-        diff = (
-            "[diff omitted because it exceeds 60000 characters]. Changed files: "
-            f"{file_list}. Read `git diff {base_sha}..HEAD` on branch `{head_branch}` instead."
-        )
-    return (
-        _preamble(
-            candidate,
-            target_repo=target_repo,
-            base_sha=base_sha,
-            head_branch=head_branch,
-            role="REVIEWER PHASE B",
-        )
-        + "Read the implementer's full diff and complete the §9 findings contract. Findings "
-        "must use severity blocking|major|minor|nit, nullable criterion_id, file and line "
-        "range, triggering path, and proposed fix. Populate the `diff_reviewed` object below; "
-        "a boolean is rejected. The required response object is:\n"
-        + json.dumps(
-            {
-                "diff_reviewed": {
-                    "base_sha": base_sha,
-                    "head_sha": head_sha,
-                    "files_read": changed_paths,
-                },
-                "findings": [],
-            },
-            indent=2,
-        )
-        + "\nEvery changed path must appear in files_read; do not substitute read_full_diff "
-        "or any other coarse alternative. Reuse the planner criteria below and do not author "
-        "unrelated tests.\n\n"
-        "PLANNER SPECIFICATION (verbatim):\n"
-        + _planner_text(planner_output)
-        + "\n\nIMPLEMENTER COMMITTED DIFF:\n"
-        + diff
-    )
-
-
-__all__ = [
-    "render_implementer_prompt",
-    "render_planner_prompt",
-    "render_reviewer_phase_b_prompt",
-    "render_reviewer_prompt",
-    "PHASE_B_REVIEWER_OUTPUT_SCHEMA",
-    "validate_planner_output",
-]
+__all__ = ["FIX_OUTPUT_SCHEMA", "render_fix_prompt"]

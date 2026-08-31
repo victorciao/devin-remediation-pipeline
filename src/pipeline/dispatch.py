@@ -9,6 +9,7 @@ from pipeline.schemas import (
     Candidate,
     CandidateState,
     GateName,
+    MergeMode,
     ReasonCode,
     Tier,
 )
@@ -200,7 +201,7 @@ def dispatch_candidates(candidates: Sequence[Candidate], config: PipelineConfig)
                 }
             )
             continue
-        if dispatched_count >= config.budget_N:
+        if tier is Tier.HIGH and dispatched_count >= config.budget_N:
             decisions[candidate.candidate_id] = candidate.model_copy(
                 update={
                     "tier": tier,
@@ -213,30 +214,28 @@ def dispatch_candidates(candidates: Sequence[Candidate], config: PipelineConfig)
             continue
 
         labels = list(candidate.labels)
-        if tier is Tier.HIGH and (candidate.risk >= 3 or candidate.unresolved_major):
+        if tier is Tier.HIGH and candidate.risk >= 3:
             labels = _with_label(candidate, NEEDS_HUMAN_REVIEW_LABEL)
         auto_merge = (
             tier is Tier.HIGH
             and candidate.risk <= 2
             and config.auto_merge_enabled
             and config.ci_evidence_mode is not CiEvidenceMode.LOCAL
-            and not candidate.unresolved_major
+            and bool(config.required_contexts_min)
             and candidate.action is not Action.HUMAN_REVIEW
             and candidate.state is not CandidateState.TERMINAL
         )
-        # §14 invariant: unresolved major findings block auto-merge and require
-        # human review; this policy is not configurable through a parameter.
-        if candidate.unresolved_major:
-            labels = _with_label(candidate, NEEDS_HUMAN_REVIEW_LABEL)
         decisions[candidate.candidate_id] = candidate.model_copy(
             update={
                 "tier": tier,
                 "action": Action.OPEN_PR if tier is Tier.HIGH else Action.OPEN_ISSUE,
                 "state": CandidateState.DISPATCHING,
                 "auto_merge_eligible": auto_merge,
+                "merge_mode": MergeMode.AUTO if auto_merge else MergeMode.MANUAL,
                 "labels": labels,
             }
         )
-        dispatched_count += 1
+        if tier is Tier.HIGH:
+            dispatched_count += 1
 
     return [decisions[candidate.candidate_id] for candidate in source]

@@ -12,6 +12,7 @@ from typing import cast
 
 from pipeline.config import AlertSource, PipelineConfig
 from pipeline.schemas import Candidate, Lane
+from pipeline.verify import declare_success_criterion
 
 JsonObject = dict[str, object]
 AlertReader = Callable[[str], object]
@@ -306,6 +307,8 @@ def enumerate_codeql_candidates(
             symbol_source=symbol_source,
             base_sha=base_sha,
             line=start_line,
+            success_criterion=declare_success_criterion(Lane.CODEQL),
+            suite_scope=[path],
         )
         candidates.append(candidate)
     return candidates

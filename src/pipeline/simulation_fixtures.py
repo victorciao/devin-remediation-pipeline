@@ -1,134 +1,95 @@
-"""Deterministic role-output fixtures for credential-free simulation."""
+"""Deterministic session-output fixtures for credential-free simulation."""
 
 from __future__ import annotations
 
-import hashlib
-from dataclasses import replace
-from typing import TYPE_CHECKING
+from collections.abc import Sequence
 
-from pipeline.schemas import Candidate, ExpectedFailure, ItemOutcome
+from pipeline.schemas import Candidate, ItemOutcome, Lane, PerItemOutcome
+from pipeline.verify import (
+    AlertObservation,
+    ItemRunResult,
+    Observers,
+    SuiteResult,
+    SymbolObservation,
+)
 
-if TYPE_CHECKING:
-    from pipeline.session_client import OrchestrationResult
 
-
-def simulation_result(
-    result: OrchestrationResult,
-    candidate: Candidate,
-) -> OrchestrationResult:
-    """Replace remote role output with realistic classifier fixture data."""
-    from pipeline.session_client import OrchestrationResult
-
-    expected = candidate.expected_failure or ExpectedFailure(
-        nodeid=candidate.nodeid or candidate.stable_locator,
-        exception_type="AssertionError",
-        message_pattern="simulated failure",
+def simulated_fix_output(candidate: Candidate) -> dict[str, object]:
+    """Return the structured output a simulated remediation session would report."""
+    test_nodeid = candidate.nodeid if candidate.lane is Lane.SKIPPED_TESTS else None
+    test_paths = (
+        [candidate.nodeid.split("::", 1)[0]]
+        if candidate.lane is Lane.SKIPPED_TESTS and candidate.nodeid
+        else []
     )
-    expected_payload = expected.model_dump(mode="json")
-    kind = hashlib.sha256(candidate.candidate_id.encode()).digest()[0] % 3
-    if kind == 0:
-        observed = {
-            "nodeid": expected.nodeid,
-            "outcome": ItemOutcome.FAILED,
-            "exception_type": expected.exception_type,
-            "message": "simulated failure",
-            "assert_location": expected.assert_location,
-        }
-    elif kind == 1:
-        observed = {
-            "nodeid": expected.nodeid,
-            "outcome": ItemOutcome.FAILED,
-            "exception_type": "TypeError",
-            "message": "different simulated failure",
-        }
-    else:
-        observed = {
-            "nodeid": expected.nodeid,
-            "outcome": ItemOutcome.PASSED,
-        }
-    planner_payload = {
-        "criteria": [
-            {
-                "id": "AC-1",
-                "statement": "Apply the remediation.",
-                "expected_failure": expected_payload,
-                "verify_command": "pytest fixtures/simulated_test.py",
-            }
-        ],
-        "files_in_scope": ["src/simulated_remediation.py"],
-        "out_of_scope": ["tests/"],
-    }
-    implementer_payload = {
-        "files_changed": ["src/simulated_remediation.py"],
-        "criteria_addressed": ["AC-1"],
-        "commands_run": ["pytest fixtures/simulated_test.py"],
-        "committed_diff": (
-            "diff --git a/src/simulated_remediation.py b/src/simulated_remediation.py\n"
-            "--- a/src/simulated_remediation.py\n"
-            "+++ b/src/simulated_remediation.py\n"
-            "@@ -1 +1 @@\n"
-            "-old\n"
-            "+new\n"
-        ),
-    }
-    reviewer_payload = {
-        "tests": [
-            {
-                "path": "fixtures/simulated_test.py",
-                "nodeid": expected.nodeid,
-                "criterion_id": "AC-1",
-            }
-        ],
-        "red_baseline": {"observed": observed},
-        "green_result": {"passed": True},
-        "diff_reviewed": {
-            "base_sha": candidate.base_sha or "0000000",
-            "head_sha": candidate.head_sha or "1111111",
-            "files_read": ["src/simulated_remediation.py"],
-        },
-        "committed_diff": (
-            "diff --git a/tests/test_simulated.py b/tests/test_simulated.py\n"
-            "--- a/tests/test_simulated.py\n"
-            "+++ b/tests/test_simulated.py\n"
-            "@@ -1 +1 @@\n"
-            "-def test_old(): pass\n"
-            "+def test_new(): pass\n"
-        ),
-        "findings": [],
-    }
-    snapshots = (
-        replace(
-            result.planner,
-            snapshot=replace(
-                result.planner.snapshot,
-                payload={
-                    **result.planner.snapshot.payload,
-                    "structured_output": planner_payload,
-                },
-            ),
-        ),
-        replace(
-            result.implementer,
-            snapshot=replace(
-                result.implementer.snapshot,
-                payload={
-                    **result.implementer.snapshot.payload,
-                    "structured_output": implementer_payload,
-                },
-            ),
-        ),
-        replace(
-            result.reviewer,
-            snapshot=replace(
-                result.reviewer.snapshot,
-                payload={
-                    **result.reviewer.snapshot.payload,
-                    "structured_output": reviewer_payload,
-                },
-            ),
-        ),
+    suite_scope = list(candidate.suite_scope) or (
+        [candidate.file_path] if candidate.file_path else ["tests/"]
     )
-    return OrchestrationResult(*snapshots)
+    verify_command = (
+        f"pytest {test_nodeid}" if test_nodeid is not None else "pytest " + suite_scope[0]
+    )
+    return {
+        "files_changed": [candidate.file_path or "superset/simulated.py"],
+        "test_nodeid": test_nodeid,
+        "test_paths": test_paths,
+        "verify_command": verify_command,
+        "head_sha": candidate.head_sha or f"simulated-head-{candidate.candidate_id[:12]}",
+        "suite_scope": suite_scope,
+        "fix_summary": f"Simulated remediation for {candidate.stable_locator}.",
+        "testing_notes": "Simulated run: no session was created and no command was executed.",
+        "criterion_notes": "Simulated run: the criterion is not observed in SIMULATE.",
+        "feasible": True,
+        "infeasible_reason": None,
+    }
 
 
-__all__ = ["simulation_result"]
+def simulated_observers(*, base_sha: str) -> Observers:
+    """Return observation seams that stand in for real execution in SIMULATE.
+
+    Every command string is labelled ``SIMULATED`` so no report can read as an
+    orchestrator observation of the live fork.
+    """
+
+    def run_item(sha: str, nodeid: str) -> ItemRunResult:
+        red = sha == base_sha
+        return ItemRunResult(
+            outcomes=(
+                PerItemOutcome(
+                    nodeid=nodeid,
+                    outcome=ItemOutcome.FAILED if red else ItemOutcome.PASSED,
+                    exception_type="AssertionError" if red else None,
+                    message="simulated red baseline" if red else None,
+                ),
+            ),
+            command=f"SIMULATED pytest {nodeid} at {sha}",
+        )
+
+    def run_suite(scope: Sequence[str], sha: str) -> SuiteResult:
+        return SuiteResult(
+            passed=True,
+            command=f"SIMULATED pytest {' '.join(scope) or 'tests/'} at {sha}",
+        )
+
+    def probe_symbol(target: Candidate, sha: str) -> SymbolObservation:
+        return SymbolObservation(
+            resolves=False,
+            caller_count=0,
+            override_count=0,
+            command=f"SIMULATED symbol re-check of {target.stable_locator} at {sha}",
+        )
+
+    def probe_alerts(target: Candidate, sha: str) -> AlertObservation:
+        return AlertObservation(
+            locators=(),
+            command=f"SIMULATED alert re-read for {target.candidate_id} at {sha}",
+        )
+
+    return Observers(
+        run_item=run_item,
+        run_suite=run_suite,
+        probe_symbol=probe_symbol,
+        probe_alerts=probe_alerts,
+    )
+
+
+__all__ = ["simulated_fix_output", "simulated_observers"]

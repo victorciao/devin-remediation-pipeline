@@ -55,22 +55,20 @@ class ReasonCode(str, Enum):
     CLOSED_PULL_REQUEST = "closed_pull_request"
     MERGED_EXTERNALLY_UNVERIFIED = "merged_externally_unverified"
     AWAITING_WORKFLOW_APPROVAL = "awaiting_workflow_approval"
-    ARTIFACT_DEGRADED = "artifact_degraded"
-    ARTIFACT_ORPHANED = "artifact_orphaned"
     CI_WORKFLOWS_ABSENT = "ci_workflows_absent"
     GUARDRAIL_CLAMPED = "guardrail_clamped"
-    DISAGREEMENT_UNRESOLVED = "disagreement_unresolved"
-    IMPLEMENTER_TEST_EDIT = "implementer_test_edit"
-    ROLE_COLLISION = "role_collision"
     SESSION_CEILING = "session_ceiling"
+    SESSION_FAILED = "session_failed"
     COLLECTION_ERROR = "collection_error"
     RUBRIC_FACTOR_UNRESOLVED = "rubric_factor_unresolved"
-    DIFF_REVIEW_INCOMPLETE = "diff_review_incomplete"
-    BRANCH_NOT_ADVANCED = "branch_not_advanced"
-    ROLE_COMMIT_MISSING = "role_commit_missing"
     SESSION_BLOCKED = "session_blocked"
-    PHASE_B_CORRELATION_UNAVAILABLE = "phase_b_correlation_unavailable"
-    RESERVATION_HELD = "reservation_held"
+    CRITERION_NOT_MET = "criterion_not_met"
+    GREEN_NOT_REACHED = "green_not_reached"
+    ALERT_STILL_PRESENT = "alert_still_present"
+    SYMBOL_STILL_REFERENCED = "symbol_still_referenced"
+    SUITE_REGRESSED = "suite_regressed"
+    MANUAL_MERGE_REQUIRED = "manual_merge_required"
+    HUMAN_ROUTED = "human_routed"
     ARTIFACT_VALIDATION_FAILED = "artifact_validation_failed"
     LABEL_CAPABILITY_UNAVAILABLE = "label_capability_unavailable"
     MARKER_SEARCH_FAILED = "marker_search_failed"
@@ -85,11 +83,12 @@ class CandidateState(str, Enum):
     SCORED = "scored"
     DISPATCHING = "dispatching"
     ISSUE_CREATED = "issue_created"
+    SESSION_DONE = "session_done"
+    VERIFIED = "verified"
     PR_CREATED = "pr_created"
-    ISSUE_PATCHED = "issue_patched"
-    CONVERGED = "converged"
+    AWAITING_HUMAN_MERGE = "awaiting_human_merge"
+    MERGED = "merged"
     TERMINAL = "terminal"
-    COMMENT_CREATED = "comment_created"
     BLOCKED_BY_ENCLOSING_SKIP = "blocked_by_enclosing_skip"
     SUPPRESSED_BY_CONTAINMENT = "suppressed_by_containment"
     DEFERRED = "deferred"
@@ -111,7 +110,6 @@ class Action(str, Enum):
     LOG_ONLY = "log_only"
     DEFERRED = "deferred"
     HUMAN_REVIEW = "human_review"
-    REVIEWER_ONLY_DIFF = "reviewer_only_diff"
 
 
 class GateName(str, Enum):
@@ -183,6 +181,32 @@ class RedBaselineResult(StrictModel):
     still_skipped_descendants: list[str] = Field(default_factory=list)
     representative_nodeid: str | None = None
     expected_failure: ExpectedFailure | None = None
+
+
+class MergeMode(str, Enum):
+    """Who owns the merge of a high-tier candidate's pull request."""
+
+    AUTO = "auto"
+    MANUAL = "manual"
+
+
+class CheckRunConclusion(StrictModel):
+    """One check run observed on a pull-request head."""
+
+    name: str = Field(min_length=1)
+    conclusion: str | None = None
+    status: str | None = None
+
+
+class CriterionEvidence(StrictModel):
+    """Evidence the orchestrator observed for one candidate's criterion."""
+
+    criterion: str = Field(min_length=1)
+    satisfied: bool | None = None
+    stage: Literal["pre_pr", "post_pr"] = "pre_pr"
+    commands: list[str] = Field(default_factory=list)
+    observations: list[str] = Field(default_factory=list)
+    reason: ReasonCode | None = None
 
 
 class Candidate(StrictModel):
@@ -262,33 +286,25 @@ class Candidate(StrictModel):
     reason_detail: str | None = None
     pr_url: str | None = None
     issue_url: str | None = None
-    comment_url: str | None = None
     merged_at: str | None = None
     merge_verified: bool = False
     auto_merge_requested: bool = False
     ci_evidence_mode: str | None = None
-    artifact_degraded: bool = False
     issue_number: int | None = Field(default=None, ge=1)
     pr_number: int | None = Field(default=None, ge=1)
     head_branch: str | None = None
     head_sha: str | None = None
-    reviewed_head_sha: str | None = None
-    reserved_at: float | None = Field(default=None, ge=0)
-    reserved_by_run_id: str | None = None
     artifact_simulated: bool = False
     marker_search_outcome: str | None = None
-    unresolved_major: bool = False
     auto_merge_eligible: bool | None = None
     labels: list[str] = Field(default_factory=list)
-    planner_session_id: str | None = None
-    implementer_session_id: str | None = None
-    reviewer_session_id: str | None = None
+    success_criterion: str | None = None
+    criterion_evidence: CriterionEvidence | None = None
+    merge_mode: MergeMode | None = None
+    suite_scope: list[str] = Field(default_factory=list)
+    check_run_conclusions: list[CheckRunConclusion] = Field(default_factory=list)
+    session_id: str | None = None
     role_attempts: dict[str, int] = Field(default_factory=dict)
-    role_attempt_evidence: dict[str, dict[str, object]] = Field(default_factory=dict)
-    planner_criteria: list[str] = Field(default_factory=list)
-    reviewer_criterion_ids: list[str] = Field(default_factory=list)
-    diff_reviewed: bool = False
-    iterations: int = Field(default=0, ge=0)
     test_added: bool | None = None
     test_paths: list[str] = Field(default_factory=list)
     test_author: str | None = None
@@ -296,8 +312,8 @@ class Candidate(StrictModel):
     expected_failure: ExpectedFailure | None = None
     red_baseline: RedBaselineResult | None = None
     lifted_markers: list[str] = Field(default_factory=list)
-    disagreement_summary: str | None = None
-    phase_b_protocol_violation: str | None = None
+    test_nodeid: str | None = None
+    fix_summary: str | None = None
 
 
 class EventRecord(StrictModel):
@@ -318,24 +334,23 @@ class EventRecord(StrictModel):
     factor_rows: dict[str, str] = Field(default_factory=dict)
     tier: Tier | None = None
     action: Action | None = None
-    planner_session_id: str | None = None
-    implementer_session_id: str | None = None
-    reviewer_session_id: str | None = None
+    merge_mode: MergeMode | None = None
+    session_id: str | None = None
     role_attempts: dict[str, int] = Field(default_factory=dict)
-    role_attempt_evidence: dict[str, dict[str, object]] = Field(default_factory=dict)
-    planner_criteria: list[str] = Field(default_factory=list)
-    reviewer_criterion_ids: list[str] = Field(default_factory=list)
-    diff_reviewed: bool = False
-    iterations: int = Field(default=0, ge=0)
+    success_criterion: str | None = None
+    criterion_evidence: CriterionEvidence | None = None
+    suite_scope: list[str] = Field(default_factory=list)
+    check_run_conclusions: list[CheckRunConclusion] = Field(default_factory=list)
     pr_url: str | None = None
     issue_url: str | None = None
-    comment_url: str | None = None
+    issue_number: int | None = Field(default=None, ge=1)
+    pr_number: int | None = Field(default=None, ge=1)
     merged_at: str | None = None
     merge_verified: bool = False
     auto_merge_requested: bool = False
     ci_evidence_mode: str | None = None
-    artifact_degraded: bool = False
     test_added: bool | None = None
+    test_nodeid: str | None = None
     test_paths: list[str] = Field(default_factory=list)
     test_author: str | None = None
     test_exempt_reason: ReasonCode | None = None
@@ -348,10 +363,8 @@ class EventRecord(StrictModel):
     collects_single_item: bool | None = None
     lifted_markers: list[str] = Field(default_factory=list)
     related_candidate_id: str | None = None
-    disagreement_summary: str | None = None
     marker_search_outcome: str | None = None
     artifact_simulated: bool = False
-    phase_b_protocol_violation: str | None = None
     attempt: int = Field(default=1, ge=1)
     is_new_session_raw: bool | None = None
     retry_decision: RetryDecision = RetryDecision.PROCEED

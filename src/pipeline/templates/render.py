@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from pipeline.config import SECURITY_ISSUE_MODE
-from pipeline.schemas import Candidate, Lane
+from pipeline.schemas import Candidate, Lane, MergeMode
 
 
 class ArtifactValidationError(ValueError):
@@ -32,36 +32,73 @@ def _section_body(template: str, heading: str) -> str:
     raise ArtifactValidationError(f"template lacks required heading: {heading}")
 
 
-def _planner_text(planner_output: Mapping[str, object]) -> str:
-    criteria = planner_output.get("criteria")
-    if not isinstance(criteria, list):
-        return "No additional implementation criteria supplied."
-    rendered: list[str] = []
-    for item in criteria:
-        if not isinstance(item, Mapping):
-            continue
-        criterion_id = item.get("id")
-        statement = item.get("statement")
-        if isinstance(criterion_id, str) and isinstance(statement, str):
-            rendered.append(f"- **{criterion_id}**: {statement}")
-    return "\n".join(rendered) or "No additional implementation criteria supplied."
+def _locator_text(candidate: Candidate) -> str:
+    """Render the candidate's lane locator without exploit detail."""
+    if candidate.lane is Lane.CODEQL:
+        return f"rule `{candidate.rule_id or '<rule>'}` in `{candidate.file_path or '<module>'}`"
+    if candidate.lane is Lane.SKIPPED_TESTS:
+        return f"`{candidate.nodeid or candidate.stable_locator}`"
+    return f"`{candidate.module or '<module>'}:{candidate.qualname or '<symbol>'}`"
 
 
-def _reviewer_text(reviewer_output: Mapping[str, object]) -> str:
-    tests = reviewer_output.get("tests")
-    commands = reviewer_output.get("commands_run")
+def _score_text(candidate: Candidate) -> list[str]:
+    """Render the score and its factor breakdown for an issue body."""
+    lines = [
+        f"- **lane**: {candidate.lane.value}",
+        f"- **locator**: {_locator_text(candidate)}",
+        f"- **score**: {candidate.score if candidate.score is not None else 'n/a'}"
+        f" (tier {candidate.tier.value if candidate.tier is not None else 'n/a'})",
+        f"- **business_impact**: {candidate.business_impact}",
+        f"- **verifiability**: {candidate.verifiability}",
+        f"- **automatability**: {candidate.automatability}",
+        f"- **signal_quality**: {candidate.signal_quality}",
+        f"- **risk**: {candidate.risk}",
+    ]
+    lines.extend(f"- **{factor} row**: {row}" for factor, row in candidate.factor_rows.items())
+    return lines
+
+
+def _evidence_text(candidate: Candidate) -> list[str]:
+    """Render the criterion and the commands the orchestrator itself ran."""
+    evidence = candidate.criterion_evidence
+    criterion = candidate.success_criterion or (
+        evidence.criterion if evidence is not None else "n/a"
+    )
+    lines = [f"- **criterion**: {criterion}"]
+    if evidence is None:
+        lines.append("- **observed**: no orchestrator observation is recorded")
+        return lines
+    lines.append(
+        "- **observed by**: the orchestrator, by executing the commands below; "
+        "the session's own account is not evidence"
+    )
+    lines.extend(f"- **command**: `{command}`" for command in evidence.commands)
+    lines.extend(f"- **result**: {observation}" for observation in evidence.observations)
+    lines.append(
+        "- **satisfied**: "
+        + (
+            "pending post-PR observation"
+            if evidence.satisfied is None
+            else ("yes" if evidence.satisfied else "no")
+        )
+    )
+    return lines
+
+
+def _testing_text(candidate: Candidate) -> str:
+    """Render testing instructions from the recorded test evidence."""
     lines: list[str] = []
-    if isinstance(tests, list):
-        for item in tests:
-            if not isinstance(item, Mapping):
-                continue
-            nodeid = item.get("nodeid")
-            criterion_id = item.get("criterion_id")
-            if isinstance(nodeid, str) and isinstance(criterion_id, str):
-                lines.append(f"- `{nodeid}` (criterion `{criterion_id}`)")
-    if isinstance(commands, list):
-        lines.extend(f"- `{item}`" for item in commands if isinstance(item, str))
-    return "\n".join(lines) or "No reviewer test details supplied."
+    if candidate.test_nodeid is not None:
+        lines.append(f"- Run `pytest {candidate.test_nodeid}`.")
+    lines.extend(f"- Test file: `{path}`" for path in candidate.test_paths)
+    if candidate.suite_scope:
+        lines.append(
+            "- Run the suite covering: "
+            + ", ".join(f"`{scope}`" for scope in candidate.suite_scope)
+        )
+    if not lines:
+        lines.append("- Run the suite covering the changed paths.")
+    return "\n".join(lines)
 
 
 def _commit_signoff(commit_message: str | None) -> str | None:
@@ -84,20 +121,23 @@ def _metadata_value(value: object) -> str:
 def render_pr_body(
     template: str,
     candidate: Candidate,
-    planner_output: Mapping[str, object],
-    reviewer_output: Mapping[str, object],
     *,
     automation_metadata: Mapping[str, object] | None = None,
     issue_number: int | None = None,
     commit_message: str | None = None,
 ) -> str:
-    """Render a PR body while preserving the vendored Superset checkbox block."""
-    summary = (
+    """Render a PR body carrying the criterion, its evidence and `Closes #<n>`."""
+    summary = [
         "Technical remediation for engineers and AI reviewers; candidate surfaced by "
-        f"the {candidate.lane.value} lane."
-    )
+        f"the {candidate.lane.value} lane.",
+        candidate.fix_summary or f"Remediates {_locator_text(candidate)}.",
+        "",
+        "Every commit in this pull request carries the `Signed-off-by` trailer.",
+    ]
+    if candidate.merge_mode is MergeMode.MANUAL:
+        summary.append("A human owns the merge of this pull request; the pipeline never merges it.")
     if issue_number is not None:
-        summary += f"\n\nCloses #{issue_number}"
+        summary.extend(["", f"Closes #{issue_number}"])
     prefix = template.split("### SUMMARY", 1)[0].rstrip()
     additional = _section_body(template, "### ADDITIONAL INFORMATION")
     sections = [
@@ -109,19 +149,16 @@ def render_pr_body(
         ),
         prefix,
         "### SUMMARY",
-        summary,
+        *summary,
         "",
-        "### IMPLEMENTATION PLAN",
-        _planner_text(planner_output),
-        "",
-        "### TESTS",
-        _reviewer_text(reviewer_output),
+        "### EVIDENCE",
+        *_evidence_text(candidate),
         "",
         "### BEFORE/AFTER SCREENSHOTS OR ANIMATED GIF",
         "n/a",
         "",
         "### TESTING INSTRUCTIONS",
-        _reviewer_text(reviewer_output),
+        _testing_text(candidate),
         "",
         "### ADDITIONAL INFORMATION",
         additional,
@@ -130,27 +167,16 @@ def render_pr_body(
     if signoff is not None:
         sections.extend(["", signoff])
     if automation_metadata is not None:
-        metadata = dict(automation_metadata)
         sections.extend(
             [
                 "",
                 "### AUTOMATION METADATA",
-                *(f"- **{key}**: {_metadata_value(value)}" for key, value in metadata.items()),
+                *(
+                    f"- **{key}**: {_metadata_value(value)}"
+                    for key, value in dict(automation_metadata).items()
+                ),
             ]
         )
-        if metadata.get("ci_evidence_mode") == "local":
-            sections.extend(
-                [
-                    "- **evidence_label**: self-reported by automation",
-                    "- **implementer_commands_run**: "
-                    f"{_metadata_value(metadata.get('implementer_commands_run', 'n/a'))}",
-                    "- **reviewer_pre_fix_failure**: "
-                    f"{_metadata_value(metadata.get('reviewer_pre_fix_failure', 'n/a'))}",
-                    "- **reviewer_post_fix_result**: "
-                    f"{_metadata_value(metadata.get('reviewer_post_fix_result', 'n/a'))}",
-                    f"- **diff_range**: {_metadata_value(metadata.get('diff_range', 'n/a'))}",
-                ]
-            )
     return "\n".join(sections).rstrip() + "\n"
 
 
@@ -182,11 +208,22 @@ def render_issue_body(
     candidate: Candidate,
     *,
     generated_summary: str,
-    verification: str = "Pending reviewer verification.",
+    verification: str = "Remediation status is tracked by the pipeline.",
     references: str | None = None,
+    not_automated_reason: str | None = None,
 ) -> str:
-    """Render a manager-facing issue body in the selected Superset shape."""
+    """Render a tracking issue body in the selected Superset shape."""
     marker = candidate_marker(candidate.candidate_id)
+    details = "\n".join(
+        [
+            *_score_text(candidate),
+            *(
+                [f"- **not automated**: {not_automated_reason}"]
+                if not_automated_reason is not None
+                else []
+            ),
+        ]
+    )
     if candidate.lane is Lane.CODEQL:
         if SECURITY_ISSUE_MODE != "generic_tracking":
             raise ArtifactValidationError("unsupported security issue mode")
@@ -195,8 +232,8 @@ def render_issue_body(
         values = {
             "### SUMMARY (no exploit detail)": generated_summary,
             "### SCOPE (files or modules only)": candidate.file_path or "<module>",
-            "### REMEDIATION STATUS": "Remediation is being tracked by the pipeline.",
-            "### VERIFICATION": verification,
+            "### REMEDIATION STATUS": f"{verification}\n{details}",
+            "### VERIFICATION": candidate.success_criterion or verification,
             "### REFERENCES (rule ID only)": candidate.rule_id or "<rule>",
         }
         simulated_heading_codeql = (
@@ -222,7 +259,7 @@ def render_issue_body(
             body = parts[2].lstrip("\n") if len(parts) == 3 else body
         body = body.replace(
             "Description of the problem to be solved.",
-            f"For EM/PM tracking: {generated_summary}",
+            f"For EM/PM tracking: {generated_summary}\n\n{details}",
         )
         simulated_heading = (
             "\n### SIMULATED ARTIFACT\nWrites are suppressed; no remote artifact exists.\n"
@@ -242,7 +279,7 @@ def render_issue_body(
         f"For EM/PM tracking: {generated_summary}",
         "n/a",
         "Superset target revision is recorded on the candidate.",
-        verification,
+        f"{verification}\n\n{details}",
         "- [ ] Pipeline-generated remediation",
     ]
     pairs = ([heading, value, ""] for heading, value in zip(headings, content, strict=True))
@@ -254,30 +291,11 @@ def render_issue_body(
     return "\n".join([marker, *simulated, *sum(pairs, [])]).rstrip() + "\n"
 
 
-def render_degraded_comment_body(
-    template: str,
-    candidate: Candidate,
-    *,
-    generated_summary: str,
-    verification: str = "Pending reviewer verification.",
-) -> str:
-    """Render the degraded issue artifact as a validated PR comment body."""
-    body = render_issue_body(
-        template,
-        candidate,
-        generated_summary=generated_summary,
-        verification=verification,
-    )
-    validate_issue_body(body, candidate)
-    return body
-
-
-def validate_pr_body(body: str) -> None:
-    """Validate required PR headings, order, and the absence of CHECKLIST."""
+def validate_pr_body(body: str, *, issue_number: int | None = None) -> None:
+    """Validate required PR headings, order and the cross-link to the issue."""
     headings = [
         "### SUMMARY",
-        "### IMPLEMENTATION PLAN",
-        "### TESTS",
+        "### EVIDENCE",
         "### BEFORE/AFTER SCREENSHOTS OR ANIMATED GIF",
         "### TESTING INSTRUCTIONS",
         "### ADDITIONAL INFORMATION",
@@ -289,36 +307,12 @@ def validate_pr_body(body: str) -> None:
         raise ArtifactValidationError("PR body must not add a CHECKLIST heading")
     if "- [ ] Has associated issue:" not in body:
         raise ArtifactValidationError("PR body lost the Superset checkbox block")
+    if "Signed-off-by" not in body:
+        raise ArtifactValidationError("PR body must state the sign-off trailer")
+    if issue_number is not None and f"Closes #{issue_number}" not in body:
+        raise ArtifactValidationError("PR body lacks the Closes reference to its tracking issue")
     if "### AUTOMATION METADATA" in body and body.index("### AUTOMATION METADATA") < positions[-1]:
         raise ArtifactValidationError("automation metadata must be last")
-    if "- **ci_evidence_mode**: local" in body:
-        required_evidence = (
-            "- **evidence_label**: self-reported by automation",
-            "- **implementer_commands_run**:",
-            "- **reviewer_pre_fix_failure**:",
-            "- **reviewer_post_fix_result**:",
-            "- **diff_range**:",
-        )
-        if any(item not in body for item in required_evidence):
-            raise ArtifactValidationError("local PR body lacks automation evidence block")
-        for field in (
-            "implementer_commands_run",
-            "reviewer_pre_fix_failure",
-            "reviewer_post_fix_result",
-            "diff_range",
-        ):
-            prefix = f"- **{field}**:"
-            values = [
-                line[len(prefix) :].strip() for line in body.splitlines() if line.startswith(prefix)
-            ]
-            value = values[-1] if values else ""
-            if not value or value.lower() in {"n/a", "none", "null"}:
-                raise ArtifactValidationError(f"local PR body lacks value for {field}")
-            if (
-                field == "diff_range"
-                and re.fullmatch(r"[0-9a-f]{7,40}\.\.[0-9a-f]{7,40}", value) is None
-            ):
-                raise ArtifactValidationError("local PR body has an invalid diff_range")
 
 
 def validate_issue_body(body: str, candidate: Candidate) -> None:
@@ -373,7 +367,6 @@ __all__ = [
     "candidate_marker",
     "ArtifactValidationError",
     "compare_template_files",
-    "render_degraded_comment_body",
     "render_issue_body",
     "render_issue_title",
     "render_pr_body",

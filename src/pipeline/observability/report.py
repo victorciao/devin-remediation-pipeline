@@ -10,6 +10,12 @@ from pipeline.config import Mode
 from pipeline.schemas import Action, Candidate, CandidateState
 
 
+def _criterion_satisfied(candidate: Candidate) -> str:
+    """Return the observed criterion verdict for one candidate."""
+    evidence = candidate.criterion_evidence
+    return "n/a" if evidence is None else str(evidence.satisfied)
+
+
 def render_run_report(
     candidates: Iterable[Candidate],
     *,
@@ -28,16 +34,17 @@ def render_run_report(
     )
     dispatched_states = {
         CandidateState.ISSUE_CREATED,
+        CandidateState.SESSION_DONE,
+        CandidateState.VERIFIED,
         CandidateState.PR_CREATED,
-        CandidateState.ISSUE_PATCHED,
-        CandidateState.COMMENT_CREATED,
-        CandidateState.CONVERGED,
+        CandidateState.AWAITING_HUMAN_MERGE,
+        CandidateState.MERGED,
         CandidateState.TERMINAL,
     }
     tiers = Counter(
         candidate.tier.value
         for candidate in rows
-        if candidate.action in {Action.OPEN_PR, Action.OPEN_ISSUE, Action.REVIEWER_ONLY_DIFF}
+        if candidate.action in {Action.OPEN_PR, Action.OPEN_ISSUE}
         and candidate.state in dispatched_states
         and candidate.state is not CandidateState.DEFERRED
         and candidate.tier is not None
@@ -68,7 +75,7 @@ def render_run_report(
     escalated = [
         candidate
         for candidate in rows
-        if candidate.state is CandidateState.TERMINAL and candidate.reviewer_session_id is not None
+        if candidate.state is CandidateState.TERMINAL and candidate.session_id is not None
     ]
     escalated_ids = {candidate.candidate_id for candidate in escalated}
     low_tier_count = sum(
@@ -80,7 +87,6 @@ def render_run_report(
         candidate.marker_search_outcome in {"failed", "orphaned", "unconfigured"}
         and candidate.issue_url is None
         and candidate.pr_url is None
-        and candidate.comment_url is None
         for candidate in rows
     )
     accounted = {
@@ -90,7 +96,7 @@ def render_run_report(
         or candidate.gate_passed is False
         or candidate.candidate_id in escalated_ids
         or (
-            candidate.action in {Action.OPEN_PR, Action.OPEN_ISSUE, Action.REVIEWER_ONLY_DIFF}
+            candidate.action in {Action.OPEN_PR, Action.OPEN_ISSUE}
             and (
                 candidate.state in dispatched_states
                 or candidate.state is CandidateState.DISPATCHING
@@ -109,11 +115,9 @@ def render_run_report(
                 f"- `{candidate.candidate_id}` ({candidate.lane.value}, "
                 f"{candidate.tier.value if candidate.tier else 'n/a'}): "
                 f"reason={candidate.reason.value if candidate.reason else 'n/a'}",
-                f"  disagreement_summary={candidate.disagreement_summary or 'n/a'}",
+                f"  criterion={candidate.success_criterion or 'n/a'}",
                 f"  head_branch={candidate.head_branch or 'n/a'}; "
-                f"planner={candidate.planner_session_id or 'n/a'}; "
-                f"implementer={candidate.implementer_session_id or 'n/a'}; "
-                f"reviewer={candidate.reviewer_session_id or 'n/a'}",
+                f"session={candidate.session_id or 'n/a'}",
             ]
         )
     unaccounted = len(rows) - len(accounted)
@@ -155,10 +159,40 @@ def render_run_report(
             f"- Gated candidates: {gated_count}",
             f"- Reached dispatching but unpublished: {unpublished_count}",
             f"- Publication safety undetermined: {safety_undetermined_count}",
-            f"- Role attempts: {sum(sum(candidate.role_attempts.values()) for candidate in rows)}",
-            f"- Iterations: {sum(candidate.iterations for candidate in rows)}",
+            f"- Session attempts: "
+            f"{sum(sum(candidate.role_attempts.values()) for candidate in rows)}",
+            f"- Sessions created: {sum(candidate.session_id is not None for candidate in rows)}",
+            f"- Awaiting human merge: "
+            f"{sum(candidate.state is CandidateState.AWAITING_HUMAN_MERGE for candidate in rows)}",
+            f"- Merged: {sum(candidate.state is CandidateState.MERGED for candidate in rows)}",
             "",
-            "## Failed review escalation",
+            "## Lane success criteria",
+            *(
+                [
+                    f"- `{candidate.candidate_id}` ({candidate.lane.value}): "
+                    f"{candidate.success_criterion} — satisfied="
+                    f"{_criterion_satisfied(candidate)}"
+                    for candidate in rows
+                    if candidate.success_criterion is not None
+                ]
+                or ["- None"]
+            ),
+            "",
+            "## Check runs",
+            *(
+                [
+                    f"- `{candidate.candidate_id}`: "
+                    + ", ".join(
+                        f"{check.name}={check.conclusion or check.status or 'pending'}"
+                        for check in candidate.check_run_conclusions
+                    )
+                    for candidate in rows
+                    if candidate.check_run_conclusions
+                ]
+                or ["- None"]
+            ),
+            "",
+            "## Failed verification escalation",
             *(escalated_lines or ["- None"]),
             "",
             "## Accounting",

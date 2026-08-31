@@ -65,7 +65,12 @@ def compute_burndown(
         progress = sum(
             has_local_artifact(candidate)
             and (
-                candidate.state is CandidateState.CONVERGED
+                candidate.state
+                in {
+                    CandidateState.PR_CREATED,
+                    CandidateState.AWAITING_HUMAN_MERGE,
+                    CandidateState.MERGED,
+                }
                 or (
                     candidate.state is CandidateState.TERMINAL
                     and candidate.reason is ReasonCode.STALE_SKIP
@@ -92,27 +97,18 @@ def compute_kpis(
         candidate.issue_url is not None and candidate.state is not CandidateState.DEFERRED
         for candidate in candidates
     )
-    role_loop_events = [
-        event
-        for event in events
-        if event.planner_session_id is not None
-        or event.implementer_session_id is not None
-        or event.reviewer_session_id is not None
-    ]
-    unresolved = sum(event.reason is ReasonCode.DISAGREEMENT_UNRESOLVED for event in events)
+    session_events = [event for event in events if event.session_id is not None]
     verification_passes = sum(
-        event.terminal_outcome is CandidateState.CONVERGED
-        and event.red_baseline is not None
-        and event.red_baseline.status.value == "valid"
-        and event.diff_reviewed
-        for event in role_loop_events
+        event.criterion_evidence is not None and event.criterion_evidence.satisfied is True
+        for event in session_events
     )
-    stale_skips = sum(event.reason is ReasonCode.STALE_SKIP for event in role_loop_events)
+    stale_skips = sum(event.reason is ReasonCode.STALE_SKIP for event in events)
     session_failures = sum(
         event.reason
         in {
             ReasonCode.SESSION_CEILING,
-            ReasonCode.ROLE_COLLISION,
+            ReasonCode.SESSION_FAILED,
+            ReasonCode.SESSION_BLOCKED,
         }
         for event in events
     )
@@ -127,8 +123,11 @@ def compute_kpis(
         and event.test_exempt_reason is None
         for event in pr_events
     )
-    rejected = sum(event.reason is ReasonCode.DISAGREEMENT_UNRESOLVED for event in pr_events)
+    rejected = sum(event.reason is ReasonCode.CI_CHECK_FAILED for event in pr_events)
     edited = max(len(pr_events) - merged_clean - rejected, 0)
+    manual_merge_pending = sum(
+        event.terminal_outcome is CandidateState.AWAITING_HUMAN_MERGE for event in events
+    )
     marker_outcomes: dict[str, int] = {}
     for candidate in candidates:
         if candidate.marker_search_outcome is not None:
@@ -140,21 +139,15 @@ def compute_kpis(
         and not has_local_artifact(candidate)
         for candidate in candidates
     )
-    sessions_by_role = {
-        "planner": sum(event.planner_session_id is not None for event in events),
-        "implementer": sum(event.implementer_session_id is not None for event in events),
-        "reviewer": sum(event.reviewer_session_id is not None for event in events),
+    terminal_states = {
+        CandidateState.TERMINAL,
+        CandidateState.MERGED,
+        CandidateState.AWAITING_HUMAN_MERGE,
     }
     return {
         "candidates_seen": len(candidates),
-        "active": sum(
-            candidate.state not in {CandidateState.TERMINAL, CandidateState.CONVERGED}
-            for candidate in candidates
-        ),
-        "completed": sum(
-            candidate.state in {CandidateState.TERMINAL, CandidateState.CONVERGED}
-            for candidate in candidates
-        ),
+        "active": sum(candidate.state not in terminal_states for candidate in candidates),
+        "completed": sum(candidate.state in terminal_states for candidate in candidates),
         "dispatched_pr": dispatched_pr,
         "dispatched_issue": dispatched_issue,
         "deferred": sum(candidate.state is CandidateState.DEFERRED for candidate in candidates),
@@ -165,49 +158,20 @@ def compute_kpis(
         ),
         "publication_safety_undetermined": safety_undetermined,
         "verification_pass_rate": (
-            verification_passes / len(role_loop_events) if role_loop_events else None
+            verification_passes / len(session_events) if session_events else None
         ),
         "stale_skip_count": stale_skips,
         "test_inclusion_rate": (
-            sum(event.test_added is True for event in role_loop_events) / len(role_loop_events)
-            if role_loop_events
+            sum(event.test_added is True for event in session_events) / len(session_events)
+            if session_events
             else None
         ),
-        "criterion_coverage_rate": _criterion_coverage(candidates, role_loop_events),
-        "escalated": sum(
-            candidate.state is CandidateState.TERMINAL and candidate.reviewer_session_id is not None
-            for candidate in candidates
-        ),
+        "criterion_satisfaction_by_lane": _criterion_satisfaction_by_lane(events),
         "expected_reason_match_rate": _expected_reason_match_rate(events),
-        "disagreement_unresolved_rate": (
-            (
-                unresolved
-                + sum(event.reason is ReasonCode.DIFF_REVIEW_INCOMPLETE for event in events)
-            )
-            / len(events)
-            if events
-            else 0.0
-        ),
-        "diff_review_incomplete_rate": (
-            sum(event.reason is ReasonCode.DIFF_REVIEW_INCOMPLETE for event in events) / len(events)
-            if events
-            else 0.0
-        ),
         "session_failure_rate": session_failures / len(events) if events else 0.0,
-        "implementer_test_edit_violation_rate": (
-            sum(event.reason is ReasonCode.IMPLEMENTER_TEST_EDIT for event in events) / len(events)
-            if events
-            else 0.0
-        ),
-        "sessions_per_candidate_planner": sessions_by_role["planner"] / len(candidates)
-        if candidates
-        else 0.0,
-        "sessions_per_candidate_implementer": sessions_by_role["implementer"] / len(candidates)
-        if candidates
-        else 0.0,
-        "sessions_per_candidate_reviewer": sessions_by_role["reviewer"] / len(candidates)
-        if candidates
-        else 0.0,
+        "sessions_created": len(session_events),
+        "sessions_per_candidate": (len(session_events) / len(candidates) if candidates else 0.0),
+        "manual_merge_pending": manual_merge_pending,
         "burn_down_denominators": sum(
             value.denominator for value in valid_rows if isinstance(value.denominator, int)
         ),
@@ -234,27 +198,14 @@ def _merge_rate(events: list[EventRecord]) -> float:
     return merged / len(pr_events) if pr_events else 0.0
 
 
-def _criterion_coverage(candidates: list[Candidate], events: list[EventRecord]) -> float | None:
-    """Return the rate of role-loop candidates covered by reviewer criteria."""
-    candidates_by_id = {candidate.candidate_id: candidate for candidate in candidates}
-    applicable = [
-        event
-        for event in events
-        if event.candidate_id in candidates_by_id
-        and (
-            event.planner_session_id is not None
-            or event.implementer_session_id is not None
-            or event.reviewer_session_id is not None
-        )
-    ]
-    if not applicable:
-        return None
-    covered = 0
-    for event in applicable:
-        candidate = candidates_by_id[event.candidate_id]
-        if set(candidate.planner_criteria) <= set(candidate.reviewer_criterion_ids):
-            covered += 1
-    return covered / len(applicable)
+def _criterion_satisfaction_by_lane(events: list[EventRecord]) -> dict[str, int]:
+    """Count criteria the orchestrator observed as satisfied, per lane."""
+    result: dict[str, int] = {}
+    for event in events:
+        evidence = event.criterion_evidence
+        if evidence is not None and evidence.satisfied is True:
+            result[event.lane.value] = result.get(event.lane.value, 0) + 1
+    return result
 
 
 def _deferred_by_reason(candidates: list[Candidate]) -> dict[str, int]:
@@ -297,7 +248,11 @@ def render_kpi_report(
     )
     lines = [f"# {title}", "", f"- mode: {config.mode.value}", ""]
     for name, metric_value in metrics.items():
-        if name in {"deferred_by_reason", "marker_search_outcomes"}:
+        if name in {
+            "deferred_by_reason",
+            "marker_search_outcomes",
+            "criterion_satisfaction_by_lane",
+        }:
             continue
         label = name.replace("_", " ").title()
         if name.endswith("_alert") and metric_value:
@@ -320,6 +275,12 @@ def render_kpi_report(
         lines.extend(
             f"- **{outcome}:** {count}" for outcome, count in sorted(marker_outcomes.items())
         )
+    else:
+        lines.append("- None")
+    lines.extend(["", "## Criterion satisfaction by lane", ""])
+    by_lane = metrics["criterion_satisfaction_by_lane"]
+    if isinstance(by_lane, dict) and by_lane:
+        lines.extend(f"- **{lane}:** {count}" for lane, count in sorted(by_lane.items()))
     else:
         lines.append("- None")
     lines.extend(["", "## Burn-down — remediation PRs opened against baseline", ""])

@@ -8,25 +8,14 @@ from dataclasses import dataclass
 from typing import Protocol
 from urllib.parse import urlencode
 
-from pipeline.config import CiEvidenceMode, IssueSink, Mode, PipelineConfig
+from pipeline.config import CiEvidenceMode, Mode, PipelineConfig
 from pipeline.http_transport import HttpTransportError
-from pipeline.schemas import Candidate, ReasonCode, Tier
+from pipeline.schemas import Candidate, CheckRunConclusion, MergeMode, ReasonCode, Tier
 
-REQUIRED_CONTEXTS = (
-    "lint-check",
-    "pre-commit (current)",
-    "unit-tests-required",
-    "test-postgres-required",
-    "test-sqlite",
-    "test-mysql",
-    "test-postgres-hive",
-    "test-postgres-presto",
-    "frontend-build",
-    "cypress-matrix-required",
-    "playwright-tests-required",
-    "dependency-review",
-    "enforce-single-migration-head",
-)
+ACCEPTED_CONCLUSIONS = frozenset({"success", "skipped", "neutral"})
+REJECTED_CONCLUSIONS = frozenset({"failure", "cancelled", "timed_out", "action_required", "stale"})
+PENDING_STATUSES = frozenset({"queued", "in_progress", "waiting", "pending", "requested"})
+APPROVAL_STATUSES = frozenset({"action_required", "awaiting_approval", "waiting"})
 
 
 class PreflightError(RuntimeError):
@@ -61,12 +50,94 @@ class CiModeTransition:
 
 @dataclass(frozen=True)
 class CiWaitResult:
-    """Result of waiting for required contexts on a generated PR."""
+    """Result of waiting for check-run evidence on a generated PR."""
 
     mode: CiEvidenceMode
     reason: ReasonCode | None
     auto_merge_eligible: bool
     detail: str | None = None
+    conclusions: tuple[CheckRunConclusion, ...] = ()
+
+
+@dataclass(frozen=True)
+class CheckRunEvidence:
+    """Settled-ness and verdict of the check runs observed for one SHA."""
+
+    conclusions: tuple[CheckRunConclusion, ...]
+    settled: bool
+    passed: bool
+    reason: ReasonCode | None = None
+    detail: str | None = None
+
+
+def evaluate_check_runs(
+    conclusions: Sequence[CheckRunConclusion],
+    *,
+    required_contexts: Sequence[str],
+) -> CheckRunEvidence:
+    """Apply the §12 conclusion rule to observed check runs.
+
+    ``success``, ``skipped`` and ``neutral`` are accepted; ``failure``,
+    ``cancelled`` and ``timed_out`` are rejected; anything still queued leaves
+    the evidence unsettled. Every configured required context must be present
+    and successful before the evidence counts as passing.
+    """
+    observed = tuple(conclusions)
+    by_name = {item.name: item for item in observed}
+    if any(
+        item.status in APPROVAL_STATUSES or item.conclusion == "action_required"
+        for item in observed
+    ):
+        return CheckRunEvidence(
+            observed,
+            settled=False,
+            passed=False,
+            reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+            detail="awaiting_workflow_approval",
+        )
+    rejected = [item.name for item in observed if (item.conclusion or "") in REJECTED_CONCLUSIONS]
+    if rejected:
+        return CheckRunEvidence(
+            observed,
+            settled=True,
+            passed=False,
+            reason=ReasonCode.CI_CHECK_FAILED,
+            detail=", ".join(sorted(rejected)),
+        )
+    unsettled = [
+        item.name
+        for item in observed
+        if item.conclusion is None or (item.status or "") in PENDING_STATUSES
+    ]
+    if unsettled:
+        return CheckRunEvidence(
+            observed,
+            settled=False,
+            passed=False,
+            reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+            detail=", ".join(sorted(unsettled)),
+        )
+    if any((item.conclusion or "") not in ACCEPTED_CONCLUSIONS for item in observed):
+        return CheckRunEvidence(
+            observed,
+            settled=True,
+            passed=False,
+            reason=ReasonCode.CI_CHECK_FAILED,
+        )
+    missing = [
+        context
+        for context in required_contexts
+        if context not in by_name or by_name[context].conclusion != "success"
+    ]
+    if missing:
+        return CheckRunEvidence(
+            observed,
+            settled=True,
+            passed=False,
+            reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+            detail="required contexts missing or unsuccessful: " + ", ".join(missing),
+        )
+    return CheckRunEvidence(observed, settled=True, passed=True)
 
 
 class GitHubTransport(Protocol):
@@ -129,10 +200,10 @@ def run_live_preflight(config: PipelineConfig, transport: GitHubTransport) -> Li
             ReasonCode.CAPABILITY_UNAVAILABLE,
             "repository has_issues is unavailable",
         )
-    if not has_issues and config.issue_sink is not IssueSink.PR_COMMENT:
+    if not has_issues:
         raise PreflightError(
             ReasonCode.CAPABILITY_UNAVAILABLE,
-            "target repository has issues disabled; use issue_sink=pr_comment",
+            "target repository has issues disabled; the issue sink is unavailable",
         )
 
     code_scanning_available = True
@@ -197,8 +268,6 @@ def run_live_preflight(config: PipelineConfig, transport: GitHubTransport) -> Li
         notes.append("ci_evidence_mode: local (no completed pull_request/workflow_dispatch run)")
     else:
         notes.append("ci_evidence_mode: github (completed Actions history observed)")
-    if not has_issues:
-        notes.append("artifact_degraded: issues disabled; PR comments selected")
     return LivePreflight(
         has_issues=has_issues,
         code_scanning_available=code_scanning_available,
@@ -210,29 +279,35 @@ def run_live_preflight(config: PipelineConfig, transport: GitHubTransport) -> Li
     )
 
 
-def _required_context_statuses(
+def read_check_runs(
     config: PipelineConfig,
     client: GitHubTransport,
     sha: str,
-) -> dict[str, str]:
-    """Read check-run conclusions and legacy commit-status states for one SHA."""
+) -> tuple[CheckRunConclusion, ...]:
+    """Read every check run reported for one SHA, plus legacy commit statuses."""
     root = _path(config, f"/commits/{sha}")
     checks = _mapping(client.get(f"{root}/check-runs"), "check-runs")
-    statuses = _mapping(client.get(f"{root}/status"), "status")
-    result: dict[str, str] = {}
+    observed: list[CheckRunConclusion] = []
+    seen: set[str] = set()
     raw_checks = checks.get("check_runs")
     if isinstance(raw_checks, list):
         for raw_check in raw_checks:
             if not isinstance(raw_check, Mapping):
                 continue
             name = raw_check.get("name")
+            if not isinstance(name, str) or name in seen:
+                continue
             conclusion = raw_check.get("conclusion")
             status = raw_check.get("status")
-            if isinstance(name, str):
-                if isinstance(conclusion, str):
-                    result[name] = conclusion
-                elif isinstance(status, str):
-                    result[name] = status
+            seen.add(name)
+            observed.append(
+                CheckRunConclusion(
+                    name=name,
+                    conclusion=conclusion if isinstance(conclusion, str) else None,
+                    status=status if isinstance(status, str) else None,
+                )
+            )
+    statuses = _mapping(client.get(f"{root}/status"), "status")
     raw_statuses = statuses.get("statuses")
     if isinstance(raw_statuses, list):
         for raw_status in raw_statuses:
@@ -240,37 +315,45 @@ def _required_context_statuses(
                 continue
             context = raw_status.get("context")
             state = raw_status.get("state")
-            if isinstance(context, str) and isinstance(state, str) and context not in result:
-                result[context] = state
-    return result
+            if not isinstance(context, str) or context in seen or not isinstance(state, str):
+                continue
+            seen.add(context)
+            observed.append(
+                CheckRunConclusion(
+                    name=context,
+                    conclusion=state if state != "pending" else None,
+                    status="pending" if state == "pending" else "completed",
+                )
+            )
+    return tuple(observed)
 
 
-def maybe_upgrade_ci_mode(
+def upgrade_ci_mode(
     current: CiEvidenceMode,
     *,
-    reported_contexts: Sequence[str],
-    awaiting_workflow_approval: bool = False,
+    evidence: CheckRunEvidence,
     already_upgraded: bool = False,
 ) -> CiModeTransition:
-    """Perform the one-way upgrade only from an observed required context."""
-    if (
-        current is CiEvidenceMode.LOCAL
-        and not already_upgraded
-        and not awaiting_workflow_approval
-        and any(context in REQUIRED_CONTEXTS for context in reported_contexts)
-    ):
+    """Upgrade local evidence to GitHub evidence once check runs are observed."""
+    if current is CiEvidenceMode.LOCAL and not already_upgraded and evidence.conclusions:
+        if evidence.detail == "awaiting_workflow_approval":
+            return CiModeTransition(
+                CiEvidenceMode.LOCAL,
+                False,
+                ReasonCode.AWAITING_WORKFLOW_APPROVAL,
+            )
         return CiModeTransition(CiEvidenceMode.GITHUB, True)
-    if awaiting_workflow_approval:
-        return CiModeTransition(CiEvidenceMode.LOCAL, False, ReasonCode.AWAITING_WORKFLOW_APPROVAL)
+    if evidence.detail == "awaiting_workflow_approval":
+        return CiModeTransition(current, False, ReasonCode.AWAITING_WORKFLOW_APPROVAL)
     return CiModeTransition(current, False)
 
 
-def wait_for_required_contexts(
+def wait_for_check_runs(
     config: PipelineConfig,
     *,
     client: GitHubTransport,
     elapsed_s: float,
-    reported_contexts: Mapping[str, str] | None = None,
+    conclusions: Sequence[CheckRunConclusion] | None = None,
     sha: str = "HEAD",
     poll: bool = True,
     sleep: Callable[[float], None] = time.sleep,
@@ -280,26 +363,23 @@ def wait_for_required_contexts(
     ci_mode: CiEvidenceMode | None = None,
     is_fork: bool = False,
 ) -> CiWaitResult:
-    """Resolve generated-PR CI evidence without treating missing reports as green."""
+    """Poll check runs until they settle, bounded by ``ci_wait_timeout_s``."""
     started = clock()
     deadline = started + max(config.ci_wait_timeout_s - elapsed_s, 0)
     current_mode = ci_mode or config.ci_evidence_mode
     already_upgraded = current_mode is CiEvidenceMode.GITHUB
+    evidence = CheckRunEvidence((), settled=False, passed=False)
     while True:
-        statuses = (
-            _required_context_statuses(config, client, sha)
-            if reported_contexts is None
-            else dict(reported_contexts)
+        observed = (
+            read_check_runs(config, client, sha) if conclusions is None else tuple(conclusions)
         )
-        complete = all(statuses.get(context) == "success" for context in REQUIRED_CONTEXTS)
-        awaiting_approval = any(
-            statuses.get(context) in {"action_required", "awaiting_approval", "waiting"}
-            for context in REQUIRED_CONTEXTS
+        evidence = evaluate_check_runs(
+            observed,
+            required_contexts=config.required_contexts_min,
         )
-        transition = maybe_upgrade_ci_mode(
+        transition = upgrade_ci_mode(
             current_mode,
-            reported_contexts=tuple(statuses),
-            awaiting_workflow_approval=awaiting_approval,
+            evidence=evidence,
             already_upgraded=already_upgraded,
         )
         if transition.transitioned:
@@ -307,25 +387,30 @@ def wait_for_required_contexts(
             already_upgraded = True
             if on_mode_transition is not None:
                 on_mode_transition(transition)
-        if complete:
-            return CiWaitResult(current_mode, None, config.auto_merge_enabled)
-        if any(
-            statuses.get(context) in {"failure", "cancelled", "timed_out", "error"}
-            for context in REQUIRED_CONTEXTS
-        ):
-            return CiWaitResult(current_mode, ReasonCode.CI_CHECK_FAILED, False)
-        if awaiting_approval:
+        if evidence.passed:
+            return CiWaitResult(
+                current_mode,
+                None,
+                config.auto_merge_enabled,
+                conclusions=evidence.conclusions,
+            )
+        if evidence.settled:
+            return CiWaitResult(
+                current_mode,
+                evidence.reason,
+                False,
+                evidence.detail,
+                evidence.conclusions,
+            )
+        if evidence.detail == "awaiting_workflow_approval":
             return CiWaitResult(
                 current_mode,
                 ReasonCode.CI_EVIDENCE_UNAVAILABLE,
                 False,
                 "awaiting_workflow_approval",
+                evidence.conclusions,
             )
-        if (
-            is_fork
-            and not any(context in statuses for context in REQUIRED_CONTEXTS)
-            and clock() - started >= poll_interval_s
-        ):
+        if is_fork and not evidence.conclusions and clock() - started >= poll_interval_s:
             workflow_response = client.get(_path(config, f"/actions/runs?head_sha={sha}"))
             workflow_runs = (
                 workflow_response.get("workflow_runs")
@@ -338,20 +423,21 @@ def wait_for_required_contexts(
                     ReasonCode.CI_WORKFLOWS_ABSENT,
                     False,
                     "ci_workflows_absent",
+                    evidence.conclusions,
                 )
-            return CiWaitResult(
-                current_mode,
-                ReasonCode.CI_EVIDENCE_UNAVAILABLE,
-                False,
-                "awaiting_workflow_approval",
-            )
         if not poll:
             break
         remaining = deadline - clock()
         if remaining <= 0:
             break
         sleep(min(poll_interval_s, remaining))
-    return CiWaitResult(current_mode, ReasonCode.CI_EVIDENCE_UNAVAILABLE, False)
+    return CiWaitResult(
+        current_mode,
+        ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+        False,
+        evidence.detail,
+        evidence.conclusions,
+    )
 
 
 class SimulationWriteError(RuntimeError):
@@ -390,14 +476,15 @@ class MergedPullRequestError(ArtifactUnavailableError):
 
 @dataclass(frozen=True)
 class ArtifactLinks:
-    """Links created by the mandated issue/PR ordering."""
+    """Links reconciled or created by the two-write publication contract."""
 
     issue_url: str | None
     pr_url: str | None
-    comment_url: str | None = None
     issue_number: int | None = None
     pr_number: int | None = None
     auto_merge_requested: bool = False
+    issue_adopted: bool = False
+    pr_adopted: bool = False
 
 
 @dataclass(frozen=True)
@@ -548,14 +635,38 @@ class GitHubClient:
                 paths.append(str(item["filename"]))
         return paths
 
-    def patch_issue(self, number: int, body: str) -> str:
-        """Patch an issue after its linked PR exists."""
-        response = self._write(
-            "patch",
-            f"/repos/{self._config.target_owner}/{self._config.target_repo}/issues/{number}",
-            {"body": body},
+    def issue_for_marker(self, marker: str) -> tuple[int, str] | None:
+        """Find an existing tracking issue by its candidate marker."""
+        if not self._config.marker_search_enabled:
+            return None
+        query = urlencode(
+            {
+                "q": (
+                    f"repo:{self._config.target_owner}/{self._config.target_repo} "
+                    f'is:issue in:body "{marker}"'
+                )
+            }
         )
-        return self._url(response)
+        response = self._read(f"/search/issues?{query}")
+        if not isinstance(response, Mapping):
+            return None
+        items = response.get("items")
+        if not isinstance(items, list):
+            return None
+        for item in items:
+            if not isinstance(item, Mapping) or "pull_request" in item:
+                continue
+            body = item.get("body")
+            number = item.get("number")
+            url = item.get("html_url")
+            if (
+                isinstance(body, str)
+                and marker in body
+                and isinstance(number, int)
+                and isinstance(url, str)
+            ):
+                return number, url
+        return None
 
     def create_pr(
         self,
@@ -631,15 +742,6 @@ class GitHubClient:
             {"body": body},
         )
 
-    def comment_pr(self, number: int, body: str) -> str:
-        """Create a manager-facing degraded-path PR comment."""
-        response = self._write(
-            "post",
-            f"/repos/{self._config.target_owner}/{self._config.target_repo}/issues/{number}/comments",
-            {"body": body},
-        )
-        return self._url(response)
-
     def add_labels(self, number: int, labels: Sequence[str]) -> None:
         """Apply lifecycle labels to an issue or pull request."""
         self._write(
@@ -694,10 +796,92 @@ class GitHubClient:
         )
 
 
+def reconcile_issue(
+    client: GitHubClient,
+    *,
+    marker: str,
+    title: str,
+    body: str,
+    labels: Sequence[str] = (),
+    existing_issue_number: int | None = None,
+    existing_issue_url: str | None = None,
+) -> tuple[int, str, bool]:
+    """Adopt the marker-matched tracking issue, or create it exactly once."""
+    if existing_issue_number is not None and existing_issue_url is not None:
+        return existing_issue_number, existing_issue_url, True
+    if not client._config.has_issues:
+        raise ArtifactUnavailableError("GitHub issues are unavailable")
+    found = client.issue_for_marker(marker)
+    if found is not None:
+        return found[0], found[1], True
+    number, url = client.create_issue(title, body, labels)
+    return number, url, False
+
+
+def reconcile_pull_request(
+    client: GitHubClient,
+    *,
+    title: str,
+    body: str,
+    head: str,
+    base: str,
+    existing_pr_number: int | None = None,
+    existing_pr_url: str | None = None,
+) -> tuple[int, str, bool]:
+    """Adopt the pull request for this exact head branch, or create it once."""
+    match = (
+        client.pull_request(existing_pr_number)
+        if existing_pr_number is not None
+        else client.pull_request_for_head(head)
+    )
+    if match is not None:
+        if match.merged_at is not None:
+            raise MergedPullRequestError(match)
+        if match.state != "open":
+            raise ClosedPullRequestError(head, match)
+        return match.number, match.url, True
+    if existing_pr_number is not None and existing_pr_url is not None:
+        return existing_pr_number, existing_pr_url, True
+    try:
+        number, url = client.create_pr(title, body, head=head, base=base)
+    except HttpTransportError as exc:
+        if exc.status_code != 422:
+            raise
+        existing = client.pull_request_for_head(head)
+        if existing is None:
+            raise
+        if existing.merged_at is not None:
+            raise MergedPullRequestError(existing) from exc
+        if existing.state != "open":
+            raise ClosedPullRequestError(head, existing) from exc
+        return existing.number, existing.url, True
+    return number, url, False
+
+
+def auto_merge_eligible(
+    candidate: Candidate,
+    config: PipelineConfig,
+    ci_result: CiWaitResult | None,
+) -> bool:
+    """Decide auto-merge from `merge_mode`, configuration and CI evidence."""
+    return bool(
+        candidate.merge_mode is MergeMode.AUTO
+        and candidate.auto_merge_eligible
+        and config.auto_merge_enabled
+        and bool(config.required_contexts_min)
+        and ci_result is not None
+        and ci_result.mode is CiEvidenceMode.GITHUB
+        and ci_result.auto_merge_eligible
+        and ci_result.reason is None
+        and (candidate.test_added is True or candidate.test_exempt_reason is not None)
+    )
+
+
 def publish_artifacts(
     client: GitHubClient,
     candidate: Candidate,
     *,
+    marker: str,
     issue_title: str,
     issue_body: str,
     pr_title: str | None = None,
@@ -715,170 +899,81 @@ def publish_artifacts(
     after_pr_created: Callable[[int, str], None] | None = None,
     after_pr_adopted: Callable[[int, str], None] | None = None,
     after_ci: Callable[[int], None] | None = None,
-    after_issue_patched: Callable[[str], None] | None = None,
 ) -> ArtifactLinks:
-    """Publish artifacts in the mandated issue → PR → issue-patch order."""
-    if not client._config.has_issues:
-        if client._config.issue_sink is not IssueSink.PR_COMMENT:
-            raise ArtifactUnavailableError("GitHub issues are unavailable")
-        raise ArtifactUnavailableError("use publish_degraded for PR comments")
+    """Publish the tracking issue and, for high tier, exactly one pull request.
+
+    The issue is the first write and the pull request is the last: nothing
+    patches the issue afterwards and no comment is ever created.
+    """
     if preflight is not None:
         preflight()
-    issue_url: str | None
-    if existing_issue_number is None:
-        issue_number, issue_url = client.create_issue(issue_title, issue_body, labels)
-    else:
-        issue_number, issue_url = existing_issue_number, existing_issue_url
-    if (
-        after_issue is not None
-        and existing_issue_number is None
-        and issue_number is not None
-        and issue_url is not None
-    ):
+    issue_number, issue_url, issue_adopted = reconcile_issue(
+        client,
+        marker=marker,
+        title=issue_title,
+        body=issue_body,
+        labels=labels,
+        existing_issue_number=existing_issue_number,
+        existing_issue_url=existing_issue_url,
+    )
+    if after_issue is not None and not issue_adopted:
         after_issue(issue_number, issue_url)
     if (
-        candidate.tier is Tier.MEDIUM
+        candidate.tier is not Tier.HIGH
         or pr_title is None
         or pr_body is None
         or (head is None and existing_pr_number is None)
     ):
-        return ArtifactLinks(issue_url, None, issue_number=issue_number)
+        return ArtifactLinks(
+            issue_url,
+            None,
+            issue_number=issue_number,
+            issue_adopted=issue_adopted,
+        )
     if ci_probe is None:
         raise ValueError("PR publication requires an observed CI probe")
+    if head is None:
+        raise ArtifactUnavailableError("PR publication requires a candidate branch")
     if preflight is not None:
         preflight()
-    created_pr = False
-    if existing_pr_number is not None and existing_pr_url is not None:
-        pr_number, pr_url = existing_pr_number, existing_pr_url
-        existing_match = client.pull_request(pr_number)
-        if existing_match is not None and existing_match.merged_at is not None:
-            client.patch_issue(issue_number, f"{issue_body.rstrip()}\n\nPR: {pr_url}\n")
-            if after_issue_patched is not None:
-                after_issue_patched(pr_url)
-            raise MergedPullRequestError(existing_match)
-    else:
-        if head is None:
-            raise ArtifactUnavailableError("PR publication requires a candidate branch")
-        try:
-            pr_number, pr_url = client.create_pr(
-                pr_title,
-                f"{pr_body.rstrip()}\n\nCloses #{issue_number}\n",
-                head=head,
-                base=base,
-            )
-            created_pr = True
-        except HttpTransportError as exc:
-            if exc.status_code != 422:
-                raise
-            existing = client.pull_request_for_head(head)
-            if existing is None:
-                raise
-            if existing.state == "open":
-                pr_number, pr_url = existing.number, existing.url
-            elif existing.merged_at is not None:
-                client.patch_issue(
-                    issue_number,
-                    f"{issue_body.rstrip()}\n\nPR: {existing.url}\n",
-                )
-                if after_issue_patched is not None:
-                    after_issue_patched(existing.url)
-                raise MergedPullRequestError(existing) from exc
-            else:
-                raise ClosedPullRequestError(head, existing) from exc
-    if created_pr and after_pr_created is not None:
+    pr_number, pr_url, pr_adopted = reconcile_pull_request(
+        client,
+        title=pr_title,
+        body=pr_body,
+        head=head,
+        base=base,
+        existing_pr_number=existing_pr_number,
+        existing_pr_url=existing_pr_url,
+    )
+    if pr_adopted:
+        if after_pr_adopted is not None:
+            after_pr_adopted(pr_number, pr_url)
+    elif after_pr_created is not None:
         after_pr_created(pr_number, pr_url)
-    elif not created_pr and after_pr_adopted is not None:
-        after_pr_adopted(pr_number, pr_url)
     ci_result = ci_probe(pr_number)
     if preflight is not None:
         preflight()
     if after_ci is not None:
         after_ci(pr_number)
-    client.patch_issue(issue_number, f"{issue_body.rstrip()}\n\nPR: {pr_url}\n")
-    if after_issue_patched is not None:
-        after_issue_patched(pr_url)
-    if (
-        candidate.auto_merge_eligible
-        and client._config.auto_merge_enabled
-        and ci_result is not None
-        and ci_result.mode is CiEvidenceMode.GITHUB
-        and ci_result.auto_merge_eligible
-        and ci_result.reason is None
-        and (candidate.test_added is True or candidate.test_exempt_reason is not None)
-    ):
+    auto_merge_requested = auto_merge_eligible(candidate, client._config, ci_result)
+    if auto_merge_requested:
         client.enable_auto_merge(pr_number, ci_mode=ci_result.mode)
-        auto_merge_requested = True
-    else:
-        auto_merge_requested = False
     return ArtifactLinks(
         issue_url,
         pr_url,
         issue_number=issue_number,
         pr_number=pr_number,
         auto_merge_requested=auto_merge_requested,
+        issue_adopted=issue_adopted,
+        pr_adopted=pr_adopted,
     )
 
 
-def publish_degraded(
-    client: GitHubClient,
-    candidate: Candidate,
-    *,
-    pr_title: str,
-    pr_body: str,
-    comment_body: str,
-    head: str,
-    base: str = "master",
-    preflight: Callable[[], None] | None = None,
-    existing_pr_number: int | None = None,
-    existing_pr_url: str | None = None,
-    after_pr_created: Callable[[int, str], None] | None = None,
-    after_pr_adopted: Callable[[int, str], None] | None = None,
-    after_comment_created: Callable[[str], None] | None = None,
-) -> ArtifactLinks:
-    """Publish a PR and manager-facing comment when issues are disabled."""
-    if client._config.has_issues or client._config.issue_sink is not IssueSink.PR_COMMENT:
-        raise ArtifactUnavailableError("degraded sink requires has_issues=false and pr_comment")
-    if preflight is not None:
-        preflight()
-    created = False
-    if existing_pr_number is not None and existing_pr_url is not None:
-        pr_number, pr_url = existing_pr_number, existing_pr_url
-    else:
-        try:
-            pr_number, pr_url = client.create_pr(
-                pr_title,
-                pr_body,
-                head=head,
-                base=base,
-            )
-            created = True
-        except HttpTransportError as exc:
-            if exc.status_code != 422:
-                raise
-            existing = client.pull_request_for_head(head)
-            if existing is None:
-                raise
-            if existing.state == "open":
-                pr_number, pr_url = existing.number, existing.url
-            elif existing.merged_at is not None:
-                raise MergedPullRequestError(existing) from exc
-            else:
-                raise ClosedPullRequestError(head, existing) from exc
-    if created and after_pr_created is not None:
-        after_pr_created(pr_number, pr_url)
-    elif not created and after_pr_adopted is not None:
-        after_pr_adopted(pr_number, pr_url)
-    if preflight is not None:
-        preflight()
-    comment_url = client.comment_pr(pr_number, comment_body)
-    if after_comment_created is not None:
-        after_comment_created(comment_url)
-    return ArtifactLinks(None, pr_url, comment_url, pr_number=pr_number)
-
-
 __all__ = [
+    "ACCEPTED_CONCLUSIONS",
     "ArtifactLinks",
     "ArtifactUnavailableError",
+    "CheckRunEvidence",
     "CiModeTransition",
     "CiWaitResult",
     "ClosedPullRequestError",
@@ -890,11 +985,15 @@ __all__ = [
     "MergedPullRequestError",
     "PullRequestMatch",
     "PreflightError",
-    "REQUIRED_CONTEXTS",
+    "REJECTED_CONCLUSIONS",
     "SimulationWriteError",
-    "maybe_upgrade_ci_mode",
+    "auto_merge_eligible",
+    "evaluate_check_runs",
     "publish_artifacts",
-    "publish_degraded",
+    "read_check_runs",
+    "reconcile_issue",
+    "reconcile_pull_request",
     "run_live_preflight",
-    "wait_for_required_contexts",
+    "upgrade_ci_mode",
+    "wait_for_check_runs",
 ]

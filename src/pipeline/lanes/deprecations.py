@@ -10,6 +10,7 @@ from pathlib import Path
 
 from pipeline.config import ConfigError
 from pipeline.schemas import Candidate, Lane, ReasonCode
+from pipeline.verify import declare_success_criterion
 
 Record = dict[str, str | int | bool | None]
 VERSION_SOURCE = ".github/ISSUE_TEMPLATE/bug-report.yml"
@@ -208,6 +209,19 @@ def _override_references(repo: Path, symbol: str) -> int:
     )
 
 
+def reference_surface(
+    repo: Path,
+    symbol: str,
+    defining_path: Path,
+    defining_line: int,
+) -> tuple[int, int]:
+    """Return the caller and override counts for a symbol at a checkout."""
+    return (
+        _references(repo, symbol, defining_path, defining_line),
+        _override_references(repo, symbol),
+    )
+
+
 def enumerate_deprecations(
     repo: Path,
     *,
@@ -278,6 +292,8 @@ def enumerate_deprecations(
                     line=node.lineno,
                     decorator_line=decorator.lineno,
                     reason=None if eol else ReasonCode.NOT_EOL,
+                    success_criterion=declare_success_criterion(Lane.DEPRECATIONS),
+                    suite_scope=[str(path.relative_to(repo))],
                 )
             )
     return candidates
@@ -316,4 +332,10 @@ def collect_deprecations(
     ]
 
 
-__all__ = ["collect_deprecations", "current_release", "enumerate_deprecations", "is_eol"]
+__all__ = [
+    "collect_deprecations",
+    "current_release",
+    "enumerate_deprecations",
+    "is_eol",
+    "reference_surface",
+]

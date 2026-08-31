@@ -25,10 +25,10 @@ from pydantic import (
 logger = logging.getLogger(__name__)
 BUDGET_HARD_MAX = 25
 SECURITY_ISSUE_MODE = "generic_tracking"
-DEFAULT_BUDGET_N = 10
-DEFAULT_ITERATION_CAP = 5
-DEFAULT_MAX_SESSIONS = DEFAULT_BUDGET_N * (3 + 2 * DEFAULT_ITERATION_CAP)
+DEFAULT_BUDGET_N = 5
 DEFAULT_SESSION_TIMEOUT_S = 5400.0
+DEFAULT_REQUIRED_CONTEXTS_MIN = ("pre-commit checks",)
+DEFAULT_ALERT_ANALYSIS_WAIT_S = 2700.0
 
 
 class ConfigError(ValueError):
@@ -66,8 +66,15 @@ class KpiSink(str, Enum):
 class AlertSource(str, Enum):
     """LANE 1 alert source values."""
 
-    API = "api"
+    CODE_SCANNING_API = "code_scanning_api"
     SARIF_FILE = "sarif_file"
+
+
+class Lane1AlertCheck(str, Enum):
+    """How LANE 1 alert absence is observed at the candidate head."""
+
+    PR_REF_ALERTS = "pr_ref_alerts"
+    CODEQL_CLI = "codeql_cli"
 
 
 class CiEvidenceMode(str, Enum):
@@ -90,7 +97,6 @@ class PipelineConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True)
 
     mode: Mode = Mode.SIMULATE
-    iteration_cap: int = Field(default=DEFAULT_ITERATION_CAP, ge=1, le=10, strict=True)
     coverage_bar: float = Field(default=0.80, ge=0.0, le=1.0, strict=True)
     budget_N: int = Field(default=DEFAULT_BUDGET_N, ge=1, le=BUDGET_HARD_MAX, strict=True)
     score_cap: float = Field(default=200, gt=0, strict=True)
@@ -99,17 +105,21 @@ class PipelineConfig(BaseModel):
     eol_major_lag: int = Field(default=2, ge=1, strict=True)
     merge_rate_floor: float = Field(default=0.50, ge=0.0, le=1.0, strict=True)
     session_failure_ceiling: float = Field(default=0.30, ge=0.0, le=1.0, strict=True)
-    max_sessions: int = Field(default=DEFAULT_MAX_SESSIONS, ge=1, strict=True)
+    max_sessions: int = Field(default=DEFAULT_BUDGET_N + 3, ge=1, strict=True)
+    session_timeout_s: float = Field(default=DEFAULT_SESSION_TIMEOUT_S, gt=0, strict=True)
     max_total_acu: float = Field(default=500.0, gt=0, strict=True)
     kpi_sink: KpiSink = KpiSink.LOCAL
-    reservation_lease_s: float | None = Field(default=None, gt=0, strict=True)
-    alert_source: AlertSource = AlertSource.API
+    alert_source: AlertSource = AlertSource.CODE_SCANNING_API
     alert_fixture_path: Path = Path("fixtures/codeql_alerts.json")
+    lane1_alert_check: Lane1AlertCheck = Lane1AlertCheck.PR_REF_ALERTS
+    alert_analysis_wait_s: float = Field(default=DEFAULT_ALERT_ANALYSIS_WAIT_S, gt=0, strict=True)
     ci_evidence_mode: CiEvidenceMode = CiEvidenceMode.LOCAL
     ci_wait_timeout_s: int = Field(default=5400, gt=0, strict=True)
+    required_contexts_min: tuple[str, ...] = DEFAULT_REQUIRED_CONTEXTS_MIN
     auto_merge_enabled: bool = False
     has_issues: bool = True
     issue_sink: IssueSink = IssueSink.ISSUES
+    marker_search_enabled: bool = True
     version_source: str = ".github/ISSUE_TEMPLATE/bug-report.yml"
     lane2_class_breadth_max: int = Field(default=5, ge=1, strict=True)
     target_owner: str = Field(default="victorciao", min_length=1)
@@ -142,7 +152,7 @@ class PipelineConfig(BaseModel):
     ) -> PipelineConfig:
         """Preserve the local-evidence auto-merge invariant on copies."""
         copied = super().model_copy(update=update, deep=deep)
-        if copied.ci_evidence_mode is CiEvidenceMode.LOCAL:
+        if copied.ci_evidence_mode is CiEvidenceMode.LOCAL or not copied.required_contexts_min:
             object.__setattr__(copied, "auto_merge_enabled", False)
         return copied
 
@@ -159,7 +169,14 @@ class PipelineConfig(BaseModel):
             return Mode.SIMULATE
         return Mode(normalized)
 
-    @field_validator("kpi_sink", "alert_source", "ci_evidence_mode", "issue_sink", mode="before")
+    @field_validator(
+        "kpi_sink",
+        "alert_source",
+        "ci_evidence_mode",
+        "issue_sink",
+        "lane1_alert_check",
+        mode="before",
+    )
     @classmethod
     def normalize_choice(cls, value: object, info: ValidationInfo) -> object:
         """Convert source strings to strict enum values."""
@@ -172,7 +189,19 @@ class PipelineConfig(BaseModel):
             return AlertSource(normalized)
         if info.field_name == "ci_evidence_mode":
             return CiEvidenceMode(normalized)
+        if info.field_name == "lane1_alert_check":
+            return Lane1AlertCheck(normalized)
         return IssueSink(normalized)
+
+    @field_validator("required_contexts_min", mode="before")
+    @classmethod
+    def normalize_required_contexts(cls, value: object) -> object:
+        """Accept a comma-separated string or any sequence of context names."""
+        if isinstance(value, str):
+            return tuple(item.strip() for item in value.split(",") if item.strip())
+        if isinstance(value, (list, tuple)):
+            return tuple(str(item) for item in value)
+        return value
 
     @field_validator("github_token", "devin_api_key", mode="before")
     @classmethod
@@ -195,18 +224,15 @@ class PipelineConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def default_max_sessions(cls, value: object) -> object:
-        """Derive the session ceiling when callers omit it."""
+        """Derive the session ceiling from the PR budget when callers omit it."""
         if not isinstance(value, dict) or "max_sessions" in value:
             return value
-        raw_budget = value.get("budget_N", DEFAULT_BUDGET_N)
-        raw_iteration_cap = value.get("iteration_cap", DEFAULT_ITERATION_CAP)
         try:
-            budget = int(raw_budget)
-            iteration_cap = int(raw_iteration_cap)
+            budget = int(value.get("budget_N", DEFAULT_BUDGET_N))
         except (TypeError, ValueError):
             return value
         resolved = dict(value)
-        resolved["max_sessions"] = budget * (3 + 2 * iteration_cap)
+        resolved["max_sessions"] = budget + 3
         return resolved
 
     @model_validator(mode="before")
@@ -215,7 +241,12 @@ class PipelineConfig(BaseModel):
         """Make local CI evidence permanently ineligible for auto-merge."""
         if not isinstance(value, dict):
             return value
-        if value.get("ci_evidence_mode") in {CiEvidenceMode.LOCAL, CiEvidenceMode.LOCAL.value}:
+        local_evidence = value.get("ci_evidence_mode") in {
+            CiEvidenceMode.LOCAL,
+            CiEvidenceMode.LOCAL.value,
+        }
+        empty_contexts = "required_contexts_min" in value and not value["required_contexts_min"]
+        if local_evidence or empty_contexts:
             resolved = dict(value)
             resolved["auto_merge_enabled"] = False
             return resolved
@@ -230,17 +261,10 @@ class PipelineConfig(BaseModel):
             raise ConfigError("tier_high_min must be greater than tier_medium_min")
         if self.mode == Mode.LIVE and (self.github_token is None or self.devin_api_key is None):
             raise ConfigError("mode=live requires github_token and devin_api_key")
-        required_floor = self.budget_N * (3 + 2 * self.iteration_cap)
-        if self.max_sessions < required_floor:
-            raise ConfigError(
-                f"max_sessions={self.max_sessions} is below required floor {required_floor}"
-            )
-        lease = self.reservation_lease_s
-        if lease is None:
-            lease = 3 * DEFAULT_SESSION_TIMEOUT_S
-            object.__setattr__(self, "reservation_lease_s", lease)
-        if lease < DEFAULT_SESSION_TIMEOUT_S:
-            raise ConfigError("reservation_lease_s must be at least session_timeout_s")
+        if self.max_sessions < self.budget_N:
+            raise ConfigError(f"max_sessions={self.max_sessions} is below budget_N={self.budget_N}")
+        if not self.required_contexts_min and self.auto_merge_enabled:
+            object.__setattr__(self, "auto_merge_enabled", False)
         return self
 
     @model_validator(mode="wrap")
@@ -305,7 +329,6 @@ def _parse_cli(args: Sequence[str]) -> tuple[dict[str, object], bool]:
             raw_value = args[index]
         normalized_key = key.replace("-", "_")
         if normalized_key in {
-            "iteration_cap",
             "budget_N",
             "score_cap",
             "tier_high_min",
@@ -321,9 +344,11 @@ def _parse_cli(args: Sequence[str]) -> tuple[dict[str, object], bool]:
             "merge_rate_floor",
             "session_failure_ceiling",
             "max_total_acu",
+            "session_timeout_s",
+            "alert_analysis_wait_s",
         }:
             values[normalized_key] = _parse_float(normalized_key, raw_value)
-        elif normalized_key in {"auto_merge_enabled"}:
+        elif normalized_key in {"auto_merge_enabled", "has_issues", "marker_search_enabled"}:
             values[normalized_key] = _parse_bool(raw_value)
         else:
             values[normalized_key] = raw_value
@@ -338,7 +363,6 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
     if "GITHUB_PAT_REMEDIATION" in env:
         values["github_token"] = SecretStr(env["GITHUB_PAT_REMEDIATION"])
     field_names = {
-        "ITERATION_CAP": "iteration_cap",
         "COVERAGE_BAR": "coverage_bar",
         "BUDGET_N": "budget_N",
         "SCORE_CAP": "score_cap",
@@ -347,9 +371,13 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
         "EOL_MAJOR_LAG": "eol_major_lag",
         "MERGE_RATE_FLOOR": "merge_rate_floor",
         "SESSION_FAILURE_CEILING": "session_failure_ceiling",
-        "RESERVATION_LEASE_S": "reservation_lease_s",
         "AUTO_MERGE_ENABLED": "auto_merge_enabled",
         "HAS_ISSUES": "has_issues",
+        "MARKER_SEARCH_ENABLED": "marker_search_enabled",
+        "REQUIRED_CONTEXTS_MIN": "required_contexts_min",
+        "LANE1_ALERT_CHECK": "lane1_alert_check",
+        "ALERT_ANALYSIS_WAIT_S": "alert_analysis_wait_s",
+        "SESSION_TIMEOUT_S": "session_timeout_s",
         "CI_WAIT_TIMEOUT_S": "ci_wait_timeout_s",
         "LANE2_CLASS_BREADTH_MAX": "lane2_class_breadth_max",
         "MAX_SESSIONS": "max_sessions",
@@ -377,7 +405,6 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
         if field_name is None:
             raise ConfigError(f"unrecognized environment setting: {key}")
         if name in {
-            "ITERATION_CAP",
             "BUDGET_N",
             "EOL_MAJOR_LAG",
             "CI_WAIT_TIMEOUT_S",
@@ -393,10 +420,11 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
             "MERGE_RATE_FLOOR",
             "SESSION_FAILURE_CEILING",
             "MAX_TOTAL_ACU",
-            "RESERVATION_LEASE_S",
+            "SESSION_TIMEOUT_S",
+            "ALERT_ANALYSIS_WAIT_S",
         }:
             values[field_name] = _parse_float(field_name, raw_value)
-        elif name in {"AUTO_MERGE_ENABLED", "HAS_ISSUES"}:
+        elif name in {"AUTO_MERGE_ENABLED", "HAS_ISSUES", "MARKER_SEARCH_ENABLED"}:
             values[field_name] = _parse_bool(raw_value)
         else:
             values[field_name] = (
@@ -436,7 +464,7 @@ def load_config(
     cli_values, explicit_budget_flag = _parse_cli(cli_args)
     values.update(cli_values)
 
-    raw_budget = values.get("budget_N", 10)
+    raw_budget = values.get("budget_N", DEFAULT_BUDGET_N)
     if isinstance(raw_budget, str):
         raw_budget = _parse_int("budget_N", raw_budget)
     if isinstance(raw_budget, int) and raw_budget > BUDGET_HARD_MAX:

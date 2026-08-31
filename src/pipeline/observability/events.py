@@ -75,30 +75,34 @@ def event_from_candidate(candidate: Candidate, *, run_id: str) -> EventRecord:
         factor_rows=candidate.factor_rows,
         tier=candidate.tier,
         action=candidate.action,
-        planner_session_id=candidate.planner_session_id,
-        implementer_session_id=candidate.implementer_session_id,
-        reviewer_session_id=candidate.reviewer_session_id,
+        merge_mode=candidate.merge_mode,
+        session_id=candidate.session_id,
         role_attempts=candidate.role_attempts,
-        role_attempt_evidence=candidate.role_attempt_evidence,
-        planner_criteria=candidate.planner_criteria,
-        reviewer_criterion_ids=candidate.reviewer_criterion_ids,
-        diff_reviewed=candidate.diff_reviewed,
-        iterations=candidate.iterations,
+        success_criterion=candidate.success_criterion,
+        criterion_evidence=candidate.criterion_evidence,
+        suite_scope=candidate.suite_scope,
+        check_run_conclusions=candidate.check_run_conclusions,
         pr_url=candidate.pr_url,
         issue_url=candidate.issue_url,
-        comment_url=candidate.comment_url,
+        issue_number=candidate.issue_number,
+        pr_number=candidate.pr_number,
         merged_at=candidate.merged_at,
         merge_verified=candidate.merge_verified,
         auto_merge_requested=candidate.auto_merge_requested,
         ci_evidence_mode=candidate.ci_evidence_mode,
-        artifact_degraded=candidate.artifact_degraded,
         test_added=candidate.test_added,
+        test_nodeid=candidate.test_nodeid,
         test_paths=candidate.test_paths,
         test_author=candidate.test_author,
         test_exempt_reason=candidate.test_exempt_reason,
         terminal_outcome=(
             candidate.state
-            if candidate.state in {CandidateState.TERMINAL, CandidateState.CONVERGED}
+            if candidate.state
+            in {
+                CandidateState.TERMINAL,
+                CandidateState.MERGED,
+                CandidateState.AWAITING_HUMAN_MERGE,
+            }
             else None
         ),
         reason=candidate.reason,
@@ -109,10 +113,8 @@ def event_from_candidate(candidate: Candidate, *, run_id: str) -> EventRecord:
         collects_single_item=candidate.collects_single_item,
         lifted_markers=candidate.lifted_markers,
         related_candidate_id=candidate.related_candidate_id,
-        disagreement_summary=candidate.disagreement_summary,
         marker_search_outcome=candidate.marker_search_outcome,
         artifact_simulated=candidate.artifact_simulated,
-        phase_b_protocol_violation=candidate.phase_b_protocol_violation,
     )
 
 

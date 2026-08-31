@@ -21,17 +21,14 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 import sys
-import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
-from functools import partial
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlencode
 
 from pipeline.config import (
-    DEFAULT_SESSION_TIMEOUT_S,
     AlertSource,
     CiEvidenceMode,
     ConfigError,
@@ -51,22 +48,18 @@ from pipeline.github_client import (
     LivePreflight,
     MergedPullRequestError,
     PreflightError,
-    publish_artifacts,
-    publish_degraded,
+    auto_merge_eligible,
+    reconcile_issue,
+    reconcile_pull_request,
     run_live_preflight,
-    wait_for_required_contexts,
+    wait_for_check_runs,
 )
 from pipeline.http_transport import HttpTransportError, UrllibDevinTransport, UrllibGitHubTransport
 from pipeline.lanes.codeql import enumerate_from_config, read_alert_fixture
 from pipeline.lanes.deprecations import enumerate_deprecations, is_eol
 from pipeline.lanes.skipped_tests import enumerate_skipped_tests
-from pipeline.prompts import (
-    render_implementer_prompt,
-    render_planner_prompt,
-    render_reviewer_phase_b_prompt,
-    render_reviewer_prompt,
-)
-from pipeline.review_loop import ReviewIteration, apply_review_result
+from pipeline.observers import LocalCheckout, PullRequestAlerts
+from pipeline.prompts import render_fix_prompt
 from pipeline.rubric import load_rubrics
 from pipeline.schemas import (
     Action,
@@ -74,36 +67,34 @@ from pipeline.schemas import (
     CandidateState,
     DefinitionKind,
     Lane,
+    MergeMode,
     ReasonCode,
     RunEventRecord,
+    Tier,
 )
 from pipeline.score import apply_score
 from pipeline.session_client import (
-    BranchNotAdvancedError,
     DevinTransport,
-    DiffReviewIncompleteError,
-    PhaseBCorrelationTimeoutError,
-    PhaseBHeadUnavailableError,
-    PlannerOutputError,
-    RoleCollisionError,
     RuntimeOrchestrator,
     SessionAttempt,
     SessionBlockedError,
     SessionCeilingError,
     SessionClient,
     SessionDedupeError,
-    SessionMessageError,
+    SessionInfeasibleError,
+    SessionOutputError,
 )
 from pipeline.simulation import simulate_run
+from pipeline.simulation_fixtures import simulated_observers
 from pipeline.state import (
     CandidateStateStore,
-    ResumeAction,
+    MarkerSearchOutcome,
     StatePreservationError,
     github_marker_search,
 )
 from pipeline.templates.render import (
     ArtifactValidationError,
-    render_degraded_comment_body,
+    candidate_marker,
     render_issue_body,
     render_issue_title,
     render_pr_body,
@@ -112,6 +103,7 @@ from pipeline.templates.render import (
     validate_pr_body,
     validate_pr_title,
 )
+from pipeline.verify import Observers, post_pr_criterion_pending, verify_candidate
 
 
 class RunAbort(RuntimeError):
@@ -119,745 +111,549 @@ class RunAbort(RuntimeError):
 
 
 _SIGNOFF_TRAILER = re.compile(r"(?im)^Signed-off-by:\s+\S+\s+<[^>\r\n]+>\s*$")
+_MAX_SESSION_ATTEMPTS = 2
+_PUBLISHING_ACTIONS = frozenset({Action.OPEN_PR, Action.OPEN_ISSUE})
+_MARKER_DEFER_REASONS = {
+    MarkerSearchOutcome.FAILED: ReasonCode.MARKER_SEARCH_FAILED,
+    MarkerSearchOutcome.ORPHANED: ReasonCode.MARKER_SEARCH_FAILED,
+    MarkerSearchOutcome.UNCONFIGURED: ReasonCode.MARKER_SEARCH_UNCONFIGURED,
+}
 
 
-def _commit_message(repo_path: Path, revision: str) -> str | None:
-    """Read the candidate branch commit message without exposing command failures."""
-    try:
-        result = subprocess.run(
-            ["git", "show", "-s", "--format=%B", revision],
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return result.stdout
+@dataclass
+class LiveTarget:
+    """The live fork, its transport and the base the run pins candidates to."""
+
+    client: GitHubClient
+    transport: UrllibGitHubTransport
+    base_branch: str
+    branch_prefix: str
 
 
-def _publish_live(
-    candidates: Sequence[Candidate],
-    *,
-    config: PipelineConfig,
-    output_dir: Path,
-    repo_path: Path,
-    planner_outputs: Mapping[str, Mapping[str, object]],
-    implementer_outputs: Mapping[str, Mapping[str, object]],
-    reviewer_outputs: Mapping[str, Mapping[str, object]],
-    base_sha: str | None,
-    head_branch: str,
-    base_branch: str,
-    transport: UrllibGitHubTransport,
-    state_store: CandidateStateStore,
-    ci_mode_events: list[RunEventRecord],
-    ci_mode_state: list[CiEvidenceMode],
-    ci_elapsed_s: list[float],
-    run_id: str,
-) -> list[Candidate]:
-    """Publish live artifacts after review, preserving the mandated write order."""
-    client = GitHubClient(
-        config,
-        transport=transport,
-    )
-    templates = {
-        Lane.CODEQL: config.templates_dir / "issues/security_tracking.md",
-        Lane.SKIPPED_TESTS: config.templates_dir / "issues/bug_report.yml",
-        Lane.DEPRECATIONS: config.templates_dir / "issues/sip.md",
-    }
+@dataclass
+class CandidateRunner:
+    """Drive one candidate through the §6 lifecycle, one write at a time."""
 
-    base_response = transport.get(
-        f"/repos/{config.target_owner}/{config.target_repo}/git/ref/heads/{base_branch}"
-    )
-    resolved_base_sha = base_sha
-    if isinstance(base_response, Mapping):
-        raw_object = base_response.get("object")
-        if isinstance(raw_object, Mapping):
-            raw_sha = raw_object.get("sha")
-            if isinstance(raw_sha, str) and raw_sha:
-                resolved_base_sha = raw_sha
-    if resolved_base_sha is None:
-        raise RunAbort("target base SHA is unavailable")
-    published: list[Candidate] = []
-    for candidate in candidates:
-        if candidate.action not in {
-            Action.OPEN_PR,
-            Action.OPEN_ISSUE,
-            Action.REVIEWER_ONLY_DIFF,
-        }:
-            published.append(candidate)
-            continue
-        if not config.has_issues and candidate.action is Action.OPEN_ISSUE:
-            persisted_degraded = state_store.resume(candidate.candidate_id)
-            if persisted_degraded is not None and persisted_degraded.state in {
-                CandidateState.TERMINAL,
-                CandidateState.CONVERGED,
-            }:
-                published.append(persisted_degraded)
-                continue
-            issue_body = render_degraded_comment_body(
-                (
-                    ""
-                    if candidate.lane is Lane.CODEQL
-                    else templates[candidate.lane].read_text(encoding="utf-8")
-                ),
-                candidate,
-                generated_summary=f"Remediation tracking for {candidate.stable_locator}.",
-            )
-            report_path = output_dir / "reports" / "issues" / f"{candidate.candidate_id}.md"
-            report_path.parent.mkdir(parents=True, exist_ok=True)
-            report_path.write_text(issue_body, encoding="utf-8")
-            degraded = candidate.model_copy(
-                update={
-                    "state": CandidateState.TERMINAL,
-                    "reason": ReasonCode.ARTIFACT_DEGRADED,
-                    "artifact_degraded": True,
-                }
-            )
-            state_store.append(degraded)
-            published.append(degraded)
-            continue
-        persisted = state_store.resume(candidate.candidate_id)
-        decision = state_store.resume_decision(candidate.candidate_id)
-        marker_outcome = state_store.marker_search_outcome(candidate.candidate_id)
-        candidate = candidate.model_copy(
-            update={
-                "marker_search_outcome": marker_outcome.value,
-                "reason_detail": candidate.reason_detail or marker_outcome.value,
-            }
+    config: PipelineConfig
+    run_id: str
+    state_store: CandidateStateStore
+    orchestrator: RuntimeOrchestrator
+    observers: Observers
+    output_dir: Path
+    base_sha: str
+    live: LiveTarget | None = None
+    checkout: LocalCheckout | None = None
+    notes: list[str] = field(default_factory=list)
+    run_events: list[RunEventRecord] = field(default_factory=list)
+    fix_outputs: dict[str, Mapping[str, object]] = field(default_factory=dict)
+    ci_mode: CiEvidenceMode = CiEvidenceMode.LOCAL
+    ci_elapsed_s: float = 0.0
+
+    # -- persistence -----------------------------------------------------
+
+    def _persist(self, candidate: Candidate, **update: object) -> Candidate:
+        """Append one lifecycle row, preserving durable artifact identity."""
+        updated = candidate.model_copy(update=update)
+        self.state_store.append(updated)
+        return updated
+
+    def _terminal(
+        self,
+        candidate: Candidate,
+        reason: ReasonCode,
+        detail: str | None = None,
+    ) -> Candidate:
+        return self._persist(
+            candidate,
+            state=CandidateState.TERMINAL,
+            reason=reason,
+            reason_detail=detail,
+            auto_merge_eligible=False,
         )
-        if decision.action is ResumeAction.SKIP:
-            published.append(persisted or candidate)
-            continue
-        if decision.action is ResumeAction.DEFER:
-            marker_reason = {
-                "failed": ReasonCode.MARKER_SEARCH_FAILED,
-                "orphaned": ReasonCode.ARTIFACT_ORPHANED,
-                "unconfigured": ReasonCode.MARKER_SEARCH_UNCONFIGURED,
-            }.get(marker_outcome.value, ReasonCode.CAPABILITY_UNAVAILABLE)
-            deferred = (persisted or candidate).model_copy(
-                update={
-                    "state": CandidateState.DEFERRED,
-                    "reason": marker_reason,
-                    "reason_detail": marker_outcome.value,
-                }
-            )
-            state_store.append(deferred)
-            published.append(deferred)
-            continue
-        reservation_holder: Candidate | None = None
-        reservation = candidate.model_copy(
-            update={
-                "state": CandidateState.DISPATCHING,
-                "base_sha": resolved_base_sha,
-                "reserved_by_run_id": run_id,
-            }
+
+    def _deferred(
+        self,
+        candidate: Candidate,
+        reason: ReasonCode,
+        detail: str | None = None,
+    ) -> Candidate:
+        return self._persist(
+            candidate,
+            state=CandidateState.DEFERRED,
+            reason=reason,
+            reason_detail=detail,
+            auto_merge_eligible=False,
         )
-        if state_store.append_if_new_artifact(reservation, run_id=run_id):
-            persisted = state_store.resume(candidate.candidate_id) or reservation
-        elif state_store.reservation_reason == "reservation_held":
-            reservation_holder = state_store.resume(candidate.candidate_id)
-            persisted = None
-        else:
-            persisted = state_store.resume(candidate.candidate_id)
-        if persisted is None:
-            reservation_reason = state_store.reservation_reason
-            deferred = (reservation_holder or candidate).model_copy(
-                update={
-                    "state": CandidateState.DEFERRED,
-                    "reason": (
-                        ReasonCode.RESERVATION_HELD
-                        if reservation_reason == "reservation_held"
-                        else (
-                            ReasonCode(reservation_reason)
-                            if reservation_reason in {item.value for item in ReasonCode}
-                            else ReasonCode.CAPABILITY_UNAVAILABLE
-                        )
-                    ),
-                    "reason_detail": reservation_reason,
-                }
-            )
-            state_store.append(deferred)
-            published.append(deferred)
-            continue
-        candidate = candidate.model_copy(
-            update={
-                "base_sha": persisted.base_sha or resolved_base_sha,
-                "issue_number": persisted.issue_number,
-                "issue_url": persisted.issue_url,
-                "comment_url": persisted.comment_url,
-                "pr_number": persisted.pr_number,
-                "pr_url": persisted.pr_url,
-                "head_branch": persisted.head_branch or candidate.head_branch,
-                "head_sha": candidate.head_sha or persisted.head_sha,
-                "reviewed_head_sha": persisted.reviewed_head_sha,
-                "reserved_at": persisted.reserved_at,
-                "reserved_by_run_id": persisted.reserved_by_run_id,
-                "reason": persisted.reason,
-                "reason_detail": persisted.reason_detail,
-                "artifact_degraded": persisted.artifact_degraded,
-                "merge_verified": persisted.merge_verified,
-            }
-        )
-        issue_template = (
-            ""
-            if candidate.lane is Lane.CODEQL
-            else templates[candidate.lane].read_text(encoding="utf-8")
-        )
-        summary = f"Remediation tracking for {candidate.stable_locator}."
-        requested_labels = list(candidate.labels)
-        if (
-            config.ci_evidence_mode is CiEvidenceMode.LOCAL
-            and "needs-human-review" not in requested_labels
-        ):
-            requested_labels.append("needs-human-review")
-        labels: list[str] = []
-        label_failures: list[str] = []
+
+    # -- lifecycle -------------------------------------------------------
+
+    def process(self, candidate: Candidate) -> Candidate:
+        """Run one candidate from `scored` to its terminal or deferred row."""
+        if candidate.action not in _PUBLISHING_ACTIONS:
+            return candidate
         try:
-            if config.has_issues:
-                issue_body = render_issue_body(
-                    issue_template,
-                    candidate,
-                    generated_summary=summary,
-                )
-            else:
-                issue_body = render_degraded_comment_body(
-                    issue_template,
-                    candidate,
-                    generated_summary=summary,
-                )
-            if config.has_issues:
-                validate_issue_body(issue_body, candidate)
-            if candidate.action is Action.OPEN_ISSUE:
-                for label in requested_labels:
-                    client.ensure_label(label)
-                    labels.append(label)
-        except (ArtifactValidationError, ArtifactUnavailableError, HttpTransportError) as exc:
-            latest = state_store.resume(candidate.candidate_id) or candidate
-            reason = getattr(exc, "reason", None)
-            if not isinstance(reason, ReasonCode):
-                reason = (
-                    ReasonCode.ARTIFACT_VALIDATION_FAILED
-                    if isinstance(exc, ArtifactValidationError)
-                    else ReasonCode.CAPABILITY_UNAVAILABLE
-                )
-            deferred = latest.model_copy(
-                update={
-                    "state": CandidateState.DEFERRED,
-                    "reason": reason,
-                    "reason_detail": str(exc),
-                    "auto_merge_eligible": False,
+            reconciled = self._reconcile(candidate)
+            if self._settled(reconciled):
+                return reconciled
+            published = self._publish_issue(reconciled)
+            if self._settled(published) or published.action is Action.OPEN_ISSUE:
+                return published
+            dispatched = self._dispatch(published)
+            if self._settled(dispatched):
+                return dispatched
+            verified = self._verify(dispatched)
+            if self._settled(verified):
+                return verified
+            opened = self._publish_pr(verified)
+            if self._settled(opened):
+                return opened
+            return self._settle_merge(opened)
+        except (
+            ArtifactUnavailableError,
+            GitHubResponseError,
+            HttpTransportError,
+            StatePreservationError,
+            OSError,
+        ) as exc:
+            self.notes.append(f"{candidate.candidate_id}: capability unavailable, deferred")
+            latest = self.state_store.resume(candidate.candidate_id) or candidate
+            return self._deferred(latest, ReasonCode.CAPABILITY_UNAVAILABLE, str(exc))
+
+    @staticmethod
+    def _settled(candidate: Candidate) -> bool:
+        return candidate.state in {
+            CandidateState.TERMINAL,
+            CandidateState.DEFERRED,
+            CandidateState.MERGED,
+            CandidateState.AWAITING_HUMAN_MERGE,
+        }
+
+    def _reconcile(self, candidate: Candidate) -> Candidate:
+        """Adopt persisted and fork-side artifact identity before any write."""
+        outcome = self.state_store.marker_search_outcome(candidate.candidate_id)
+        candidate = candidate.model_copy(update={"marker_search_outcome": outcome.value})
+        if outcome is MarkerSearchOutcome.UNCONFIGURED and self.config.mode is not Mode.LIVE:
+            outcome = MarkerSearchOutcome.ABSENT
+        defer_reason = _MARKER_DEFER_REASONS.get(outcome)
+        if defer_reason is not None:
+            return self._deferred(candidate, defer_reason, outcome.value)
+        update: dict[str, object] = {"base_sha": candidate.base_sha or self.base_sha}
+        persisted = self.state_store.resume(candidate.candidate_id)
+        if persisted is not None:
+            update.update(
+                {
+                    "issue_number": persisted.issue_number,
+                    "issue_url": persisted.issue_url,
+                    "pr_number": persisted.pr_number,
+                    "pr_url": persisted.pr_url,
+                    "head_branch": persisted.head_branch or candidate.head_branch,
+                    "head_sha": persisted.head_sha or candidate.head_sha,
+                    "merged_at": persisted.merged_at,
+                    "session_id": persisted.session_id or candidate.session_id,
                 }
             )
-            state_store.append(deferred)
-            published.append(deferred)
-            continue
-        issue_title = render_issue_title(candidate, f"Remediate {candidate.stable_locator}")
-        issue_number_holder: list[int | None] = [candidate.issue_number]
+        artifact = self.state_store.marker_artifact(candidate.candidate_id)
+        if artifact is not None and not artifact.is_pull_request:
+            update["issue_number"] = artifact.number
+            update["issue_url"] = artifact.url
+        if persisted is not None and persisted.merged_at is not None:
+            return self._persist(candidate, state=CandidateState.MERGED, **update)
+        return candidate.model_copy(update=update)
 
-        def after_issue(
-            issue_number: int,
-            issue_url: str,
-            candidate_for_callback: Candidate = candidate,
-            issue_numbers: list[int | None] = issue_number_holder,
-        ) -> None:
-            issue_numbers[0] = issue_number
-            state_store.append(
-                candidate_for_callback.model_copy(
-                    update={
-                        "state": CandidateState.ISSUE_CREATED,
-                        "issue_number": issue_number,
-                        "issue_url": issue_url,
-                        "base_sha": candidate_for_callback.base_sha,
-                        "head_branch": candidate_for_callback.head_branch,
-                    }
-                )
-            )
+    def _issue_template(self, candidate: Candidate) -> str:
+        if candidate.lane is Lane.CODEQL:
+            return ""
+        name = {
+            Lane.SKIPPED_TESTS: "issues/bug_report.yml",
+            Lane.DEPRECATIONS: "issues/sip.md",
+        }[candidate.lane]
+        return (self.config.templates_dir / name).read_text(encoding="utf-8")
 
-        if candidate.action is Action.OPEN_ISSUE:
-            links = publish_artifacts(
-                client,
+    def _publish_issue(self, candidate: Candidate) -> Candidate:
+        """Write, or adopt, the one tracking issue every published tier gets."""
+        summary = (
+            f"Remediation tracking for {candidate.stable_locator}."
+            if self.config.mode is Mode.LIVE
+            else f"SIMULATED remediation for {candidate.candidate_id}."
+        )
+        not_automated = (
+            "Medium tier: the pipeline tracks this candidate without dispatching a session."
+            if candidate.tier is Tier.MEDIUM
+            else None
+        )
+        try:
+            body = render_issue_body(
+                self._issue_template(candidate),
                 candidate,
-                issue_title=issue_title,
-                issue_body=issue_body,
-                labels=labels,
-                ci_probe=None,
-                existing_issue_number=candidate.issue_number,
-                existing_issue_url=candidate.issue_url,
-                after_issue=after_issue,
+                generated_summary=summary,
+                verification=candidate.success_criterion
+                or "Remediation status is tracked by the pipeline.",
+                not_automated_reason=not_automated,
             )
-            published.append(state_store.resume(candidate.candidate_id) or candidate)
-            continue
-        branch = candidate.head_branch
-        if branch is None:
+            validate_issue_body(body, candidate)
+        except ArtifactValidationError as exc:
+            return self._deferred(candidate, ReasonCode.ARTIFACT_VALIDATION_FAILED, str(exc))
+        report = self.output_dir / "reports" / "issues" / f"{candidate.candidate_id}.md"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(body, encoding="utf-8")
+        if self.live is None:
+            return self._persist(candidate, state=CandidateState.ISSUE_CREATED)
+        labels: list[str] = []
+        for label in candidate.labels:
+            self.live.client.ensure_label(label)
+            labels.append(label)
+        number, url, adopted = reconcile_issue(
+            self.live.client,
+            marker=candidate_marker(candidate.candidate_id),
+            title=render_issue_title(candidate, render_pr_title(candidate)),
+            body=body,
+            labels=labels,
+            existing_issue_number=candidate.issue_number,
+            existing_issue_url=candidate.issue_url,
+        )
+        if adopted:
+            self.notes.append(f"{candidate.candidate_id}: adopted existing issue #{number}")
+        return self._persist(
+            candidate,
+            state=CandidateState.ISSUE_CREATED,
+            issue_number=number,
+            issue_url=url,
+        )
+
+    def _dispatch(self, candidate: Candidate) -> Candidate:
+        """Create the candidate branch, then run its one session."""
+        prefix = self.live.branch_prefix if self.live is not None else "devin/remediation"
+        branch = candidate.head_branch or f"{prefix.rstrip('/')}/{candidate.candidate_id}"
+        prepared = self._persist(
+            candidate,
+            state=CandidateState.DISPATCHING,
+            head_branch=branch,
+            base_sha=candidate.base_sha or self.base_sha,
+        )
+        if self.live is not None:
+            try:
+                self.live.client.create_branch(branch, prepared.base_sha or self.base_sha)
+            except HttpTransportError as exc:
+                if exc.status_code != 422:
+                    raise
+                existing = self.live.client.branch_sha(branch)
+                if existing is None:
+                    return self._deferred(
+                        prepared,
+                        ReasonCode.CAPABILITY_UNAVAILABLE,
+                        "candidate branch exists but its head is unreadable",
+                    )
+        return self._run_session(prepared)
+
+    def _run_session(self, candidate: Candidate) -> Candidate:
+        """Create and poll exactly one session per attempt, up to the ceiling."""
+        prompt_branch = candidate.head_branch or "devin/remediation"
+        prompt_base = candidate.base_sha or self.base_sha
+        criterion = candidate.success_criterion or ""
+        last_detail = "session produced no usable output"
+        for attempt in range(1, _MAX_SESSION_ATTEMPTS + 1):
+            prompt = render_fix_prompt(
+                candidate,
+                target_repo=f"{self.config.target_owner}/{self.config.target_repo}",
+                base_sha=prompt_base,
+                head_branch=prompt_branch,
+                success_criterion=criterion,
+                attempt=attempt,
+                suite_scope=candidate.suite_scope,
+            )
+
+            def record(evidence: SessionAttempt, row: Candidate = candidate) -> None:
+                """Persist the session identity before the session is polled."""
+                self.state_store.append(row.model_copy(update={"session_id": evidence.session_id}))
+
+            try:
+                run = self.orchestrator.run_candidate(
+                    candidate,
+                    prompt,
+                    attempt=attempt,
+                    session_created=record,
+                )
+            except SessionCeilingError as exc:
+                return self._deferred(candidate, ReasonCode.SESSION_CEILING, str(exc))
+            except SessionInfeasibleError as exc:
+                return self._terminal(
+                    candidate.model_copy(update={"session_id": candidate.session_id}),
+                    ReasonCode.SESSION_FAILED,
+                    exc.output.infeasible_reason or str(exc),
+                )
+            except SessionDedupeError as exc:
+                return self._terminal(candidate, ReasonCode.SESSION_FAILED, str(exc))
+            except (SessionBlockedError, SessionOutputError, TimeoutError) as exc:
+                last_detail = str(exc)
+                continue
+            return self._apply_fix_output(candidate, run)
+        return self._terminal(candidate, ReasonCode.SESSION_BLOCKED, last_detail)
+
+    def _apply_fix_output(self, candidate: Candidate, run: object) -> Candidate:
+        """Record the validated session output as the candidate's session row."""
+        from pipeline.session_client import SessionRun
+
+        if not isinstance(run, SessionRun):  # pragma: no cover - defensive
+            raise RunAbort("session run result is malformed")
+        output = run.output
+        head_sha = output.head_sha
+        if self.live is not None and candidate.head_branch is not None:
+            observed = self.live.client.branch_sha(candidate.head_branch)
+            if observed is not None:
+                head_sha = observed
+        self.fix_outputs[candidate.candidate_id] = {
+            "files_changed": list(output.files_changed),
+            "verify_command": output.verify_command,
+            "testing_notes": output.testing_notes,
+            "criterion_notes": output.criterion_notes,
+        }
+        return self._persist(
+            candidate,
+            state=CandidateState.SESSION_DONE,
+            session_id=run.attempt.session_id,
+            head_sha=head_sha,
+            test_nodeid=output.test_nodeid or candidate.nodeid,
+            test_paths=list(output.test_paths),
+            test_added=output.test_nodeid is not None,
+            test_author=run.attempt.session_id,
+            fix_summary=output.fix_summary,
+            suite_scope=list(output.suite_scope) or candidate.suite_scope,
+        )
+
+    def _verify(self, candidate: Candidate) -> Candidate:
+        """Evaluate the candidate's criterion from the orchestrator's own runs."""
+        evidence, baseline = verify_candidate(
+            candidate,
+            base_sha=candidate.base_sha or self.base_sha,
+            head_sha=candidate.head_sha or self.base_sha,
+            observers=self.observers,
+            config=self.config,
+        )
+        update: dict[str, object] = {"criterion_evidence": evidence}
+        if baseline is not None:
+            update["red_baseline"] = baseline
+            update["lifted_markers"] = list(baseline.still_skipped_descendants)
+        if evidence.reason is ReasonCode.STALE_SKIP:
+            update["test_added"] = False
+            update["test_exempt_reason"] = ReasonCode.STALE_SKIP
+        if evidence.satisfied is False:
+            return self._terminal(
+                candidate.model_copy(update=update),
+                evidence.reason or ReasonCode.CRITERION_NOT_MET,
+                "; ".join(evidence.observations) or None,
+            )
+        return self._persist(candidate, state=CandidateState.VERIFIED, **update)
+
+    def _pr_body(self, candidate: Candidate, commit_message: str | None) -> str:
+        template = (self.config.templates_dir / "superset/PULL_REQUEST_TEMPLATE.md").read_text(
+            encoding="utf-8"
+        )
+        fix_output = self.fix_outputs.get(candidate.candidate_id, {})
+        metadata: dict[str, object] = {
+            "mode": self.config.mode.value,
+            "writes_suppressed": self.config.mode is Mode.SIMULATE,
+            "artifact_simulated": self.config.mode is Mode.SIMULATE,
+            "ci_evidence_mode": self.config.ci_evidence_mode.value,
+            "merge_mode": (
+                candidate.merge_mode.value if candidate.merge_mode is not None else "n/a"
+            ),
+            "session_id": candidate.session_id or "n/a",
+            "session_verify_command": str(fix_output.get("verify_command", "n/a")),
+            "diff_range": f"{candidate.base_sha or 'n/a'}..{candidate.head_sha or 'n/a'}",
+        }
+        return render_pr_body(
+            template,
+            candidate,
+            automation_metadata=metadata,
+            issue_number=candidate.issue_number,
+            commit_message=commit_message,
+        )
+
+    def _publish_pr(self, candidate: Candidate) -> Candidate:
+        """Write, or adopt, the one pull request that closes the tracking issue."""
+        title = render_pr_title(candidate)
+        regex = (self.config.templates_dir / "superset/pr_title_regex.txt").read_text(
+            encoding="utf-8"
+        )
+        if not validate_pr_title(title, regex):
+            return self._deferred(
+                candidate,
+                ReasonCode.ARTIFACT_VALIDATION_FAILED,
+                f"pull-request title violates the fork's pr-lint regex: {title}",
+            )
+        commit_message: str | None = None
+        if self.live is not None:
+            messages = self.live.client.commit_messages_between(
+                candidate.base_sha or self.base_sha,
+                candidate.head_sha or "",
+            )
+            unsigned = [message for message in messages if not _SIGNOFF_TRAILER.search(message)]
+            if not messages or unsigned:
+                return self._terminal(
+                    candidate,
+                    ReasonCode.DCO_TRAILER_MISSING,
+                    "the candidate branch carries a commit without a Signed-off-by trailer",
+                )
+            commit_message = messages[-1]
+        try:
+            body = self._pr_body(candidate, commit_message)
+            validate_pr_body(body, issue_number=candidate.issue_number)
+        except ArtifactValidationError as exc:
+            return self._deferred(candidate, ReasonCode.ARTIFACT_VALIDATION_FAILED, str(exc))
+        report = self.output_dir / "reports" / "prs" / f"{candidate.candidate_id}.md"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(body, encoding="utf-8")
+        if self.live is None:
+            return self._persist(candidate, state=CandidateState.PR_CREATED)
+        head = candidate.head_branch
+        if head is None:
             raise RunAbort("candidate branch was not prepared before publication")
         try:
-            pr_body = render_pr_body(
-                (config.templates_dir / "superset/PULL_REQUEST_TEMPLATE.md").read_text(
-                    encoding="utf-8"
-                ),
+            number, url, adopted = reconcile_pull_request(
+                self.live.client,
+                title=title,
+                body=body,
+                head=head,
+                base=self.live.base_branch,
+                existing_pr_number=candidate.pr_number,
+                existing_pr_url=candidate.pr_url,
+            )
+        except MergedPullRequestError as exc:
+            return self._persist(
                 candidate,
-                planner_outputs.get(candidate.candidate_id, {}),
-                reviewer_outputs.get(candidate.candidate_id, {}),
-                automation_metadata={
-                    "mode": "live",
-                    "writes_suppressed": False,
-                    "ci_evidence_mode": config.ci_evidence_mode.value,
-                    "implementer_commands_run": implementer_outputs.get(
-                        candidate.candidate_id, {}
-                    ).get("commands_run", "n/a"),
-                    "reviewer_pre_fix_failure": reviewer_outputs.get(
-                        candidate.candidate_id, {}
-                    ).get("red_baseline", "n/a"),
-                    "reviewer_post_fix_result": reviewer_outputs.get(
-                        candidate.candidate_id, {}
-                    ).get("green_result", "n/a"),
-                    "diff_range": (
-                        f"{candidate.base_sha or 'n/a'}.."
-                        f"{candidate.reviewed_head_sha or candidate.head_sha or 'n/a'}"
-                    ),
-                },
-                commit_message=None,
+                state=CandidateState.MERGED,
+                pr_number=exc.match.number,
+                pr_url=exc.match.url,
+                merged_at=exc.match.merged_at,
+                merge_verified=True,
             )
-            validate_pr_body(pr_body)
-        except ArtifactValidationError as exc:
-            deferred = candidate.model_copy(
-                update={
-                    "state": CandidateState.DEFERRED,
-                    "reason": ReasonCode.ARTIFACT_VALIDATION_FAILED,
-                    "reason_detail": str(exc),
-                    "auto_merge_eligible": False,
-                }
+        except ClosedPullRequestError as exc:
+            update: dict[str, object] = {}
+            if exc.match is not None:
+                update = {"pr_number": exc.match.number, "pr_url": exc.match.url}
+            return self._terminal(
+                candidate.model_copy(update=update),
+                ReasonCode.CLOSED_PULL_REQUEST,
+                str(exc),
             )
-            state_store.append(deferred)
-            published.append(deferred)
-            continue
-        try:
-            for label in requested_labels:
-                client.ensure_label(label)
-                labels.append(label)
-        except ArtifactUnavailableError as exc:
-            deferred = candidate.model_copy(
-                update={
-                    "state": CandidateState.DEFERRED,
-                    "reason": getattr(exc, "reason", ReasonCode.LABEL_CAPABILITY_UNAVAILABLE),
-                    "reason_detail": str(exc),
-                    "auto_merge_eligible": False,
-                }
-            )
-            state_store.append(deferred)
-            published.append(deferred)
-            continue
-        pr_title = render_pr_title(candidate)
-        regex = (config.templates_dir / "superset/pr_title_regex.txt").read_text(encoding="utf-8")
-        if not validate_pr_title(pr_title, regex):
-            deferred = candidate.model_copy(
-                update={
-                    "state": CandidateState.DEFERRED,
-                    "reason": ReasonCode.CAPABILITY_UNAVAILABLE,
-                }
-            )
-            state_store.append(deferred)
-            published.append(deferred)
-            continue
-        ci_reason_holder: list[ReasonCode | None] = [None]
-        ci_detail_holder: list[str | None] = [None]
-        label_reason_holder: list[ReasonCode | None] = [None]
-        label_apply_reason_holder: list[ReasonCode | None] = [None]
-        pr_url_holder: list[str | None] = [candidate.pr_url]
-        pr_number_holder: list[int | None] = [candidate.pr_number]
-        head_sha_holder: list[str | None] = [None]
-        commit_message_holder: list[str | None] = [None]
+        if adopted:
+            self.notes.append(f"{candidate.candidate_id}: adopted existing pull request #{number}")
+        return self._persist(
+            candidate,
+            state=CandidateState.PR_CREATED,
+            pr_number=number,
+            pr_url=url,
+        )
 
-        def record_ci_mode_transition(transition: CiModeTransition) -> None:
-            ci_mode_events.append(
+    def _post_pr_observers(self, candidate: Candidate) -> Observers:
+        """Return the observation seams available once the PR head exists."""
+        if self.live is None:
+            return self.observers
+        observers = Observers(
+            run_item=self.observers.run_item,
+            run_suite=self.observers.run_suite,
+            probe_symbol=self.observers.probe_symbol,
+        )
+        if candidate.pr_number is not None:
+            alerts = PullRequestAlerts(
+                config=self.config,
+                reader=self.live.transport.get,
+                pr_number=candidate.pr_number,
+                repo_path=self.checkout.repo_path if self.checkout is not None else None,
+            )
+            observers.probe_alerts = alerts.probe
+        return observers
+
+    def _watch_ci(self, candidate: Candidate) -> CiWaitResult | None:
+        """Poll the PR head's check runs, recording every observed conclusion."""
+        if self.live is None or candidate.pr_number is None:
+            return None
+        head_sha, is_fork = self.live.client.pull_request_head_metadata(candidate.pr_number)
+
+        def transitioned(transition: CiModeTransition) -> None:
+            self.ci_mode = transition.mode
+            self.run_events.append(
                 RunEventRecord(
                     event_type="ci_mode_transition",
-                    run_id=run_id,
+                    run_id=self.run_id,
                     mode_from=CiEvidenceMode.LOCAL.value,
                     mode_to=transition.mode.value,
                     transition_reason=transition.reason,
                 )
             )
 
-        def after_pr_created(
-            pr_number: int,
-            pr_url: str,
-            candidate_for_callback: Candidate = candidate,
-            pr_url_for_callback: list[str | None] = pr_url_holder,
-            pr_number_for_callback: list[int | None] = pr_number_holder,
-            head_shas: list[str | None] = head_sha_holder,
-            ci_reasons: list[ReasonCode | None] = ci_reason_holder,
-            ci_details: list[str | None] = ci_detail_holder,
-            issue_numbers: list[int | None] = issue_number_holder,
-        ) -> None:
-            pr_url_for_callback[0] = pr_url
-            pr_number_for_callback[0] = pr_number
-            state_store.append(
-                candidate_for_callback.model_copy(
-                    update={
-                        "state": CandidateState.PR_CREATED,
-                        "pr_number": pr_number,
-                        "pr_url": pr_url,
-                        "head_sha": head_shas[0],
-                        "reason": ci_reasons[0],
-                        "reason_detail": ci_details[0] or candidate_for_callback.reason_detail,
-                        "comment_url": candidate_for_callback.comment_url,
-                        "issue_number": issue_numbers[0],
-                        "artifact_degraded": candidate_for_callback.artifact_degraded,
-                        "merge_verified": candidate_for_callback.merge_verified,
-                        "auto_merge_requested": candidate_for_callback.auto_merge_requested,
-                        "ci_evidence_mode": ci_mode_state[0].value,
-                    }
-                )
-            )
-
-        def after_pr_adopted(
-            pr_number: int,
-            pr_url: str,
-            candidate_for_callback: Candidate = candidate,
-        ) -> None:
-            """Persist identity when publication reconciles an existing PR."""
-            after_pr_created(pr_number, pr_url, candidate_for_callback)
-
-        def ci_probe(
-            pr_number: int,
-            candidate_for_probe: Candidate = candidate,
-            planner_for_probe: Mapping[str, object] = planner_outputs.get(
-                candidate.candidate_id, {}
-            ),
-            reviewer_for_probe: Mapping[str, object] = reviewer_outputs.get(
-                candidate.candidate_id, {}
-            ),
-            wait_for_ci: bool = True,
-            head_shas: list[str | None] = head_sha_holder,
-            ci_reasons: list[ReasonCode | None] = ci_reason_holder,
-            ci_details: list[str | None] = ci_detail_holder,
-            commit_messages_holder: list[str | None] = commit_message_holder,
-        ) -> CiWaitResult:
-            head_sha, is_fork = client.pull_request_head_metadata(pr_number)
-            head_shas[0] = head_sha
-            if head_sha is None:
-                ci_reasons[0] = ReasonCode.CI_EVIDENCE_UNAVAILABLE
-                return CiWaitResult(ci_mode_state[0], ci_reasons[0], False)
-            base_for_probe = candidate_for_probe.base_sha
-            if base_for_probe is None:
-                ci_reasons[0] = ReasonCode.CI_EVIDENCE_UNAVAILABLE
-                return CiWaitResult(ci_mode_state[0], ci_reasons[0], False)
-            commit_messages = client.commit_messages_between(base_for_probe, head_sha)
-            if not commit_messages or any(
-                _SIGNOFF_TRAILER.search(message) is None for message in commit_messages
-            ):
-                ci_reasons[0] = ReasonCode.DCO_TRAILER_MISSING
-                return CiWaitResult(ci_mode_state[0], ci_reasons[0], False)
-            commit_messages_holder[0] = commit_messages[-1]
-            if not wait_for_ci:
-                return CiWaitResult(ci_mode_state[0], None, False)
-            wait_started = time.monotonic()
-            wait_result = wait_for_required_contexts(
-                config,
-                client=transport,
-                elapsed_s=ci_elapsed_s[0],
-                sha=head_sha,
-                poll=True,
-                on_mode_transition=record_ci_mode_transition,
-                ci_mode=ci_mode_state[0],
-                is_fork=is_fork,
-            )
-            ci_elapsed_s[0] += time.monotonic() - wait_started
-            ci_mode_state[0] = wait_result.mode
-            ci_reasons[0] = wait_result.reason
-            ci_details[0] = wait_result.detail
-            return wait_result
-
-        def after_ci(
-            pr_number: int,
-            candidate_for_body: Candidate = candidate,
-            planner_for_body: Mapping[str, object] = planner_outputs.get(
-                candidate.candidate_id, {}
-            ),
-            implementer_for_body: Mapping[str, object] = implementer_outputs.get(
-                candidate.candidate_id, {}
-            ),
-            reviewer_for_body: Mapping[str, object] = reviewer_outputs.get(
-                candidate.candidate_id, {}
-            ),
-            issue_numbers: list[int | None] = issue_number_holder,
-            commit_messages: list[str | None] = commit_message_holder,
-        ) -> None:
-            if commit_messages[0] is None:
-                return
-            reviewed_sha = (
-                candidate_for_body.reviewed_head_sha or candidate_for_body.head_sha or "n/a"
-            )
-            rendered = render_pr_body(
-                (config.templates_dir / "superset/PULL_REQUEST_TEMPLATE.md").read_text(
-                    encoding="utf-8"
-                ),
-                candidate_for_body,
-                planner_for_body,
-                reviewer_for_body,
-                automation_metadata={
-                    "mode": "live",
-                    "writes_suppressed": False,
-                    "ci_evidence_mode": config.ci_evidence_mode.value,
-                    "implementer_commands_run": implementer_for_body.get("commands_run", "n/a"),
-                    "reviewer_pre_fix_failure": reviewer_for_body.get("red_baseline", "n/a"),
-                    "reviewer_post_fix_result": reviewer_for_body.get("green_result", "n/a"),
-                    "diff_range": (f"{candidate_for_body.base_sha or 'n/a'}..{reviewed_sha}"),
-                },
-                issue_number=issue_numbers[0],
-                commit_message=commit_messages[0],
-            )
-            validate_pr_body(rendered)
-            client.patch_pr_body(pr_number, rendered)
-
-        def after_issue_patched(
-            issue_url: str,
-            candidate_for_callback: Candidate = candidate,
-            pr_url_for_callback: list[str | None] = pr_url_holder,
-            pr_numbers: list[int | None] = pr_number_holder,
-            issue_numbers: list[int | None] = issue_number_holder,
-            head_shas: list[str | None] = head_sha_holder,
-            ci_reasons: list[ReasonCode | None] = ci_reason_holder,
-            ci_details: list[str | None] = ci_detail_holder,
-        ) -> None:
-            state_store.append(
-                candidate_for_callback.model_copy(
-                    update={
-                        "state": CandidateState.ISSUE_PATCHED,
-                        "pr_url": pr_url_for_callback[0],
-                        "pr_number": pr_numbers[0],
-                        "issue_number": issue_numbers[0],
-                        "issue_url": issue_url,
-                        "head_sha": head_shas[0],
-                        "reason": ci_reasons[0],
-                        "reason_detail": ci_details[0] or candidate_for_callback.reason_detail,
-                        "comment_url": candidate_for_callback.comment_url,
-                        "head_branch": candidate_for_callback.head_branch,
-                    }
-                )
-            )
-
-        def after_comment_created(
-            comment_url: str,
-            candidate_for_callback: Candidate = candidate,
-            pr_url_for_callback: list[str | None] = pr_url_holder,
-            pr_numbers: list[int | None] = pr_number_holder,
-            head_shas: list[str | None] = head_sha_holder,
-        ) -> None:
-            state_store.append(
-                candidate_for_callback.model_copy(
-                    update={
-                        "state": CandidateState.COMMENT_CREATED,
-                        "pr_url": pr_url_for_callback[0],
-                        "pr_number": pr_numbers[0],
-                        "head_sha": head_shas[0],
-                        "comment_url": comment_url,
-                        "reason": ReasonCode.ARTIFACT_DEGRADED,
-                        "reason_detail": None,
-                        "artifact_degraded": True,
-                    }
-                )
-            )
-
-        try:
-            if config.has_issues:
-                links = publish_artifacts(
-                    client,
-                    candidate,
-                    issue_title=issue_title,
-                    issue_body=issue_body,
-                    pr_title=pr_title,
-                    pr_body=pr_body,
-                    head=branch,
-                    base=base_branch,
-                    labels=labels,
-                    ci_probe=ci_probe,
-                    existing_issue_number=candidate.issue_number,
-                    existing_issue_url=candidate.issue_url,
-                    existing_pr_number=candidate.pr_number,
-                    existing_pr_url=candidate.pr_url,
-                    after_issue=after_issue,
-                    after_pr_created=after_pr_created,
-                    after_pr_adopted=after_pr_adopted,
-                    after_ci=after_ci,
-                    after_issue_patched=after_issue_patched,
-                )
-            else:
-                links = publish_degraded(
-                    client,
-                    candidate,
-                    pr_title=pr_title,
-                    pr_body=pr_body,
-                    comment_body=issue_body,
-                    head=branch,
-                    base=base_branch,
-                    existing_pr_number=candidate.pr_number,
-                    existing_pr_url=candidate.pr_url,
-                    after_pr_created=after_pr_created,
-                    after_pr_adopted=after_pr_adopted,
-                    after_comment_created=after_comment_created,
-                )
-                if links.pr_number is not None:
-                    ci_probe(links.pr_number, wait_for_ci=False)
-        except ClosedPullRequestError:
-            latest = state_store.resume(candidate.candidate_id) or candidate
-            closed = latest.model_copy(
-                update={
-                    "state": CandidateState.TERMINAL,
-                    "action": Action.HUMAN_REVIEW,
-                    "reason": ReasonCode.CLOSED_PULL_REQUEST,
-                }
-            )
-            state_store.append(closed)
-            published.append(closed)
-            continue
-        except MergedPullRequestError as exc:
-            latest = state_store.resume(candidate.candidate_id) or candidate
-            pipeline_verified = (
-                latest.state is CandidateState.ISSUE_PATCHED
-                and latest.pr_number == exc.match.number
-                and latest.reason is None
-                and latest.auto_merge_requested
-            )
-            merged = latest.model_copy(
-                update={
-                    "state": CandidateState.TERMINAL,
-                    "pr_number": exc.match.number,
-                    "pr_url": exc.match.url,
-                    "merged_at": exc.match.merged_at,
-                    "reason": (
-                        None if pipeline_verified else ReasonCode.MERGED_EXTERNALLY_UNVERIFIED
-                    ),
-                    "merge_verified": pipeline_verified,
-                }
-            )
-            state_store.append(merged)
-            published.append(merged)
-            continue
-        except (
-            ArtifactUnavailableError,
-            GitHubResponseError,
-            StatePreservationError,
-            ArtifactValidationError,
-            PreflightError,
-            HttpTransportError,
-            OSError,
-        ) as exc:
-            latest = state_store.resume(candidate.candidate_id) or candidate
-            failure_reason = getattr(exc, "reason", None)
-            if not isinstance(failure_reason, ReasonCode):
-                failure_reason = (
-                    ReasonCode.ARTIFACT_VALIDATION_FAILED
-                    if isinstance(exc, ArtifactValidationError)
-                    else ReasonCode.CAPABILITY_UNAVAILABLE
-                )
-            deferred = latest.model_copy(
-                update={
-                    "state": CandidateState.DEFERRED,
-                    "reason": failure_reason,
-                    "reason_detail": str(exc),
-                    "auto_merge_eligible": False,
-                }
-            )
-            state_store.append(deferred)
-            published.append(deferred)
-            continue
-        if ci_reason_holder[0] is not None and "needs-human-review" not in labels:
-            try:
-                client.ensure_label("needs-human-review")
-                labels.append("needs-human-review")
-            except ArtifactUnavailableError as exc:
-                label_reason_holder[0] = getattr(
-                    exc, "reason", ReasonCode.LABEL_CAPABILITY_UNAVAILABLE
-                )
-        if links.pr_number is not None and labels:
-            try:
-                client.add_labels(links.pr_number, labels)
-            except HttpTransportError:
-                label_failures.extend(label for label in labels if label not in label_failures)
-                label_apply_reason_holder[0] = ReasonCode.LABEL_CAPABILITY_UNAVAILABLE
-        comment_url_value: str | None = candidate.comment_url
-        if label_failures and links.pr_number is not None:
-            try:
-                comment_url_value = client.comment_pr(
-                    links.pr_number,
-                    "Label publication was unavailable for: "
-                    + ", ".join(sorted(set(label_failures)))
-                    + ". Human review is required.",
-                )
-            except HttpTransportError:
-                pass
-        latest_after_publication = state_store.resume(candidate.candidate_id)
-        publication_source = latest_after_publication or candidate
-        if ci_reason_holder[0] is not None:
-            publication_source = publication_source.model_copy(
-                update={
-                    "reason": ci_reason_holder[0],
-                    "reason_detail": ci_detail_holder[0],
-                    "auto_merge_eligible": False,
-                }
-            )
-        elif label_reason_holder[0] is not None:
-            publication_source = publication_source.model_copy(
-                update={
-                    "state": CandidateState.DEFERRED,
-                    "reason": label_reason_holder[0],
-                    "reason_detail": "required needs-human-review label unavailable",
-                    "auto_merge_eligible": False,
-                }
-            )
-        elif label_failures:
-            publication_source = publication_source.model_copy(
-                update={
-                    "auto_merge_eligible": False,
-                    "artifact_degraded": True,
-                }
-            )
-        if label_apply_reason_holder[0] is not None:
-            publication_source = publication_source.model_copy(
-                update={
-                    "reason": label_apply_reason_holder[0],
-                    "reason_detail": "lifecycle label application unavailable",
-                    "auto_merge_eligible": False,
-                    "artifact_degraded": True,
-                }
-            )
-        published_candidate = publication_source.model_copy(
-            update={
-                "state": (
-                    publication_source.state
-                    if publication_source.state is CandidateState.DEFERRED
-                    else (
-                        CandidateState.ISSUE_PATCHED
-                        if config.has_issues
-                        else CandidateState.COMMENT_CREATED
-                    )
-                ),
-                "issue_number": links.issue_number or publication_source.issue_number,
-                "pr_number": links.pr_number,
-                "issue_url": links.issue_url or publication_source.issue_url,
-                "pr_url": links.pr_url,
-                "head_branch": branch,
-                "head_sha": head_sha_holder[0] or publication_source.head_sha,
-                "comment_url": comment_url_value,
-                "merged_at": publication_source.merged_at,
-                "ci_evidence_mode": ci_mode_state[0].value,
-                "auto_merge_requested": (
-                    links.auto_merge_requested or publication_source.auto_merge_requested
-                ),
-                "merge_verified": publication_source.merge_verified,
-            }
+        result = wait_for_check_runs(
+            self.config,
+            client=self.live.transport,
+            elapsed_s=self.ci_elapsed_s,
+            sha=head_sha or candidate.head_sha or "HEAD",
+            on_mode_transition=transitioned,
+            ci_mode=self.ci_mode,
+            is_fork=is_fork,
         )
-        latest_persisted: Candidate | None = latest_after_publication
-        if latest_persisted is None or latest_persisted.model_dump(
-            mode="json"
-        ) != published_candidate.model_dump(mode="json"):
-            state_store.append(published_candidate)
-            latest_persisted = published_candidate
-        published.append(latest_persisted or published_candidate)
-    return published
+        self.ci_mode = result.mode
+        return result
+
+    def _settle_merge(self, candidate: Candidate) -> Candidate:
+        """Apply the §12 merge gate and settle the candidate's final row."""
+        ci_result = self._watch_ci(candidate)
+        update: dict[str, object] = {}
+        if ci_result is not None:
+            update["check_run_conclusions"] = list(ci_result.conclusions)
+            update["ci_evidence_mode"] = ci_result.mode.value
+        if post_pr_criterion_pending(candidate, self.config) and self.live is not None:
+            evidence, _ = verify_candidate(
+                candidate,
+                base_sha=candidate.base_sha or self.base_sha,
+                head_sha=candidate.head_sha or self.base_sha,
+                observers=self._post_pr_observers(candidate),
+                config=self.config,
+                stage="post_pr",
+            )
+            update["criterion_evidence"] = evidence
+            if evidence.satisfied is not True:
+                return self._terminal(
+                    candidate.model_copy(update=update),
+                    evidence.reason or ReasonCode.CRITERION_NOT_MET,
+                    "; ".join(evidence.observations) or None,
+                )
+        if ci_result is not None and ci_result.reason is not None:
+            return self._terminal(
+                candidate.model_copy(update=update),
+                ci_result.reason,
+                ci_result.detail,
+            )
+        candidate = candidate.model_copy(update=update)
+        if self.live is not None and auto_merge_eligible(candidate, self.config, ci_result):
+            self.live.client.enable_auto_merge(
+                candidate.pr_number or 0,
+                ci_mode=self.ci_mode,
+            )
+            merged = self.live.client.pull_request(candidate.pr_number or 0)
+            if merged is not None and merged.merged_at is not None:
+                return self._persist(
+                    candidate,
+                    state=CandidateState.MERGED,
+                    merged_at=merged.merged_at,
+                    merge_verified=True,
+                    auto_merge_requested=True,
+                )
+            return self._persist(
+                candidate,
+                state=CandidateState.AWAITING_HUMAN_MERGE,
+                reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+                reason_detail="auto-merge was requested but the fork has not merged it yet",
+                auto_merge_requested=True,
+            )
+        return self._persist(
+            candidate,
+            state=CandidateState.AWAITING_HUMAN_MERGE,
+            reason=(
+                ReasonCode.MANUAL_MERGE_REQUIRED
+                if candidate.merge_mode is MergeMode.MANUAL
+                else None
+            ),
+        )
 
 
 def _extract_runtime_args(args: Sequence[str]) -> tuple[dict[str, str], list[str]]:
@@ -910,6 +706,8 @@ def _record_candidate(
     current_major: int | None = None,
 ) -> Candidate:
     """Build a candidate from a baseline record when the target checkout is absent."""
+    from pipeline.verify import declare_success_criterion
+
     candidate = Candidate(
         candidate_id=f"{lane.value}-{uuid.uuid5(uuid.NAMESPACE_URL, locator).hex}",
         lane=lane,
@@ -917,6 +715,7 @@ def _record_candidate(
         stable_locator=locator,
         trigger_exists=True,
         verifiability_exists=True,
+        success_criterion=declare_success_criterion(lane),
     )
     if lane is Lane.SKIPPED_TESTS:
         nodeid = str(record.get("nodeid", locator))
@@ -925,6 +724,7 @@ def _record_candidate(
                 "candidate_id": f"{lane.value}-{uuid.uuid5(uuid.NAMESPACE_URL, nodeid).hex}",
                 "stable_locator": nodeid,
                 "nodeid": nodeid,
+                "suite_scope": [nodeid.split("::", 1)[0]],
                 "kind": (
                     DefinitionKind.CLASS
                     if record.get("kind") == "class"
@@ -969,6 +769,7 @@ def _record_candidate(
             "stable_locator": locator_value,
             "module": module,
             "qualname": qualname,
+            "suite_scope": [module.replace(".", "/") + ".py"] if module else [],
             "deprecated_in": deprecated_value,
             "removed_in": (
                 str(record["removed_in"]) if record.get("removed_in") is not None else None
@@ -1036,278 +837,18 @@ def _capability_notes(
     return notes
 
 
-def _prepare_live_candidate(
-    candidate: Candidate,
-    *,
-    state_store: CandidateStateStore,
-    client: GitHubClient,
-    base_sha: str,
-    head_branch: str,
-    run_id: str,
-) -> Candidate:
-    """Reserve and create a candidate branch before any role session starts."""
-    persisted = state_store.resume(candidate.candidate_id)
-    marker = state_store.marker_artifact(candidate.candidate_id) if persisted is None else None
-    marker_outcome = state_store.marker_search_outcome(candidate.candidate_id)
-    candidate = candidate.model_copy(
-        update={
-            "marker_search_outcome": marker_outcome.value,
-            "reason_detail": candidate.reason_detail or marker_outcome.value,
-        }
-    )
-    if persisted is None and state_store.marker_search_orphaned(candidate.candidate_id):
-        orphaned = candidate.model_copy(
-            update={
-                "state": CandidateState.DEFERRED,
-                "reason": ReasonCode.ARTIFACT_ORPHANED,
-                "reason_detail": marker_outcome.value,
-            }
-        )
-        state_store.append(orphaned)
-        return orphaned
-    if marker is not None:
-        adoption = (
-            {
-                "state": CandidateState.PR_CREATED,
-                "pr_number": marker.number,
-                "pr_url": marker.url,
-                "issue_number": None,
-                "issue_url": None,
-            }
-            if marker.is_pull_request
-            else {
-                "state": CandidateState.ISSUE_CREATED,
-                "issue_number": marker.number,
-                "issue_url": marker.url,
-                "pr_number": None,
-                "pr_url": None,
-            }
-        )
-        adopted = candidate.model_copy(
-            update={
-                **adoption,
-                "reason": None,
-                "reason_detail": None,
-            }
-        )
-        state_store.append(adopted)
-        persisted = adopted
-        if marker.is_pull_request:
-            return adopted
-    decision = state_store.resume_decision(candidate.candidate_id)
-    if decision.action is ResumeAction.SKIP:
-        return persisted if persisted is not None else candidate
-    if decision.action is ResumeAction.DEFER:
-        reason = {
-            "failed": ReasonCode.MARKER_SEARCH_FAILED,
-            "orphaned": ReasonCode.ARTIFACT_ORPHANED,
-            "unconfigured": ReasonCode.MARKER_SEARCH_UNCONFIGURED,
-        }.get(marker_outcome.value, ReasonCode.CAPABILITY_UNAVAILABLE)
-        deferred = (persisted or candidate).model_copy(
-            update={
-                "state": CandidateState.DEFERRED,
-                "reason": reason,
-                "reason_detail": marker_outcome.value,
-            }
-        )
-        state_store.append(deferred)
-        return deferred
-    branch = (
-        persisted.head_branch
-        if persisted is not None and persisted.head_branch is not None
-        else f"{head_branch.rstrip('/')}/{candidate.candidate_id}"
-    )
-    prepared = (persisted or candidate).model_copy(
-        update={
-            "state": CandidateState.DISPATCHING,
-            "base_sha": persisted.base_sha if persisted and persisted.base_sha else base_sha,
-            "head_branch": branch,
-        }
-    )
-    prepared = prepared.model_copy(update={"reserved_by_run_id": run_id})
-    reservation_holder = persisted
-    if state_store.append_if_new_artifact(prepared, run_id=run_id):
-        persisted = state_store.resume(candidate.candidate_id) or prepared
-        prepared = persisted
-    else:
-        resumed = state_store.resume(candidate.candidate_id)
-        if state_store.reservation_reason == "reservation_held":
-            resumed = None
-        if resumed is None:
-            deferred = (reservation_holder or candidate).model_copy(
-                update={
-                    "state": CandidateState.DEFERRED,
-                    "reason": (
-                        ReasonCode.RESERVATION_HELD
-                        if state_store.reservation_reason == "reservation_held"
-                        else ReasonCode.CAPABILITY_UNAVAILABLE
-                    ),
-                    "reason_detail": state_store.reservation_reason,
-                }
-            )
-            state_store.append(deferred)
-            return deferred
-        prepared = resumed.model_copy(
-            update={
-                "base_sha": resumed.base_sha or base_sha,
-                "head_branch": resumed.head_branch or branch,
-            }
-        )
-    try:
-        client.create_branch(prepared.head_branch or branch, prepared.base_sha or base_sha)
-    except HttpTransportError as exc:
-        if exc.status_code != 422:
-            raise
-        existing_sha = client.branch_sha(prepared.head_branch or branch)
-        recorded_base = prepared.base_sha or base_sha
-        descendant = (
-            existing_sha is not None
-            and recorded_base is not None
-            and existing_sha != recorded_base
-            and bool(client.commit_messages_between(recorded_base, existing_sha))
-        )
-        if existing_sha != recorded_base and not descendant:
-            deferred = prepared.model_copy(
-                update={
-                    "state": CandidateState.DEFERRED,
-                    "reason": ReasonCode.CAPABILITY_UNAVAILABLE,
-                }
-            )
-            state_store.append(deferred)
-            return deferred
-        if existing_sha is not None:
-            prepared = prepared.model_copy(update={"head_sha": existing_sha})
-    if persisted is not None:
-        for field in (
-            "issue_url",
-            "pr_url",
-            "comment_url",
-            "merged_at",
-            "issue_number",
-            "pr_number",
-        ):
-            previous = getattr(persisted, field)
-            current = getattr(prepared, field)
-            if previous is not None and current != previous:
-                raise StatePreservationError(f"resume preparation discarded persisted {field}")
-        if persisted.head_sha is not None:
-            if prepared.head_sha is None:
-                raise StatePreservationError("resume preparation discarded persisted head_sha")
-    return prepared
-
-
-def _make_role_prompts(
-    planner_output: Mapping[str, object],
-    previous_iteration: ReviewIteration | None = None,
-    *,
-    candidate: Candidate,
-    target_repo: str,
-    base_sha: str,
-    head_branch: str,
-    pinned_head_holder: list[str | None],
-) -> tuple[str, str, Callable[[str], str]]:
-    """Render role prompts from one candidate and its pinned branch head."""
-
-    def phase_b_prompt(committed_diff: str) -> str:
-        resolved_head_sha = pinned_head_holder[0] or candidate.head_sha
-        if resolved_head_sha is None:
-            raise PhaseBHeadUnavailableError(
-                f"cannot render phase-B prompt without a resolved head SHA: "
-                f"{candidate.candidate_id}"
-            )
-        return render_reviewer_phase_b_prompt(
-            candidate,
-            target_repo=target_repo,
-            base_sha=base_sha,
-            head_sha=resolved_head_sha,
-            head_branch=head_branch,
-            planner_output=planner_output,
-            committed_diff=committed_diff,
-        )
-
-    return (
-        render_implementer_prompt(
-            candidate,
-            target_repo=target_repo,
-            base_sha=base_sha,
-            head_branch=head_branch,
-            planner_output=planner_output,
-            previous_iteration=previous_iteration,
-        ),
-        render_reviewer_prompt(
-            candidate,
-            target_repo=target_repo,
-            base_sha=base_sha,
-            head_branch=head_branch,
-            planner_output=planner_output,
-            previous_iteration=previous_iteration,
-        ),
-        phase_b_prompt,
-    )
-
-
-def run_once(
+def _enumerate(
     *,
     config: PipelineConfig,
+    baseline: Mapping[str, object],
     repo_path: Path,
-    output_dir: Path,
-    baseline_path: Path,
-    base_sha: str | None = None,
-    head_branch: str | None = None,
-    base_branch: str = "master",
-) -> tuple[str, tuple[Path, ...]]:
-    """Execute enumeration, selection, review orchestration, and reporting."""
-    run_id = uuid.uuid4().hex
-    baseline = _load_baseline(baseline_path)
-    if config.mode is Mode.SIMULATE and config.ci_evidence_mode is not CiEvidenceMode.LOCAL:
-        config = config.model_copy(
-            update={"ci_evidence_mode": CiEvidenceMode.LOCAL, "auto_merge_enabled": False}
-        )
-    target_exists = repo_path.exists()
-    preflight_notes: list[str] = []
-    preflight: LivePreflight | None = None
-    session_transport: DevinTransport | None = None
-    github_transport: UrllibGitHubTransport | None = None
-    ci_mode_events: list[RunEventRecord] = []
-    ci_mode_state = [config.ci_evidence_mode]
-    ci_elapsed_s = [0.0]
-    if config.mode is Mode.LIVE:
-        if head_branch is None:
-            raise RunAbort("LIVE requires --head-branch for PR publication")
-        github_transport = UrllibGitHubTransport()
-        try:
-            preflight = run_live_preflight(config, github_transport)
-        except PreflightError as exc:
-            raise RunAbort(f"{exc.reason.value}: {exc}") from exc
-        config = config.model_copy(
-            update={
-                "has_issues": preflight.has_issues,
-                "ci_evidence_mode": preflight.ci_evidence_mode,
-                "auto_merge_enabled": config.auto_merge_enabled,
-            }
-        )
-        preflight_notes.extend(preflight.notes)
-        if not preflight.code_scanning_available:
-            config = config.model_copy(update={"alert_source": AlertSource.SARIF_FILE})
-        session_transport = UrllibDevinTransport()
-    repo_name = f"{config.target_owner}/{config.target_repo}"
-    marker_search = None
-    if github_transport is not None:
-        marker_search = github_marker_search(
-            lambda marker: github_transport.get(
-                "/search/issues?"
-                + urlencode({"q": f'repo:{config.target_owner}/{config.target_repo} "{marker}"'})
-            )
-        )
-    state_store = CandidateStateStore(
-        output_dir
-        / "state"
-        / ("candidates-live.jsonl" if config.mode is Mode.LIVE else "candidates.jsonl"),
-        marker_search=marker_search,
-        require_marker_proof=config.mode is Mode.LIVE,
-        reservation_lease_s=config.reservation_lease_s or 3 * DEFAULT_SESSION_TIMEOUT_S,
-        artifact_simulated=config.mode is Mode.SIMULATE,
-    )
+    repo_name: str,
+    target_exists: bool,
+    base_sha: str | None,
+    preflight: LivePreflight | None,
+    notes: list[str],
+) -> list[Candidate]:
+    """Enumerate all three lanes for this run, fresh, regardless of trigger."""
     valid = baseline.get("baseline_valid_lanes")
     valid_lanes = {str(item) for item in valid} if isinstance(valid, list) else set()
     baseline_major = baseline.get("current_major")
@@ -1350,12 +891,11 @@ def run_once(
     if "deprecations" in valid_lanes:
         if target_exists:
             release = baseline.get("current_release")
-            major = baseline.get("current_major")
             candidates.extend(
                 enumerate_deprecations(
                     repo_path,
                     current_release_value=release if isinstance(release, str) else None,
-                    current_major=major if isinstance(major, int) else None,
+                    current_major=current_major,
                     version_source=config.version_source,
                     eol_major_lag=config.eol_major_lag,
                     failures=deprecation_failures,
@@ -1370,22 +910,34 @@ def run_once(
                     current_major=current_major,
                 )
             )
+    notes.extend(
+        f"enumeration failure: {failure.get('path', '<unknown>')}"
+        for failure in [*skipped_failures, *deprecation_failures]
+    )
+    return candidates
 
+
+def _normalize(
+    candidates: Sequence[Candidate],
+    *,
+    state_store: CandidateStateStore,
+) -> list[Candidate]:
+    """Adopt persisted identity and link drifted LANE 1 alerts before gating."""
     prior_rows = state_store.latest()
-    normalized_candidates: list[Candidate] = []
+    normalized: list[Candidate] = []
     for candidate in candidates:
         prior = prior_rows.get(candidate.candidate_id)
         if prior is not None:
-            if prior.pr_url is not None or prior.issue_url is not None:
-                normalized_candidates.append(prior)
-            else:
-                normalized_candidates.append(candidate)
+            normalized.append(
+                prior if prior.pr_url is not None or prior.issue_url is not None else candidate
+            )
             continue
+        current = candidate
         if candidate.lane is Lane.CODEQL:
             drifted = state_store.drift_match(candidate, current_scan=candidates)
             if drifted is not None and drifted.superseded_by is None:
                 state_store.supersede(drifted, candidate)
-                candidate = candidate.model_copy(
+                current = candidate.model_copy(
                     update={
                         "state": drifted.state,
                         "issue_number": drifted.issue_number,
@@ -1397,8 +949,12 @@ def run_once(
                         "head_sha": drifted.head_sha,
                     }
                 )
-        normalized_candidates.append(candidate)
-    candidates = normalized_candidates
+        normalized.append(current)
+    return normalized
+
+
+def _select(candidates: Sequence[Candidate], config: PipelineConfig) -> list[Candidate]:
+    """Gate, score and dispatch every enumerated candidate deterministically."""
     rubrics = load_rubrics(config.rubrics_path)
     selected: list[Candidate] = []
     for candidate in candidates:
@@ -1420,424 +976,177 @@ def run_once(
                 update={"state": CandidateState.SCORED}
             )
         selected.append(gated)
-    dispatched = dispatch_candidates(selected, config)
-    orchestrator = RuntimeOrchestrator(SessionClient(config, transport=session_transport))
-    reviewed: list[Candidate] = []
-    session_candidates: list[Candidate] = []
-    live_client: GitHubClient | None = None
+    return dispatch_candidates(selected, config)
+
+
+def _resolve_base_sha(
+    transport: UrllibGitHubTransport,
+    *,
+    config: PipelineConfig,
+    base_branch: str,
+    fallback: str | None,
+) -> str:
+    """Read the base branch head the run pins every candidate branch to."""
+    response = transport.get(
+        f"/repos/{config.target_owner}/{config.target_repo}/git/ref/heads/{base_branch}"
+    )
+    if isinstance(response, Mapping):
+        raw_object = response.get("object")
+        if isinstance(raw_object, Mapping) and isinstance(raw_object.get("sha"), str):
+            return str(raw_object["sha"])
+    if fallback is None:
+        raise RunAbort("target base SHA is unavailable")
+    return fallback
+
+
+def run_once(
+    *,
+    config: PipelineConfig,
+    repo_path: Path,
+    output_dir: Path,
+    baseline_path: Path,
+    base_sha: str | None = None,
+    head_branch: str | None = None,
+    base_branch: str = "master",
+) -> tuple[str, tuple[Path, ...]]:
+    """Execute the §6 lifecycle end to end for one run, then report on it."""
+    run_id = uuid.uuid4().hex
+    baseline = _load_baseline(baseline_path)
+    if config.mode is Mode.SIMULATE and config.ci_evidence_mode is not CiEvidenceMode.LOCAL:
+        config = config.model_copy(
+            update={"ci_evidence_mode": CiEvidenceMode.LOCAL, "auto_merge_enabled": False}
+        )
+    target_exists = repo_path.exists()
+    notes: list[str] = []
+    run_events: list[RunEventRecord] = []
+    preflight: LivePreflight | None = None
+    session_transport: DevinTransport | None = None
+    github_transport: UrllibGitHubTransport | None = None
+    if config.mode is Mode.LIVE:
+        if head_branch is None:
+            raise RunAbort("LIVE requires --head-branch for candidate branch creation")
+        github_transport = UrllibGitHubTransport()
+        try:
+            preflight = run_live_preflight(config, github_transport)
+        except PreflightError as exc:
+            raise RunAbort(f"{exc.reason.value}: {exc}") from exc
+        config = config.model_copy(
+            update={
+                "has_issues": preflight.has_issues,
+                "ci_evidence_mode": preflight.ci_evidence_mode,
+            }
+        )
+        notes.extend(preflight.notes)
+        if not preflight.code_scanning_available:
+            config = config.model_copy(update={"alert_source": AlertSource.SARIF_FILE})
+        session_transport = UrllibDevinTransport()
+    repo_name = f"{config.target_owner}/{config.target_repo}"
+    marker_search = None
+    if github_transport is not None:
+        transport_for_search = github_transport
+        marker_search = github_marker_search(
+            lambda marker: transport_for_search.get(
+                "/search/issues?" + urlencode({"q": f'repo:{repo_name} "{marker}"'})
+            )
+        )
+    state_store = CandidateStateStore(
+        output_dir
+        / "state"
+        / ("candidates-live.jsonl" if config.mode is Mode.LIVE else "candidates.jsonl"),
+        marker_search=marker_search,
+        require_marker_proof=config.mode is Mode.LIVE,
+        artifact_simulated=config.mode is Mode.SIMULATE,
+    )
+    candidates = _normalize(
+        _enumerate(
+            config=config,
+            baseline=baseline,
+            repo_path=repo_path,
+            repo_name=repo_name,
+            target_exists=target_exists,
+            base_sha=base_sha,
+            preflight=preflight,
+            notes=notes,
+        ),
+        state_store=state_store,
+    )
+    dispatched = _select(candidates, config)
+
+    live: LiveTarget | None = None
+    resolved_base_sha = base_sha or "0000000"
     if config.mode is Mode.LIVE:
         if github_transport is None or head_branch is None:
             raise RunAbort("LIVE publication transport is unavailable")
-        base_response = github_transport.get(
-            f"/repos/{config.target_owner}/{config.target_repo}/git/ref/heads/{base_branch}"
+        resolved_base_sha = _resolve_base_sha(
+            github_transport,
+            config=config,
+            base_branch=base_branch,
+            fallback=base_sha,
         )
-        resolved_base_sha = base_sha
-        if isinstance(base_response, Mapping):
-            raw_object = base_response.get("object")
-            if isinstance(raw_object, Mapping) and isinstance(raw_object.get("sha"), str):
-                resolved_base_sha = str(raw_object["sha"])
-        if resolved_base_sha is None:
-            raise RunAbort("target base SHA is unavailable")
-        live_client = GitHubClient(
-            config,
+        live = LiveTarget(
+            client=GitHubClient(config, transport=github_transport),
             transport=github_transport,
+            base_branch=base_branch,
+            branch_prefix=head_branch,
         )
-        for candidate in dispatched:
-            if candidate.action is not Action.OPEN_PR:
-                reviewed.append(candidate)
-                continue
-            prepared = _prepare_live_candidate(
-                candidate,
-                state_store=state_store,
-                client=live_client,
-                base_sha=resolved_base_sha,
-                head_branch=head_branch,
-                run_id=run_id,
-            )
-            if prepared.pr_url is not None or prepared.state is CandidateState.DEFERRED:
-                reviewed.append(prepared)
-            else:
-                session_candidates.append(prepared)
+    checkout: LocalCheckout | None = None
+    if target_exists:
+        checkout = LocalCheckout(
+            repo_path=repo_path,
+            worktree_root=output_dir / "worktrees",
+        )
+    if config.mode is Mode.SIMULATE:
+        observers = simulated_observers(base_sha=resolved_base_sha)
+    elif checkout is not None:
+        observers = Observers(
+            run_item=checkout.run_item,
+            run_suite=checkout.run_suite,
+            probe_symbol=checkout.probe_symbol,
+        )
     else:
-        session_candidates = [
-            candidate for candidate in dispatched if candidate.action is Action.OPEN_PR
-        ]
-        if config.mode is Mode.SIMULATE:
-            session_candidates = [
-                candidate.model_copy(
-                    update={
-                        "base_sha": candidate.base_sha or "0000000",
-                        "head_sha": candidate.head_sha or "1111111",
-                    }
-                )
-                for candidate in session_candidates
-            ]
-        reviewed.extend(
-            candidate.model_copy(update={"state": CandidateState.ISSUE_CREATED})
-            if candidate.action is Action.OPEN_ISSUE
-            and candidate.state is CandidateState.DISPATCHING
-            else candidate
-            for candidate in dispatched
-            if candidate.action is not Action.OPEN_PR
-        )
-    planner_outputs: dict[str, Mapping[str, object]] = {}
-    implementer_outputs: dict[str, Mapping[str, object]] = {}
-    reviewer_outputs: dict[str, Mapping[str, object]] = {}
-    for candidate in session_candidates:
-        head_sha_resolver = None
-        if (
-            config.mode is Mode.LIVE
-            and live_client is not None
-            and candidate.head_branch is not None
-        ):
-            branch_for_head = candidate.head_branch
-            client_for_head = live_client
-
-            def resolve_head_sha(
-                branch: str = branch_for_head,
-                client: GitHubClient = client_for_head,
-            ) -> str | None:
-                return client.branch_sha(branch)
-
-            head_sha_resolver = resolve_head_sha
-        target_repo = f"{config.target_owner}/{config.target_repo}"
-        prompt_base_sha = candidate.base_sha or base_sha or "unknown"
-        prompt_head_branch = candidate.head_branch or head_branch or "candidate"
-        pinned_head_sha = [candidate.head_sha]
-
-        make_prompts = partial(
-            _make_role_prompts,
-            candidate=candidate,
-            target_repo=target_repo,
-            base_sha=prompt_base_sha,
-            head_branch=prompt_head_branch,
-            pinned_head_holder=pinned_head_sha,
-        )
-
-        def observe_head(
-            value: str,
-            holder: list[str | None] = pinned_head_sha,
-        ) -> None:
-            holder[0] = value
-
-        def session_created(
-            evidence: SessionAttempt,
-            candidate_for_callback: Candidate = candidate,
-        ) -> None:
-            """Persist role identity and attempt evidence immediately."""
-            latest = (
-                state_store.resume(candidate_for_callback.candidate_id) or candidate_for_callback
-            )
-            role_attempts = dict(latest.role_attempts)
-            role_attempts[evidence.role.value] = role_attempts.get(evidence.role.value, 0) + 1
-            role_attempt_evidence = dict(latest.role_attempt_evidence)
-            role_attempt_evidence[evidence.role.value] = {
-                "attempt": evidence.attempt,
-                "is_new_session_raw": evidence.is_new_session_raw,
-                "retry_decision": evidence.retry_decision.value,
-            }
-            state_store.append(
-                latest.model_copy(
-                    update={
-                        f"{evidence.role.value}_session_id": evidence.session_id,
-                        "role_attempts": role_attempts,
-                        "role_attempt_evidence": role_attempt_evidence,
-                    }
-                )
-            )
-
-        try:
-            result = orchestrator.run_candidate(
-                candidate.candidate_id,
-                render_planner_prompt(
-                    candidate,
-                    target_repo=target_repo,
-                    base_sha=prompt_base_sha,
-                    head_branch=prompt_head_branch,
-                ),
-                "SIMULATE implementer role; no remote session is created."
-                if config.mode is Mode.SIMULATE
-                else None,
-                "SIMULATE reviewer role; no remote session is created."
-                if config.mode is Mode.SIMULATE
-                else None,
-                candidate=candidate,
-                head_sha_resolver=head_sha_resolver,
-                head_sha_observer=observe_head,
-                branch_paths_resolver=(
-                    live_client.changed_paths_between
-                    if config.mode is Mode.LIVE and live_client is not None
-                    else None
-                ),
-                prompt_factory=make_prompts if config.mode is Mode.LIVE else None,
-                session_created=session_created,
-            )
-        except SessionCeilingError as exc:
-            latest = state_store.resume(candidate.candidate_id) or candidate
-            deferred = latest.model_copy(
-                update={
-                    "state": CandidateState.DEFERRED,
-                    "reason": ReasonCode.SESSION_CEILING,
-                    "reason_detail": str(exc),
-                    "auto_merge_eligible": False,
-                }
-            )
-            state_store.append(deferred)
-            reviewed.append(deferred)
-            continue
-        except (
-            PlannerOutputError,
-            SessionDedupeError,
-            RoleCollisionError,
-            SessionMessageError,
-            SessionBlockedError,
-            BranchNotAdvancedError,
-            TimeoutError,
-            HttpTransportError,
-        ) as exc:
-            reason = getattr(exc, "reason", None)
-            if not isinstance(reason, ReasonCode):
-                reason = (
-                    ReasonCode.ROLE_COLLISION
-                    if isinstance(exc, RoleCollisionError)
-                    else ReasonCode.CAPABILITY_UNAVAILABLE
-                )
-            latest = state_store.resume(candidate.candidate_id) or candidate
-            is_terminal_error = isinstance(exc, (BranchNotAdvancedError, DiffReviewIncompleteError))
-            updated = latest.model_copy(
-                update={
-                    "state": (
-                        CandidateState.TERMINAL if is_terminal_error else CandidateState.DEFERRED
-                    ),
-                    "reason": reason,
-                    "reason_detail": (
-                        str(exc)
-                        if isinstance(
-                            exc,
-                            (
-                                PlannerOutputError,
-                                SessionMessageError,
-                                SessionBlockedError,
-                                BranchNotAdvancedError,
-                                PhaseBCorrelationTimeoutError,
-                                PhaseBHeadUnavailableError,
-                            ),
-                        )
-                        else None
-                    ),
-                    "iterations": max(
-                        latest.iterations,
-                        getattr(exc, "iterations", latest.iterations),
-                    ),
-                }
-            )
-            state_store.append(updated)
-            reviewed.append(updated)
-            continue
-        planner_output = result.planner.snapshot.payload.get("structured_output")
-        reviewer_output = result.reviewer.snapshot.payload.get("structured_output")
-        planner_criteria_ids: list[str] = []
-        if isinstance(planner_output, Mapping):
-            planner_outputs[candidate.candidate_id] = planner_output
-            raw_criteria = planner_output.get("criteria")
-            planner_criteria_ids = (
-                [
-                    str(item.get("id"))
-                    for item in raw_criteria
-                    if isinstance(item, Mapping) and isinstance(item.get("id"), str)
-                ]
-                if isinstance(raw_criteria, list)
-                else []
-            )
-        if isinstance(reviewer_output, Mapping):
-            reviewer_outputs[candidate.candidate_id] = reviewer_output
-        implementer_output = result.implementer.snapshot.payload.get("structured_output")
-        if isinstance(implementer_output, Mapping):
-            implementer_outputs[candidate.candidate_id] = implementer_output
-        reviewed_candidate = candidate.model_copy(
-            update={
-                "planner_session_id": result.planner.snapshot.session_id,
-                "implementer_session_id": result.implementer.snapshot.session_id,
-                "reviewer_session_id": result.reviewer.snapshot.session_id,
-                "iterations": max(
-                    result.review.iterations if result.review is not None else 0,
-                    result.phase_b_exchanges,
-                ),
-                "planner_criteria": planner_criteria_ids,
-                "head_sha": pinned_head_sha[0] or candidate.head_sha,
-                "phase_b_protocol_violation": result.phase_b_protocol_violation,
-            }
-        )
-        if isinstance(reviewer_output, Mapping):
-            raw_tests = reviewer_output.get("tests")
-            tests = raw_tests if isinstance(raw_tests, list) else []
-            test_paths: list[str] = []
-            for item in tests:
-                if isinstance(item, Mapping) and isinstance(item.get("path"), str):
-                    path = str(item["path"])
-                    if path not in test_paths:
-                        test_paths.append(path)
-            reviewed_candidate = reviewed_candidate.model_copy(
-                update={
-                    "test_added": bool(tests),
-                    "test_paths": test_paths,
-                    "reviewer_criterion_ids": [
-                        str(item.get("criterion_id"))
-                        for item in tests
-                        if isinstance(item, Mapping) and isinstance(item.get("criterion_id"), str)
-                    ],
-                    "diff_reviewed": (
-                        result.review.diff_reviewed if result.review is not None else False
-                    ),
-                    "test_author": result.reviewer.snapshot.session_id,
-                    "lifted_markers": [
-                        item
-                        for item in reviewer_output.get("lifted_markers", [])
-                        if isinstance(item, str)
-                    ],
-                    "reviewed_head_sha": (
-                        candidate.reviewed_head_sha
-                        or (
-                            result.review.reviewed_head_sha
-                            if result.review is not None and result.review.diff_reviewed
-                            else None
-                        )
-                    ),
-                }
-            )
-        persisted_sessions = state_store.resume(candidate.candidate_id)
-        if persisted_sessions is not None:
-            reviewed_candidate = reviewed_candidate.model_copy(
-                update={
-                    "planner_session_id": persisted_sessions.planner_session_id,
-                    "implementer_session_id": persisted_sessions.implementer_session_id,
-                    "reviewer_session_id": persisted_sessions.reviewer_session_id,
-                    "role_attempts": persisted_sessions.role_attempts,
-                    "role_attempt_evidence": persisted_sessions.role_attempt_evidence,
-                }
-            )
-        if result.review is not None:
-            reviewed_candidate = apply_review_result(reviewed_candidate, result.review)
-            if result.review.reason is ReasonCode.STALE_SKIP:
-                reviewed_candidate = reviewed_candidate.model_copy(
-                    update={
-                        "test_added": False,
-                        "test_exempt_reason": ReasonCode.STALE_SKIP,
-                    }
-                )
-            elif not reviewed_candidate.test_added:
-                reviewed_candidate = reviewed_candidate.model_copy(
-                    update={"auto_merge_eligible": False}
-                )
-        else:
-            reviewed_candidate = reviewed_candidate.model_copy(
-                update={
-                    "state": CandidateState.TERMINAL,
-                    "reason": ReasonCode.DISAGREEMENT_UNRESOLVED,
-                    "action": Action.HUMAN_REVIEW,
-                    "auto_merge_eligible": False,
-                }
-            )
-        reviewed.append(reviewed_candidate)
-
-    notes = _capability_notes(
-        baseline,
-        target_exists=target_exists,
+        observers = Observers()
+        notes.append("no target checkout: no criterion can be observed locally")
+    runner = CandidateRunner(
         config=config,
+        run_id=run_id,
+        state_store=state_store,
+        orchestrator=RuntimeOrchestrator(SessionClient(config, transport=session_transport)),
+        observers=observers,
+        output_dir=output_dir,
+        base_sha=resolved_base_sha,
+        live=live,
+        checkout=checkout,
+        notes=notes,
+        run_events=run_events,
+        ci_mode=config.ci_evidence_mode,
     )
-    notes.extend(preflight_notes)
-    notes.extend(
-        f"enumeration failure: {failure.get('path', '<unknown>')}"
-        for failure in [*skipped_failures, *deprecation_failures]
-    )
+    settled = [runner.process(candidate) for candidate in dispatched]
+
+    notes.extend(_capability_notes(baseline, target_exists=target_exists, config=config))
     if state_store.quarantined_rows:
         notes.append(f"state rows quarantined: {state_store.quarantined_rows}")
-    if config.mode is Mode.LIVE:
-        if preflight is None:
-            raise RunAbort("LIVE preflight did not produce a capability result")
-        if github_transport is None or head_branch is None:
-            raise RunAbort("LIVE publication transport is unavailable")
-        try:
-            for candidate in reviewed:
-                state_store.append(candidate)
-            reviewed = _publish_live(
-                reviewed,
-                config=config,
-                output_dir=output_dir,
-                repo_path=repo_path,
-                planner_outputs=planner_outputs,
-                implementer_outputs=implementer_outputs,
-                reviewer_outputs=reviewer_outputs,
-                base_sha=base_sha,
-                head_branch=head_branch,
-                base_branch=base_branch,
-                transport=github_transport,
-                state_store=state_store,
-                ci_mode_events=ci_mode_events,
-                ci_mode_state=ci_mode_state,
-                ci_elapsed_s=ci_elapsed_s,
+    if state_store.marker_search_failed:
+        notes.append("marker search failed; affected candidates were deferred without a write")
+        run_events.append(
+            RunEventRecord(
+                event_type="marker_search_failure",
                 run_id=run_id,
+                transition_reason=ReasonCode.MARKER_SEARCH_FAILED,
+                reason_detail="marker_search_failed",
             )
-        except (
-            ArtifactUnavailableError,
-            GitHubResponseError,
-            StatePreservationError,
-            ArtifactValidationError,
-            PreflightError,
-            HttpTransportError,
-            OSError,
-        ):
-            notes.append("publication capability unavailable; affected candidates deferred")
-            recovered: list[Candidate] = []
-            for candidate in reviewed:
-                latest = state_store.resume(candidate.candidate_id) or candidate
-                if latest.state in {
-                    CandidateState.TERMINAL,
-                    CandidateState.CONVERGED,
-                    CandidateState.ISSUE_PATCHED,
-                    CandidateState.COMMENT_CREATED,
-                }:
-                    recovered.append(latest)
-                    continue
-                deferred = latest.model_copy(
-                    update={
-                        "state": CandidateState.DEFERRED,
-                        "reason": ReasonCode.CAPABILITY_UNAVAILABLE,
-                        "auto_merge_eligible": False,
-                    }
-                )
-                state_store.append(deferred)
-                recovered.append(deferred)
-            reviewed = recovered
-        if state_store.marker_search_failed:
-            notes.append(
-                "marker search failed; no candidate can be dispatched while dedupe "
-                "capability is unavailable"
-            )
-            ci_mode_events.append(
-                RunEventRecord(
-                    event_type="marker_search_failure",
-                    run_id=run_id,
-                    transition_reason=ReasonCode.CAPABILITY_UNAVAILABLE,
-                    reason_detail="marker_search_failed",
-                )
-            )
+        )
     produced = simulate_run(
-        reviewed,
+        settled,
         run_id=run_id,
         output_dir=output_dir,
         baseline=baseline,
         config=config,
-        planner_outputs=planner_outputs,
-        implementer_outputs=implementer_outputs,
-        reviewer_outputs=reviewer_outputs,
+        fix_outputs=runner.fix_outputs,
         capability_notes=notes,
         token_login=preflight.token_login if preflight is not None else None,
         token_scopes=preflight.token_scopes if preflight is not None else (),
-        run_events=ci_mode_events,
+        run_events=run_events,
     )
-    if config.mode is Mode.LIVE and state_store.marker_search_failed:
-        raise RunAbort("capability_unavailable: marker_search_failed")
     return run_id, produced
 
 
