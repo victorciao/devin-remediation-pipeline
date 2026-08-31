@@ -9,6 +9,7 @@ from pipeline.verify import (
     AlertObservation,
     ItemRunResult,
     Observers,
+    SkipMarkerObservation,
     SuiteResult,
     SymbolObservation,
 )
@@ -93,12 +94,27 @@ def simulated_observers(*, base_sha: str) -> Observers:
             command=f"SIMULATED alert re-read for {target.candidate_id} at {sha}",
         )
 
+    def probe_skip_marker(target: Candidate, sha: str) -> SkipMarkerObservation:
+        return SkipMarkerObservation(
+            present=False,
+            command=f"SIMULATED skip-marker probe for {target.candidate_id} at {sha}",
+        )
+
+    def read_ci_suite(sha: str, check_context: str) -> SuiteResult:
+        return SuiteResult(
+            passed=True,
+            command=f"SIMULATED check-runs context={check_context} at {sha}",
+            conclusion="success",
+        )
+
     return Observers(
         run_item=run_item,
         run_item_with_test_diff=run_item_with_test_diff,
         run_suite=run_suite,
         probe_symbol=probe_symbol,
         probe_alerts=probe_alerts,
+        probe_skip_marker=probe_skip_marker,
+        read_ci_suite=read_ci_suite,
     )
 
 

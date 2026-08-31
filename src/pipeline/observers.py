@@ -21,7 +21,13 @@ from pipeline.config import PipelineConfig
 from pipeline.lanes.codeql import enumerate_codeql_candidates
 from pipeline.lanes.deprecations import reference_surface
 from pipeline.schemas import Candidate, ItemOutcome, PerItemOutcome, ReasonCode
-from pipeline.verify import AlertObservation, ItemRunResult, SuiteResult, SymbolObservation
+from pipeline.verify import (
+    AlertObservation,
+    ItemRunResult,
+    SkipMarkerObservation,
+    SuiteResult,
+    SymbolObservation,
+)
 
 CommandRunner = Callable[[Sequence[str], Path], tuple[int, str]]
 AlertReader = Callable[[str], object]
@@ -124,7 +130,10 @@ def _skip_nodeid(worktree: Path, path: str, line_number: int) -> str:
     return f"{path}::{name}"
 
 
-def _qualname_resolves(source: str, qualname: str) -> bool:
+def _qualified_node(
+    source: str,
+    qualname: str,
+) -> tuple[ast.AST, dict[ast.AST, ast.AST], ast.Module]:
     tree = ast.parse(source)
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     wanted = qualname.split(".")
@@ -138,8 +147,16 @@ def _qualname_resolves(source: str, qualname: str) -> bool:
                 names.append(current.name)
             current = parents.get(current)
         if list(reversed(names)) == wanted:
-            return True
-    return False
+            return node, parents, tree
+    raise LookupError(f"qualname does not resolve: {qualname}")
+
+
+def _qualname_resolves(source: str, qualname: str) -> bool:
+    try:
+        _qualified_node(source, qualname)
+    except LookupError:
+        return False
+    return True
 
 
 @dataclass
@@ -306,6 +323,108 @@ class LocalCheckout:
             caller_count=callers,
             override_count=overrides,
             command=f"ast re-check of {module}:{qualname} at {sha}",
+        )
+
+    def probe_skip_marker(self, candidate: Candidate, sha: str) -> SkipMarkerObservation:
+        """Inspect a test source for skip decorators and in-body ``pytest.skip`` calls."""
+        nodeid = candidate.nodeid
+        command = f"ast skip-marker probe of {nodeid or 'unknown nodeid'} at {sha}"
+        if nodeid is None:
+            return SkipMarkerObservation(
+                present=False,
+                command=command,
+                available=False,
+                detail="candidate has no test nodeid",
+            )
+        path, separator, qualname = nodeid.partition("::")
+        if not separator or not qualname:
+            return SkipMarkerObservation(
+                present=False,
+                command=command,
+                available=False,
+                detail=f"nodeid does not contain a qualified test name: {nodeid}",
+            )
+        try:
+            worktree = self.revision(sha)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return SkipMarkerObservation(
+                present=False,
+                command=command,
+                available=False,
+                detail=f"could not materialize revision {sha}: {exc}",
+            )
+        source_path = worktree / path
+        if not source_path.exists():
+            return SkipMarkerObservation(
+                present=False,
+                command=command,
+                available=False,
+                detail=f"test source file is missing: {path}",
+            )
+        try:
+            source = source_path.read_text(encoding="utf-8")
+            target, parents, _ = _qualified_node(source, qualname.replace("::", "."))
+        except (OSError, SyntaxError, UnicodeDecodeError) as exc:
+            return SkipMarkerObservation(
+                present=False,
+                command=command,
+                available=False,
+                detail=f"could not parse test source {path}: {exc}",
+            )
+        except LookupError as exc:
+            return SkipMarkerObservation(
+                present=False,
+                command=command,
+                available=False,
+                detail=str(exc),
+            )
+        if not isinstance(target, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return SkipMarkerObservation(
+                present=False,
+                command=command,
+                available=False,
+                detail=f"qualified test target is not a function: {qualname}",
+            )
+
+        markers: list[str] = []
+
+        def add_decorator_markers(node: ast.AST, owner: str) -> None:
+            decorators = getattr(node, "decorator_list", ())
+            for decorator in decorators:
+                name = ""
+                if isinstance(decorator, ast.Name):
+                    name = decorator.id
+                elif isinstance(decorator, ast.Attribute):
+                    name = decorator.attr
+                elif isinstance(decorator, ast.Call):
+                    function = decorator.func
+                    if isinstance(function, ast.Name):
+                        name = function.id
+                    elif isinstance(function, ast.Attribute):
+                        name = function.attr
+                if name in {"skip", "skipif"}:
+                    markers.append(f"{owner} decorator: {ast.unparse(decorator)}")
+
+        add_decorator_markers(target, "function")
+        parent = parents.get(target)
+        while parent is not None:
+            if isinstance(parent, ast.ClassDef):
+                add_decorator_markers(parent, f"class {parent.name}")
+            parent = parents.get(parent)
+
+        for node in ast.walk(target):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if (
+                node.func.attr == "skip"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "pytest"
+            ):
+                markers.append(f"in-body call: {ast.unparse(node)}")
+        return SkipMarkerObservation(
+            present=bool(markers),
+            command=command,
+            markers=tuple(markers),
         )
 
 

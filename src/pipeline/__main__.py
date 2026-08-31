@@ -592,6 +592,7 @@ class CandidateRunner:
             run_suite=self.observers.run_suite,
             read_ci_suite=self.observers.read_ci_suite,
             probe_symbol=self.observers.probe_symbol,
+            probe_skip_marker=self.observers.probe_skip_marker,
         )
         if candidate.pr_number is not None:
             alerts = PullRequestAlerts(
@@ -1153,6 +1154,7 @@ def run_once(
             run_item_with_test_diff=checkout.run_item_with_test_diff,
             run_suite=checkout.run_suite,
             probe_symbol=checkout.probe_symbol,
+            probe_skip_marker=checkout.probe_skip_marker,
         )
     else:
         observers = Observers()

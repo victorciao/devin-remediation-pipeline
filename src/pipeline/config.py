@@ -119,6 +119,12 @@ class PipelineConfig(BaseModel):
     alert_analysis_wait_s: float = Field(default=DEFAULT_ALERT_ANALYSIS_WAIT_S, gt=0, strict=True)
     ci_evidence_mode: CiEvidenceMode = CiEvidenceMode.LOCAL
     suite_check_context: str = Field(default="unit-tests-required", min_length=1, strict=True)
+    local_item_scope: tuple[str, ...] = ("tests/unit_tests/",)
+    integration_suite_check_context: str = Field(
+        default="test-postgres-required",
+        min_length=1,
+        strict=True,
+    )
     ci_wait_timeout_s: int = Field(default=5400, gt=0, strict=True)
     required_contexts_min: tuple[str, ...] = DEFAULT_REQUIRED_CONTEXTS_MIN
     only_lanes: tuple[Lane, ...] = ()
@@ -207,7 +213,7 @@ class PipelineConfig(BaseModel):
             return Lane1AlertCheck(normalized)
         return IssueSink(normalized)
 
-    @field_validator("required_contexts_min", mode="before")
+    @field_validator("required_contexts_min", "local_item_scope", mode="before")
     @classmethod
     def normalize_required_contexts(cls, value: object) -> object:
         """Accept a comma-separated string or any sequence of context names."""
@@ -427,6 +433,8 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
         "ALERT_FIXTURE_PATH": "alert_fixture_path",
         "CI_EVIDENCE_MODE": "ci_evidence_mode",
         "SUITE_CHECK_CONTEXT": "suite_check_context",
+        "LOCAL_ITEM_SCOPE": "local_item_scope",
+        "INTEGRATION_SUITE_CHECK_CONTEXT": "integration_suite_check_context",
         "ONLY_LANES": "only_lanes",
         "ISSUE_SINK": "issue_sink",
         "VERSION_SOURCE": "version_source",

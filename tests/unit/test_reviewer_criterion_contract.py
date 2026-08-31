@@ -204,6 +204,7 @@ def test_lane2_red_baseline_applies_the_session_test_path_diff_at_base(tmp_path:
             run_item_with_test_diff=checkout.run_item_with_test_diff,
             run_suite=checkout.run_suite,
         ),
+        config=config(ci_evidence_mode=CiEvidenceMode.LOCAL),
     )
     assert evidence.satisfied is True, (
         f"red-at-base was measured without the test-path diff: {baseline} {evidence.observations}"

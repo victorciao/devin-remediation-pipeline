@@ -132,6 +132,14 @@ def test_suite_check_context_is_environment_configurable() -> None:
     config = load_config(env={"PIPELINE_SUITE_CHECK_CONTEXT": "pre-commit checks"})
 
     assert config.suite_check_context == "pre-commit checks"
+    integration = load_config(
+        env={
+            "PIPELINE_LOCAL_ITEM_SCOPE": "tests/unit_tests/,tests/smoke/",
+            "PIPELINE_INTEGRATION_SUITE_CHECK_CONTEXT": "test-postgres-required",
+        }
+    )
+    assert integration.local_item_scope == ("tests/unit_tests/", "tests/smoke/")
+    assert integration.integration_suite_check_context == "test-postgres-required"
     assert (
         load_config(
             env={"PIPELINE_CI_EVIDENCE_MODE": "local", "PIPELINE_AUTO_MERGE_ENABLED": "true"}
@@ -146,6 +154,14 @@ def test_dispatch_scope_defaults_empty_and_accepts_cli_and_environment() -> None
     assert config.suite_check_context == "unit-tests-required"
     assert config.required_contexts_min == ("pre-commit (current)",)
     assert config.only_lanes == ()
+    configured = load_config(
+        cli_args=[
+            "--local-item-scope=tests/unit_tests/,tests/smoke/",
+            "--integration-suite-check-context=test-postgres-required",
+        ]
+    )
+    assert configured.local_item_scope == ("tests/unit_tests/", "tests/smoke/")
+    assert configured.integration_suite_check_context == "test-postgres-required"
     assert load_config(cli_args=["--only-lanes=skipped_tests"]).only_lanes == (Lane.SKIPPED_TESTS,)
     assert load_config(env={"PIPELINE_ONLY_LANES": "codeql, deprecations"}).only_lanes == (
         Lane.CODEQL,

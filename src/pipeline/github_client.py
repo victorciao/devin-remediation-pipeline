@@ -175,9 +175,10 @@ def read_named_suite(
     config: PipelineConfig,
     client: GitHubTransport,
     sha: str,
+    check_context: str | None = None,
 ) -> SuiteResult:
     """Read one named Actions check conclusion at a revision."""
-    context = config.suite_check_context
+    context = check_context or config.suite_check_context
     command = f"GET {_path(config, f'/commits/{sha}/check-runs')} context={context}"
     try:
         conclusions = read_check_runs(config, client, sha)
@@ -219,6 +220,7 @@ def wait_for_named_suite(
     config: PipelineConfig,
     client: GitHubTransport,
     sha: str,
+    check_context: str | None = None,
     *,
     elapsed_s: float = 0.0,
     sleep: Callable[[float], None] = time.sleep,
@@ -226,7 +228,7 @@ def wait_for_named_suite(
     poll_interval_s: float = 15.0,
 ) -> SuiteResult:
     """Poll one named Actions check until it settles or the wait budget expires."""
-    context = config.suite_check_context
+    context = check_context or config.suite_check_context
     command = f"GET {_path(config, f'/commits/{sha}/check-runs')} context={context}"
     deadline = clock() + max(config.ci_wait_timeout_s - elapsed_s, 0)
     while True:
@@ -726,27 +728,27 @@ class GitHubClient:
             raise GitHubResponseError("GitHub transport is unavailable")
         return self._transport.get(path)
 
-    def read_named_suite(self, sha: str) -> SuiteResult:
+    def read_named_suite(self, sha: str, check_context: str) -> SuiteResult:
         """Read the configured Actions suite check at a revision."""
-        context = self._config.suite_check_context
+        context = check_context
         if self._transport is None:
             return SuiteResult(
                 passed=False,
                 command=f"GET check-runs context={context}",
                 reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
             )
-        return read_named_suite(self._config, self._transport, sha)
+        return read_named_suite(self._config, self._transport, sha, check_context)
 
-    def wait_for_named_suite(self, sha: str) -> SuiteResult:
+    def wait_for_named_suite(self, sha: str, check_context: str) -> SuiteResult:
         """Poll the configured Actions suite check at a revision."""
-        context = self._config.suite_check_context
+        context = check_context
         if self._transport is None:
             return SuiteResult(
                 passed=False,
                 command=f"GET check-runs context={context}",
                 reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
             )
-        return wait_for_named_suite(self._config, self._transport, sha)
+        return wait_for_named_suite(self._config, self._transport, sha, check_context)
 
     @staticmethod
     def _url(response: Mapping[str, object]) -> str:

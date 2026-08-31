@@ -146,9 +146,9 @@ Every candidate carries a **success criterion** declared by its lane at enumerat
 **merge**, never the PR: a candidate whose alert is still present at head holds an open PR and settles `terminal/alert_still_present` unmerged, and expiry of `alert_analysis_wait_s` settles `terminal/criterion_not_met` unmerged — never merged, never silently passed. The criterion and its observed outcome go to the state row and
 the event log.
 
-**LANE 2 — the re-enabled test passes at the candidate head with its skip marker removed.**
+**LANE 2 — the test's skip marker is absent at the candidate head and the suite covering the test passes there.**
 
-Green-at-head alone cannot distinguish a stale or environmental skip from a real fix, which is accepted because this lane is issue-only at the default tier threshold. At the candidate head, run `test_nodeid`: a non-empty outcome vector with every item `PASSED` satisfies the criterion; an unavailable run preserves its capability reason, and any other outcome is `terminal/green_not_reached`.
+Integration candidates are unobservable locally because Superset's integration suite requires a provisioned metadata database, Redis, and Celery, so the suite clause is read from the fork's authoritative `test-postgres-required` CI check at the PR head. The accepted limitation is that this CI check is suite-level: it proves the suite containing the re-enabled test passes, not that specific nodeid in isolation. The marker-absence clause rules out a trivially green skipped test. Unit-test candidates remain locally observable where configured; Actions-mode integration candidates defer their pre-PR suite evidence until the PR head.
 
 **LANE 1 — the alert is gone at head and nothing regressed.** The normal path is `lane1_alert_check = pr_ref_alerts`: the fork's `codeql-analysis` runs on `pull_request`, so alert absence at the candidate head is read from the alerts for the PR ref once that analysis completes, bounded by `alert_analysis_wait_s`; expiry settles
 `terminal/criterion_not_met`, never a pass. `codeql_cli` runs CodeQL over the touched paths locally instead, for when alerts cannot be read from the fork. Either way the alert's `stable_locator` must be absent → otherwise `terminal/alert_still_present`. The suite covering `suite_scope` must pass at head → otherwise
