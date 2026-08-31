@@ -8,6 +8,7 @@ URL is therefore pinned character for character here.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator, Mapping
 from email.message import Message
 from io import BytesIO
@@ -162,7 +163,7 @@ def test_a_secondary_rate_limit_with_retry_after_is_retried(
         return response
 
     monkeypatch.setattr(http_transport, "urlopen", urlopen)
-    monkeypatch.setattr(http_transport.time, "sleep", sleeps.append)
+    monkeypatch.setattr(time, "sleep", sleeps.append)
 
     assert UrllibGitHubTransport().get("/user") == {"ok": True}
     assert sleeps == [2.0]
@@ -187,7 +188,7 @@ def test_a_rate_limit_message_without_headers_is_retried(
         return response
 
     monkeypatch.setattr(http_transport, "urlopen", urlopen)
-    monkeypatch.setattr(http_transport.time, "sleep", sleeps.append)
+    monkeypatch.setattr(time, "sleep", sleeps.append)
 
     assert UrllibGitHubTransport().get("/user") == {"ok": True}
     assert sleeps == [1.0]

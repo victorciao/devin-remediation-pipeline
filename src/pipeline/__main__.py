@@ -1203,14 +1203,14 @@ def run_once(
         run_events=run_events,
     )
     if marker_search_failed:
+        failure_detail = (
+            f"; {state_store.marker_search_failure_detail}"
+            if state_store.marker_search_failure_detail
+            else ""
+        )
         raise RunAbort(
             f"marker_search_failed: {ReasonCode.CAPABILITY_UNAVAILABLE.value}; "
-            f"dedupe capability is unavailable"
-            + (
-                f"; {state_store.marker_search_failure_detail}"
-                if state_store.marker_search_failure_detail
-                else ""
-            )
+            f"dedupe capability is unavailable{failure_detail}"
         )
     return run_id, produced
 
