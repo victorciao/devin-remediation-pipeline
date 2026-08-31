@@ -109,7 +109,7 @@ class RunAbort(RuntimeError):
     """Raised when a blocking capability or runtime guard aborts a run."""
 
 
-_SIGNOFF_TRAILER = re.compile(r"(?im)^Signed-off-by:\s+\S+\s+<[^>\r\n]+>\s*$")
+_SIGNOFF_TRAILER = re.compile(r"(?im)^Signed-off-by:[ \t]+[^<>\r\n]*\S[ \t]+<[^>\r\n]+>[ \t]*$")
 _MAX_SESSION_ATTEMPTS = 2
 _PUBLISHING_ACTIONS = frozenset({Action.OPEN_PR, Action.OPEN_ISSUE})
 _MARKER_DEFER_REASONS = {
