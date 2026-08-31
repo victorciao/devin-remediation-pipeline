@@ -52,6 +52,8 @@ jobs:
       GITHUB_PAT_REMEDIATION: ${{ secrets.REMEDIATION_GITHUB_PAT }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Checkout Superset target
         uses: actions/checkout@v4
         with:
@@ -137,15 +139,18 @@ jobs:
 
           for attempt in 1 2 3; do
             if ! git fetch origin main; then
+              sleep 5
               continue
             fi
             if ! git rebase origin/main; then
               git rebase --abort || true
+              sleep 5
               continue
             fi
             if git push --quiet origin HEAD:main; then
               exit 0
             fi
+            sleep 5
           done
           echo "Failed to publish remediation run history after 3 attempts."
           exit 0
