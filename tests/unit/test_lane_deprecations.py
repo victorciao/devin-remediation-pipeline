@@ -8,8 +8,9 @@ from typing import Any
 
 import pytest
 
+from pipeline.__main__ import _fixture_candidates
 from pipeline.config import ConfigError, PipelineConfig
-from pipeline.dispatch import DROPPED_REASONS
+from pipeline.dispatch import DROPPED_REASONS, tier_for_score
 from pipeline.gate import evaluate_gates
 from pipeline.lanes.deprecations import (
     VERSION_SOURCE,
@@ -20,6 +21,7 @@ from pipeline.lanes.deprecations import (
 )
 from pipeline.rubric import resolve_factors
 from pipeline.schemas import Candidate, GateName, Lane, ReasonCode
+from pipeline.score import apply_score
 from tests.conftest import RUBRICS_PATH, TARGET_CHECKOUT, TEMPLATES_DIR
 
 BUG_REPORT_FORM = """\
@@ -94,6 +96,89 @@ def test_baseline_records_the_resolved_version(baseline: Mapping[str, Any]) -> N
     assert baseline["current_major"] == 6
     assert baseline["eol_threshold_major"] == 4
     assert baseline["version_source"] == VERSION_SOURCE == ".github/ISSUE_TEMPLATE/bug-report.yml"
+
+
+def test_fixture_deprecation_evidence_reaches_high_tier(
+    baseline: Mapping[str, Any], simulate_config: PipelineConfig
+) -> None:
+    """SIMULATE deprecation evidence resolves like the corresponding LIVE candidate."""
+    candidates = _fixture_candidates(
+        baseline,
+        lane=Lane.DEPRECATIONS,
+        repo="victorciao/superset",
+        current_major=6,
+    )
+    candidate = next(
+        row for row in candidates if row.qualname == "BaseEngineSpec.normalize_indexes"
+    )
+
+    scored = apply_score(candidate.model_copy(update={"gate_passed": True}), simulate_config)
+    factors = resolve_factors(candidate, simulate_config)
+
+    assert factors.factor_rows == {
+        "business_impact": "internal_api",
+        "verifiability": "targeted",
+        "automatability": "isolated_removal",
+        "signal_quality": "three_or_more",
+        "risk": "no_callers",
+    }
+    assert "default" not in factors.factor_rows.values()
+    assert scored.score == 200.0
+    assert tier_for_score(scored.score, simulate_config).value == "high"
+
+
+def test_fixture_deprecation_override_surface_resolves_risk(
+    baseline: Mapping[str, Any], simulate_config: PipelineConfig
+) -> None:
+    """SIMULATE preserves override evidence rather than reducing risk to callers."""
+    candidate = next(
+        row
+        for row in _fixture_candidates(
+            baseline,
+            lane=Lane.DEPRECATIONS,
+            repo="victorciao/superset",
+            current_major=6,
+        )
+        if row.qualname == "BaseEngineSpec.get_url_for_impersonation"
+    )
+
+    factors = resolve_factors(candidate, simulate_config)
+
+    assert candidate.override_count == 5
+    assert candidate.override_surface is True
+    assert factors.factor_rows["risk"] == "override_surface"
+
+
+def test_fixture_deprecation_missing_surface_evidence_uses_defaults(
+    simulate_config: PipelineConfig,
+) -> None:
+    """Older lean baselines retain default rows when surface evidence is absent."""
+    candidates = _fixture_candidates(
+        {
+            "deprecations": [
+                {
+                    "locator": "superset.invented:Symbol.method",
+                    "deprecated_in": "3.0",
+                }
+            ]
+        },
+        lane=Lane.DEPRECATIONS,
+        repo="victorciao/superset",
+        current_major=6,
+    )
+    assert len(candidates) == 1
+
+    candidate = candidates[0]
+    factors = resolve_factors(candidate, simulate_config)
+
+    assert candidate.public_api_surface is None
+    assert candidate.caller_count is None
+    assert candidate.override_count is None
+    assert candidate.internal_caller is None
+    assert candidate.override_surface is None
+    assert factors.factor_rows["business_impact"] == "default"
+    assert factors.factor_rows["signal_quality"] == "three_or_more"
+    assert factors.factor_rows["risk"] == "default"
 
 
 def test_version_source_matches_the_live_target_form() -> None:

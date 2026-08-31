@@ -8,6 +8,7 @@
   "eol_major_lag": 2,
   "eol_threshold_major": 4,
   "version_source": ".github/ISSUE_TEMPLATE/bug-report.yml",
+  "reference_surface_sha": "4ecb4b737ab4f1c5c52351eb874e634474d4da93",
   "codeql_alerts": {
     "open": [
       {
@@ -1576,7 +1577,10 @@
       "qualname": "DatabaseRestApi.table_extra_metadata_deprecated",
       "locator": "superset.databases.api:DatabaseRestApi.table_extra_metadata_deprecated",
       "deprecated_in": "4.0",
-      "removed_in": null
+      "removed_in": null,
+      "public_api_surface": true,
+      "caller_count": 0,
+      "override_count": 0
     },
     {
       "path": "superset/db_engine_specs/base.py",
@@ -1586,7 +1590,10 @@
       "qualname": "BaseEngineSpec.normalize_indexes",
       "locator": "superset.db_engine_specs.base:BaseEngineSpec.normalize_indexes",
       "deprecated_in": "3.0",
-      "removed_in": null
+      "removed_in": null,
+      "public_api_surface": false,
+      "caller_count": 0,
+      "override_count": 0
     },
     {
       "path": "superset/db_engine_specs/base.py",
@@ -1596,7 +1603,10 @@
       "qualname": "BaseEngineSpec.get_url_for_impersonation",
       "locator": "superset.db_engine_specs.base:BaseEngineSpec.get_url_for_impersonation",
       "deprecated_in": "6.0.0",
-      "removed_in": null
+      "removed_in": null,
+      "public_api_surface": false,
+      "caller_count": 1,
+      "override_count": 5
     },
     {
       "path": "superset/db_engine_specs/base.py",
@@ -1606,7 +1616,10 @@
       "qualname": "BaseEngineSpec.update_impersonation_config",
       "locator": "superset.db_engine_specs.base:BaseEngineSpec.update_impersonation_config",
       "deprecated_in": "6.0.0",
-      "removed_in": null
+      "removed_in": null,
+      "public_api_surface": false,
+      "caller_count": 2,
+      "override_count": 3
     }
   ],
   "baseline_valid_lanes": [
