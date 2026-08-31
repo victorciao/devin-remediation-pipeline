@@ -199,6 +199,7 @@ unproven.
 Remediation runs can start from a successful CodeQL `workflow_run` dispatch in the Superset
 fork, the weekly scheduled workflow, or a manual `workflow_dispatch` with lane, budget,
 session, and threshold inputs. The pipeline repository requires repository secrets
-`DEVIN_API_KEY` and `GITHUB_PAT_REMEDIATION`; the Superset fork requires
-`REMEDIATION_DISPATCH_TOKEN` with repository-dispatch rights on the pipeline repository.
-A human must add these secrets; the automation cannot add them.
+`DEVIN_API_KEY` and `REMEDIATION_GITHUB_PAT` (GitHub rejects secret names prefixed
+`GITHUB_`, so the workflow maps that secret onto the `GITHUB_PAT_REMEDIATION` environment
+variable the configuration reads); the Superset fork requires `REMEDIATION_DISPATCH_TOKEN`
+with repository-dispatch rights on the pipeline repository.
