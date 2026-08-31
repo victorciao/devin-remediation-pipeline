@@ -25,6 +25,7 @@ from pipeline.verify import AlertObservation, ItemRunResult, SuiteResult, Symbol
 
 CommandRunner = Callable[[Sequence[str], Path], tuple[int, str]]
 AlertReader = Callable[[str], object]
+SkipNodeidResolver = Callable[[str, int], str]
 
 _OUTCOME_PREFIXES = {
     "PASSED": ItemOutcome.PASSED,
@@ -32,6 +33,16 @@ _OUTCOME_PREFIXES = {
     "SKIPPED": ItemOutcome.SKIPPED,
     "ERROR": ItemOutcome.ERROR,
 }
+
+
+def is_test_path(path: str) -> bool:
+    """Return whether a changed path names a pytest target."""
+    return (
+        path.startswith("tests/")
+        or "/tests/" in path
+        or path.startswith("test_")
+        or path.endswith("_test.py")
+    )
 
 
 def run_command(command: Sequence[str], cwd: Path) -> tuple[int, str]:
@@ -46,7 +57,11 @@ def run_command(command: Sequence[str], cwd: Path) -> tuple[int, str]:
     return completed.returncode, completed.stdout + completed.stderr
 
 
-def parse_item_outcomes(output: str) -> tuple[PerItemOutcome, ...]:
+def parse_item_outcomes(
+    output: str,
+    *,
+    resolve_skip_nodeid: SkipNodeidResolver | None = None,
+) -> tuple[PerItemOutcome, ...]:
     """Parse pytest's short summary lines into per-item outcomes."""
     outcomes: list[PerItemOutcome] = []
     for line in output.splitlines():
@@ -54,10 +69,14 @@ def parse_item_outcomes(output: str) -> tuple[PerItemOutcome, ...]:
         outcome = _OUTCOME_PREFIXES.get(head)
         if outcome is None or not rest:
             continue
-        skip_match = re.match(r"\[\d+\]\s+(.+?):\d+:\s*(.*)$", rest)
+        skip_match = re.match(r"\[\d+\]\s+(.+?):(\d+):\s*(.*)$", rest)
         if skip_match is not None:
-            nodeid = skip_match.group(1)
-            detail = skip_match.group(2)
+            path = skip_match.group(1)
+            line_number = int(skip_match.group(2))
+            nodeid = (
+                resolve_skip_nodeid(path, line_number) if resolve_skip_nodeid is not None else path
+            )
+            detail = skip_match.group(3)
         else:
             nodeid, _, detail = rest.partition(" - ")
         exception_type, _, message = detail.partition(": ")
@@ -73,6 +92,36 @@ def parse_item_outcomes(output: str) -> tuple[PerItemOutcome, ...]:
             )
         )
     return tuple(outcomes)
+
+
+def _skip_nodeid(worktree: Path, path: str, line_number: int) -> str:
+    """Resolve pytest's skipped ``path:line`` summary to a collected nodeid."""
+    source_path = worktree / path
+    if not source_path.exists():
+        return path
+    try:
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return path
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    candidates: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        end = getattr(node, "end_lineno", node.lineno)
+        start = min((decorator.lineno for decorator in node.decorator_list), default=node.lineno)
+        if start <= line_number <= end:
+            names = [node.name]
+            parent = parents.get(node)
+            while parent is not None:
+                if isinstance(parent, ast.ClassDef):
+                    names.append(parent.name)
+                parent = parents.get(parent)
+            candidates.append((start, "::".join(reversed(names))))
+    if not candidates:
+        return path
+    _, name = min(candidates, key=lambda item: item[0])
+    return f"{path}::{name}"
 
 
 def _qualname_resolves(source: str, qualname: str) -> bool:
@@ -177,14 +226,7 @@ class LocalCheckout:
                     f"git diff --name-only {base_sha} {head_sha}: {output.strip()}",
                     ReasonCode.CAPABILITY_UNAVAILABLE,
                 )
-            paths = tuple(
-                path
-                for path in output.splitlines()
-                if path.startswith("tests/")
-                or "/tests/" in path
-                or path.startswith("test_")
-                or path.endswith("_test.py")
-            )
+            paths = tuple(path for path in output.splitlines() if is_test_path(path))
             if paths:
                 code, output = self.runner(
                     ("git", "-C", str(target), "checkout", head_sha, "--", *paths),
@@ -213,14 +255,7 @@ class LocalCheckout:
     def run_suite(self, scope: Sequence[str], sha: str) -> SuiteResult:
         """Run the suite covering ``scope`` at ``sha``."""
         worktree = self.revision(sha)
-        targets = tuple(
-            path
-            for path in scope
-            if path.startswith("tests/")
-            or "/tests/" in path
-            or path.startswith("test_")
-            or path.endswith("_test.py")
-        )
+        targets = tuple(path for path in scope if is_test_path(path))
         command = (*self.pytest_command, *targets)
         try:
             code, output = self.runner(command, worktree)
@@ -230,7 +265,10 @@ class LocalCheckout:
                 command=" ".join(command),
                 reason=ReasonCode.CAPABILITY_UNAVAILABLE,
             )
-        parsed = parse_item_outcomes(output)
+        parsed = parse_item_outcomes(
+            output,
+            resolve_skip_nodeid=lambda path, line: _skip_nodeid(worktree, path, line),
+        )
         failing = tuple(
             outcome.nodeid
             for outcome in parsed

@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 from pipeline.config import CiEvidenceMode, Mode, PipelineConfig
 from pipeline.http_transport import HttpTransportError
 from pipeline.schemas import Candidate, CheckRunConclusion, MergeMode, ReasonCode, Tier
+from pipeline.verify import SuiteResult
 
 ACCEPTED_CONCLUSIONS = frozenset({"success", "skipped", "neutral"})
 REJECTED_CONCLUSIONS = frozenset({"failure", "cancelled", "timed_out", "stale", "error"})
@@ -166,6 +167,50 @@ class GitHubTransport(Protocol):
 
     def patch(self, path: str, payload: Mapping[str, object]) -> Mapping[str, object]:
         """Patch an existing issue or pull request."""
+
+
+def read_named_suite(
+    config: PipelineConfig,
+    client: GitHubTransport,
+    sha: str,
+    context: str = "Python-Unit",
+) -> SuiteResult:
+    """Read one named Actions check conclusion at a revision."""
+    command = f"GET {_path(config, f'/commits/{sha}/check-runs')} context={context}"
+    try:
+        conclusions = read_check_runs(config, client, sha)
+    except (ArtifactUnavailableError, HttpTransportError, PreflightError):
+        return SuiteResult(
+            passed=False,
+            command=command,
+            reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+        )
+    observed = next((item for item in conclusions if item.name == context), None)
+    if observed is None:
+        return SuiteResult(
+            passed=False,
+            command=command,
+            reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+        )
+    conclusion = observed.conclusion or observed.status
+    if conclusion in ACCEPTED_CONCLUSIONS:
+        return SuiteResult(
+            passed=True,
+            command=command,
+            conclusion=conclusion,
+        )
+    reason = (
+        ReasonCode.CI_EVIDENCE_UNAVAILABLE
+        if conclusion in PENDING_STATUSES or conclusion is None
+        else ReasonCode.CI_CHECK_FAILED
+    )
+    return SuiteResult(
+        passed=False,
+        command=command,
+        failing_nodeids=(context,),
+        reason=reason,
+        conclusion=conclusion,
+    )
 
 
 def _mapping(value: object, description: str) -> dict[str, object]:
@@ -395,7 +440,7 @@ def wait_for_check_runs(
     started = clock()
     deadline = started + max(config.ci_wait_timeout_s - elapsed_s, 0)
     current_mode = ci_mode or config.ci_evidence_mode
-    already_upgraded = current_mode is CiEvidenceMode.GITHUB
+    already_upgraded = current_mode is CiEvidenceMode.ACTIONS
     evidence = CheckRunEvidence((), settled=False, passed=False)
     while True:
         observed = (
@@ -570,6 +615,16 @@ class GitHubClient:
         if self._transport is None:
             raise GitHubResponseError("GitHub transport is unavailable")
         return self._transport.get(path)
+
+    def read_named_suite(self, sha: str) -> SuiteResult:
+        """Read the configured Python-Unit Actions check at a revision."""
+        if self._transport is None:
+            return SuiteResult(
+                passed=False,
+                command="GET check-runs context=Python-Unit",
+                reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+            )
+        return read_named_suite(self._config, self._transport, sha)
 
     @staticmethod
     def _url(response: Mapping[str, object]) -> str:
@@ -812,8 +867,8 @@ class GitHubClient:
         """Request auto-merge only after the caller has checked all gates."""
         if (
             not self._config.auto_merge_enabled
-            or self._config.ci_evidence_mode is not CiEvidenceMode.GITHUB
-            or ci_mode is not CiEvidenceMode.GITHUB
+            or self._config.ci_evidence_mode is not CiEvidenceMode.ACTIONS
+            or ci_mode is not CiEvidenceMode.ACTIONS
         ):
             raise ValueError("auto-merge requires enabled GitHub CI evidence")
         self._write(
@@ -897,7 +952,7 @@ def auto_merge_eligible(
         and config.auto_merge_enabled
         and bool(config.required_contexts_min)
         and ci_result is not None
-        and ci_result.mode is CiEvidenceMode.GITHUB
+        and ci_result.mode is CiEvidenceMode.ACTIONS
         and ci_result.auto_merge_eligible
         and ci_result.reason is None
         and (candidate.test_added is True or candidate.test_exempt_reason is not None)

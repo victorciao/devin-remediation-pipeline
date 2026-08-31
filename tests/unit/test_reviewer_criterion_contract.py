@@ -53,7 +53,7 @@ def test_lane2_post_pr_criterion_is_not_satisfied_without_an_observation() -> No
         base_sha="a" * 40,
         head_sha="b" * 40,
         observers=Observers(),
-        config=config(ci_evidence_mode=CiEvidenceMode.GITHUB),
+        config=config(ci_evidence_mode=CiEvidenceMode.ACTIONS),
         stage="post_pr",
     )
     assert not (evidence.satisfied is True and not observed(evidence)), (
@@ -69,7 +69,7 @@ def test_lane3_post_pr_criterion_is_not_satisfied_without_an_observation() -> No
         base_sha="a" * 40,
         head_sha="b" * 40,
         observers=Observers(),
-        config=config(ci_evidence_mode=CiEvidenceMode.GITHUB),
+        config=config(ci_evidence_mode=CiEvidenceMode.ACTIONS),
         stage="post_pr",
     )
     assert not (evidence.satisfied is True and not observed(evidence)), (
@@ -97,7 +97,7 @@ def test_lane1_suite_green_under_actions_mode_is_observed_before_it_is_satisfied
         head_sha="b" * 40,
         observers=Observers(probe_alerts=probe_alerts, run_suite=run_suite),
         config=config(
-            ci_evidence_mode=CiEvidenceMode.GITHUB,
+            ci_evidence_mode=CiEvidenceMode.ACTIONS,
             lane1_alert_check=Lane1AlertCheck.PR_REF_ALERTS,
         ),
         stage="post_pr",
@@ -126,7 +126,7 @@ def test_lane3_satisfied_evidence_under_actions_mode_names_the_suite_it_observed
         base_sha="a" * 40,
         head_sha="b" * 40,
         observers=Observers(probe_symbol=probe_symbol),
-        config=config(ci_evidence_mode=CiEvidenceMode.GITHUB),
+        config=config(ci_evidence_mode=CiEvidenceMode.ACTIONS),
         stage="pre_pr",
     )
     assert evidence.satisfied is not True, (

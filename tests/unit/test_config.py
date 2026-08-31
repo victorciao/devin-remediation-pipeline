@@ -70,9 +70,16 @@ def test_budget_above_hard_max_is_clamped_and_logged(
     )
 
 
-def test_budget_above_hard_max_without_the_flag_is_an_error() -> None:
-    with pytest.raises(ConfigError):
-        load_config(cli_args=["--budget_N=99"])
+def test_budget_above_hard_max_without_the_flag_is_clamped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        config = load_config(cli_args=["--budget_N=99"])
+
+    assert config.budget_N == BUDGET_HARD_MAX
+    assert any(
+        ReasonCode.GUARDRAIL_CLAMPED.value in record.getMessage() for record in caplog.records
+    )
 
 
 def test_unrecognized_environment_setting_is_an_error() -> None:

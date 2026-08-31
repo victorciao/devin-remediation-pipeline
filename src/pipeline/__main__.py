@@ -449,6 +449,11 @@ class CandidateRunner:
             update["test_added"] = True
             update["test_nodeid"] = candidate.nodeid
             update["test_author"] = "orchestrator"
+        elif evidence.satisfied is True and candidate.lane in {
+            Lane.CODEQL,
+            Lane.DEPRECATIONS,
+        }:
+            update["test_exempt_reason"] = ReasonCode.TEST_NOT_REQUIRED
         if evidence.reason is ReasonCode.STALE_SKIP:
             update["test_added"] = False
             update["test_exempt_reason"] = ReasonCode.STALE_SKIP
@@ -567,7 +572,9 @@ class CandidateRunner:
             return self.observers
         observers = Observers(
             run_item=self.observers.run_item,
+            run_item_with_test_diff=self.observers.run_item_with_test_diff,
             run_suite=self.observers.run_suite,
+            read_ci_suite=self.observers.read_ci_suite,
             probe_symbol=self.observers.probe_symbol,
         )
         if candidate.pr_number is not None:
@@ -578,6 +585,7 @@ class CandidateRunner:
                 repo_path=self.checkout.repo_path if self.checkout is not None else None,
             )
             observers.probe_alerts = alerts.probe
+            observers.read_ci_suite = self.live.client.read_named_suite
         return observers
 
     def _watch_ci(self, candidate: Candidate) -> CiWaitResult | None:
@@ -868,66 +876,62 @@ def _enumerate(
     if config.mode is Mode.LIVE and not target_exists:
         notes.append("target checkout unavailable; LIVE discovery aborted")
         return []
-    all_lanes = {lane.value for lane in Lane}
     baseline_major = baseline.get("current_major")
     current_major = baseline_major if isinstance(baseline_major, int) else None
     candidates: list[Candidate] = []
     skipped_failures: list[dict[str, str | int | None]] = []
     deprecation_failures: list[dict[str, str | int | bool | None]] = []
-    if Lane.CODEQL.value in all_lanes:
-        payload: object
-        if config.mode is Mode.LIVE and preflight is not None and preflight.code_scanning_available:
-            payload = preflight.code_scanning_alerts
-        else:
-            payload = read_alert_fixture(config.alert_fixture_path)
+    payload: object
+    if config.mode is Mode.LIVE and preflight is not None and preflight.code_scanning_available:
+        payload = preflight.code_scanning_alerts
+    else:
+        payload = read_alert_fixture(config.alert_fixture_path)
+    candidates.extend(
+        enumerate_from_config(
+            config,
+            repo_path=repo_path if target_exists else Path("/nonexistent"),
+            repo=repo_name,
+            payload=payload,
+            base_sha=base_sha,
+        )
+    )
+    if target_exists:
+        skipped, _failures = enumerate_skipped_tests(
+            repo_path,
+            repo_name=repo_name,
+            failures=skipped_failures,
+        )
+        candidates.extend(skipped)
+    elif config.mode is not Mode.LIVE:
         candidates.extend(
-            enumerate_from_config(
-                config,
-                repo_path=repo_path if target_exists else Path("/nonexistent"),
+            _fixture_candidates(
+                baseline,
+                lane=Lane.SKIPPED_TESTS,
                 repo=repo_name,
-                payload=payload,
-                base_sha=base_sha,
+                current_major=current_major,
             )
         )
-    if Lane.SKIPPED_TESTS.value in all_lanes:
-        if target_exists:
-            skipped, _failures = enumerate_skipped_tests(
+    if target_exists:
+        release = baseline.get("current_release")
+        candidates.extend(
+            enumerate_deprecations(
                 repo_path,
-                repo_name=repo_name,
-                failures=skipped_failures,
+                current_release_value=release if isinstance(release, str) else None,
+                current_major=current_major,
+                version_source=config.version_source,
+                eol_major_lag=config.eol_major_lag,
+                failures=deprecation_failures,
             )
-            candidates.extend(skipped)
-        elif config.mode is not Mode.LIVE:
-            candidates.extend(
-                _fixture_candidates(
-                    baseline,
-                    lane=Lane.SKIPPED_TESTS,
-                    repo=repo_name,
-                    current_major=current_major,
-                )
+        )
+    elif config.mode is not Mode.LIVE:
+        candidates.extend(
+            _fixture_candidates(
+                baseline,
+                lane=Lane.DEPRECATIONS,
+                repo=repo_name,
+                current_major=current_major,
             )
-    if Lane.DEPRECATIONS.value in all_lanes:
-        if target_exists:
-            release = baseline.get("current_release")
-            candidates.extend(
-                enumerate_deprecations(
-                    repo_path,
-                    current_release_value=release if isinstance(release, str) else None,
-                    current_major=current_major,
-                    version_source=config.version_source,
-                    eol_major_lag=config.eol_major_lag,
-                    failures=deprecation_failures,
-                )
-            )
-        elif config.mode is not Mode.LIVE:
-            candidates.extend(
-                _fixture_candidates(
-                    baseline,
-                    lane=Lane.DEPRECATIONS,
-                    repo=repo_name,
-                    current_major=current_major,
-                )
-            )
+        )
     notes.extend(
         f"enumeration failure: {failure.get('path', '<unknown>')}"
         for failure in [*skipped_failures, *deprecation_failures]
@@ -1119,6 +1123,7 @@ def run_once(
     elif checkout is not None:
         observers = Observers(
             run_item=checkout.run_item,
+            run_item_with_test_diff=checkout.run_item_with_test_diff,
             run_suite=checkout.run_suite,
             probe_symbol=checkout.probe_symbol,
         )

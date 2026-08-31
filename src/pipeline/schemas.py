@@ -73,6 +73,7 @@ class ReasonCode(str, Enum):
     LABEL_CAPABILITY_UNAVAILABLE = "label_capability_unavailable"
     MARKER_SEARCH_FAILED = "marker_search_failed"
     MARKER_SEARCH_UNCONFIGURED = "marker_search_unconfigured"
+    TEST_NOT_REQUIRED = "test_not_required"
 
 
 class CandidateState(str, Enum):

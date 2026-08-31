@@ -70,6 +70,15 @@ def simulated_observers(*, base_sha: str) -> Observers:
             command=f"SIMULATED pytest {' '.join(scope) or 'tests/'} at {sha}",
         )
 
+    def run_item_with_test_diff(
+        base: str,
+        head: str,
+        nodeid: str,
+        paths: Sequence[str],
+    ) -> ItemRunResult:
+        del head, paths
+        return run_item(base, nodeid)
+
     def probe_symbol(target: Candidate, sha: str) -> SymbolObservation:
         return SymbolObservation(
             resolves=False,
@@ -86,6 +95,7 @@ def simulated_observers(*, base_sha: str) -> Observers:
 
     return Observers(
         run_item=run_item,
+        run_item_with_test_diff=run_item_with_test_diff,
         run_suite=run_suite,
         probe_symbol=probe_symbol,
         probe_alerts=probe_alerts,

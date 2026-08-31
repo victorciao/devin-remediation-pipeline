@@ -266,7 +266,9 @@ def test_a_live_run_records_a_durable_row_for_every_enumerated_candidate(
     scratch and the run's own state could not be reconciled against its report.
     """
     transport = FakeGitHubTransport(
+        base_sha="1" * 40,
         code_scanning_alerts=read_alert_fixture(FIXTURES_DIR / "codeql_alerts.json"),
+        completed_workflow_runs=True,
     )
     output_dir = tmp_path / "out"
     with pytest.MonkeyPatch.context() as patch:

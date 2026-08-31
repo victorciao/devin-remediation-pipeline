@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from types import MethodType
 from typing import Literal
 
 from pipeline.config import CiEvidenceMode, Lane1AlertCheck, PipelineConfig
@@ -57,6 +58,7 @@ class SuiteResult:
     command: str
     failing_nodeids: tuple[str, ...] = ()
     reason: ReasonCode | None = None
+    conclusion: str | None = None
 
 
 @dataclass(frozen=True)
@@ -90,7 +92,9 @@ class ItemRunResult:
 
 
 ItemRunner = Callable[[str, str], ItemRunResult]
+ItemDiffRunner = Callable[[str, str, str, Sequence[str]], ItemRunResult]
 SuiteRunner = Callable[[Sequence[str], str], SuiteResult]
+CiSuiteRunner = Callable[[str], SuiteResult]
 SymbolProbe = Callable[[Candidate, str], SymbolObservation]
 AlertProbe = Callable[[Candidate, str], AlertObservation]
 Stage = Literal["pre_pr", "post_pr"]
@@ -101,10 +105,20 @@ class Observers:
     """The observation seams an evaluator is allowed to use."""
 
     run_item: ItemRunner | None = None
+    run_item_with_test_diff: ItemDiffRunner | None = None
     run_suite: SuiteRunner | None = None
+    read_ci_suite: CiSuiteRunner | None = None
     probe_symbol: SymbolProbe | None = None
     probe_alerts: AlertProbe | None = None
     commands: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Preserve the diff seam for direct LocalCheckout observer construction."""
+        if self.run_item_with_test_diff is not None or not isinstance(self.run_item, MethodType):
+            return
+        owner = self.run_item.__self__
+        if hasattr(owner, "run_item_with_test_diff"):
+            self.run_item_with_test_diff = owner.run_item_with_test_diff
 
 
 def _unobservable(criterion: str, commands: Sequence[str], detail: str) -> CriterionEvidence:
@@ -146,10 +160,10 @@ def verify_lane2(
             _unobservable(criterion, (), "no local checkout was available to run the nodeid"),
             None,
         )
-    owner = getattr(observers.run_item, "__self__", None)
-    with_diff = getattr(owner, "run_item_with_test_diff", None)
-    if callable(with_diff):
-        base_run = with_diff(base_sha, head_sha, nodeid, candidate.test_paths)
+    if observers.run_item_with_test_diff is not None:
+        base_run = observers.run_item_with_test_diff(
+            base_sha, head_sha, nodeid, candidate.test_paths
+        )
     else:
         base_run = observers.run_item(base_sha, nodeid)
     if base_run.reason is not None:
@@ -252,7 +266,16 @@ def _suite_evidence(
 ) -> CriterionEvidence | None:
     """Return failing suite evidence, or None when the suite is green."""
     if config.ci_evidence_mode is not CiEvidenceMode.LOCAL:
-        if observers.run_suite is None:
+        if stage != "post_pr":
+            return CriterionEvidence(
+                criterion=criterion,
+                satisfied=None,
+                stage=stage,
+                commands=commands,
+                observations=observations,
+                reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+            )
+        if observers.read_ci_suite is None:
             return CriterionEvidence(
                 criterion=criterion,
                 satisfied=False,
@@ -261,12 +284,11 @@ def _suite_evidence(
                 observations=observations,
                 reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
             )
-        scope = list(candidate.suite_scope)
-        suite = observers.run_suite(scope, head_sha)
+        suite = observers.read_ci_suite(head_sha)
         commands.append(suite.command)
         observations.append(
-            f"Python-Unit suite over {', '.join(scope) or 'default scope'} at {head_sha}: "
-            f"{'success' if suite.passed else 'failure'}"
+            f"Python-Unit check at {head_sha}: "
+            f"{suite.conclusion or ('success' if suite.passed else 'failure')}"
         )
         if suite.reason is not None:
             return CriterionEvidence(
@@ -286,15 +308,6 @@ def _suite_evidence(
                 commands=commands,
                 observations=observations,
                 reason=ReasonCode.SUITE_REGRESSED,
-            )
-        if stage != "post_pr":
-            return CriterionEvidence(
-                criterion=criterion,
-                satisfied=None,
-                stage=stage,
-                commands=commands,
-                observations=observations,
-                reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
             )
         return None
     if observers.run_suite is None:

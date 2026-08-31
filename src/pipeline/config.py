@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import shlex
+import sys
 from collections.abc import Mapping, Sequence
 from enum import Enum
 from pathlib import Path
@@ -82,7 +83,6 @@ class CiEvidenceMode(str, Enum):
     """CI evidence mode values."""
 
     ACTIONS = "actions"
-    GITHUB = "actions"
     LOCAL = "local"
 
 
@@ -132,7 +132,7 @@ class PipelineConfig(BaseModel):
     templates_dir: Path = Path("templates")
     session_snapshot_id: str | None = None
     pytest_command: tuple[str, ...] = (
-        "python3",
+        sys.executable,
         "-m",
         "pytest",
         "-q",
@@ -198,11 +198,9 @@ class PipelineConfig(BaseModel):
         if info.field_name == "alert_source":
             return AlertSource(normalized)
         if info.field_name == "ci_evidence_mode":
-            return CiEvidenceMode.ACTIONS if normalized == "github" else CiEvidenceMode(normalized)
+            return CiEvidenceMode(normalized)
         if info.field_name == "lane1_alert_check":
             return Lane1AlertCheck(normalized)
-        if normalized == "github":
-            return IssueSink.ISSUES
         return IssueSink(normalized)
 
     @field_validator("required_contexts_min", mode="before")

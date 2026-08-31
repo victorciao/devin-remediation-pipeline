@@ -120,8 +120,10 @@ def config_for(mode: Mode, **fields: Any) -> PipelineConfig:  # noqa: ANN401
 def live_run(output_dir: Path, tmp_path: Path) -> AbortedRun:
     """One LIVE `run_once` whose configured marker search fails on every lookup."""
     transport = FakeGitHubTransport(
+        base_sha="1" * 40,
         marker_search_error=HttpTransportError("Validation Failed", status_code=422),
         code_scanning_alerts=read_alert_fixture(FIXTURES_DIR / "codeql_alerts.json"),
+        completed_workflow_runs=True,
     )
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(entrypoint, "UrllibGitHubTransport", lambda: transport)

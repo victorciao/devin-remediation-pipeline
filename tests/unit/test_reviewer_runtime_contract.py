@@ -18,6 +18,7 @@ from pipeline.config import (
     BUDGET_HARD_MAX,
     CiEvidenceMode,
     ConfigError,
+    IssueSink,
     Mode,
     PipelineConfig,
     load_config,
@@ -176,10 +177,12 @@ def test_budget_above_the_hard_max_is_clamped_rather_than_a_startup_error() -> N
     assert loaded.budget_N == BUDGET_HARD_MAX
 
 
-def test_documented_issue_sink_value_github_is_settable() -> None:
-    """§15: `issue_sink`'s documented default is `github`."""
-    loaded = load_config(env={"PIPELINE_ISSUE_SINK": "github"}, cli_args=())
-    assert loaded.issue_sink is not None
+def test_documented_issue_sink_value_issues_is_settable() -> None:
+    """§15: `issue_sink=issues` is valid and legacy `github` fails loudly."""
+    loaded = load_config(env={"PIPELINE_ISSUE_SINK": "issues"}, cli_args=())
+    assert loaded.issue_sink is IssueSink.ISSUES
+    with pytest.raises(ConfigError):
+        load_config(env={"PIPELINE_ISSUE_SINK": "github"}, cli_args=())
 
 
 def test_live_requires_a_non_empty_required_contexts_min() -> None:
@@ -190,7 +193,7 @@ def test_live_requires_a_non_empty_required_contexts_min() -> None:
 
 def test_downgrading_evidence_to_local_keeps_auto_merge_off() -> None:
     """§12/§15: local CI evidence is permanently ineligible for auto-merge."""
-    configured = config(ci_evidence_mode=CiEvidenceMode.GITHUB, auto_merge_enabled=True)
+    configured = config(ci_evidence_mode=CiEvidenceMode.ACTIONS, auto_merge_enabled=True)
     downgraded = configured.model_copy(update={"ci_evidence_mode": CiEvidenceMode.LOCAL})
     assert downgraded.auto_merge_enabled is False, (
         "a preflight downgrade to local evidence left auto-merge enabled"

@@ -104,7 +104,7 @@ def local_ci_probe(_pr_number: int) -> CiWaitResult:
 
 def green_github_ci_probe(_pr_number: int) -> CiWaitResult:
     """§10.1 — every required context reported `success` under `github` evidence."""
-    return CiWaitResult(CiEvidenceMode.GITHUB, None, True)
+    return CiWaitResult(CiEvidenceMode.ACTIONS, None, True)
 
 
 def github_config(
@@ -112,7 +112,7 @@ def github_config(
 ) -> PipelineConfig:
     """A config whose CI evidence comes from GitHub, so auto-merge is permitted at all."""
     return pipeline_config(
-        ci_evidence_mode=CiEvidenceMode.GITHUB, auto_merge_enabled=True, **overrides
+        ci_evidence_mode=CiEvidenceMode.ACTIONS, auto_merge_enabled=True, **overrides
     )
 
 

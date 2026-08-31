@@ -69,7 +69,9 @@ class FakeGitHubTransport:
     marker_search_error: HttpTransportError | None = None
     token_login: str = "devin-bot"
     has_issues: bool = True
+    permissions_push: bool = True
     code_scanning_alerts: object = ()
+    code_scanning_analyses: object | None = None
     workflow_count: int = 1
     completed_workflow_runs: bool = False
     existing_pull_requests: Sequence[Mapping[str, object]] = ()
@@ -103,6 +105,12 @@ class FakeGitHubTransport:
             return {"login": self.token_login}
         if path.startswith(f"{prefix}/code-scanning/alerts"):
             return self.code_scanning_alerts
+        if path.startswith(f"{prefix}/code-scanning/analyses"):
+            return (
+                self.code_scanning_analyses
+                if self.code_scanning_analyses is not None
+                else [{"commit_sha": self.base_sha, "ref": "refs/heads/master"}]
+            )
         if path.startswith(f"{prefix}/actions/workflows"):
             return {"total_count": self.workflow_count}
         if path.startswith(f"{prefix}/actions/runs"):
@@ -156,7 +164,7 @@ class FakeGitHubTransport:
                 },
             }
         if path == f"{prefix}":
-            return {"has_issues": self.has_issues}
+            return {"has_issues": self.has_issues, "permissions": {"push": self.permissions_push}}
         return {}
 
     # -- writes --------------------------------------------------------------------------
