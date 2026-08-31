@@ -17,7 +17,7 @@ from pipeline.config import (
     PipelineConfig,
     load_config,
 )
-from pipeline.schemas import ReasonCode
+from pipeline.schemas import Lane, ReasonCode
 
 
 def test_coverage_bar_default_meets_the_eighty_percent_floor(
@@ -138,6 +138,24 @@ def test_suite_check_context_is_environment_configurable() -> None:
         ).auto_merge_enabled
         is False
     )
+
+
+def test_dispatch_scope_defaults_empty_and_accepts_cli_and_environment() -> None:
+    config = PipelineConfig()
+
+    assert config.suite_check_context == "unit-tests-required"
+    assert config.required_contexts_min == ("pre-commit (current)",)
+    assert config.only_lanes == ()
+    assert load_config(cli_args=["--only-lanes=skipped_tests"]).only_lanes == (Lane.SKIPPED_TESTS,)
+    assert load_config(env={"PIPELINE_ONLY_LANES": "codeql, deprecations"}).only_lanes == (
+        Lane.CODEQL,
+        Lane.DEPRECATIONS,
+    )
+
+
+def test_dispatch_scope_rejects_unknown_lanes() -> None:
+    with pytest.raises(ConfigError):
+        load_config(cli_args=["--only-lanes=not-a-lane"])
 
 
 def test_the_removed_human_review_knob_has_no_environment_name_either() -> None:

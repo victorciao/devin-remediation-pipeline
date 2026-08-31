@@ -48,6 +48,7 @@ class ReasonCode(str, Enum):
     INVALID_RED_BASELINE = "invalid_red_baseline"
     CAPABILITY_UNAVAILABLE = "capability_unavailable"
     BUDGET_OVERFLOW = "budget_overflow"
+    OUT_OF_DISPATCH_SCOPE = "out_of_dispatch_scope"
     TOKEN_CAPABILITY_MISSING = "token_capability_missing"
     CI_EVIDENCE_UNAVAILABLE = "ci_evidence_unavailable"
     CI_CHECK_FAILED = "ci_check_failed"

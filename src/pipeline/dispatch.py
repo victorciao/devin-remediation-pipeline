@@ -201,6 +201,17 @@ def dispatch_candidates(candidates: Sequence[Candidate], config: PipelineConfig)
                 }
             )
             continue
+        if tier is Tier.HIGH and config.only_lanes and candidate.lane not in config.only_lanes:
+            decisions[candidate.candidate_id] = candidate.model_copy(
+                update={
+                    "tier": tier,
+                    "action": Action.DEFERRED,
+                    "state": CandidateState.DEFERRED,
+                    "reason": ReasonCode.OUT_OF_DISPATCH_SCOPE,
+                    "auto_merge_eligible": False,
+                }
+            )
+            continue
         if tier is Tier.HIGH and dispatched_count >= config.budget_N:
             decisions[candidate.candidate_id] = candidate.model_copy(
                 update={

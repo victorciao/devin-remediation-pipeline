@@ -32,6 +32,7 @@ from pipeline.schemas import (
     DefinitionKind,
     GateName,
     GateResult,
+    Lane,
     ReasonCode,
     RedBaselineResult,
     Tier,
@@ -219,6 +220,33 @@ def test_budget_dispatches_highest_scores_first(simulate_config: PipelineConfig)
     budget = simulate_config.budget_N
     assert dispatched == {f"codeql-{index:02d}" for index in range(12 - budget, 12)}
     assert deferred == {f"codeql-{index:02d}" for index in range(12 - budget)}
+
+
+def test_only_lanes_defers_nonmatching_high_candidates() -> None:
+    config = pipeline_config(only_lanes="skipped_tests", budget_N=1)
+    candidate = high_candidate()
+
+    decision = dispatch_candidates([candidate], config)[0]
+
+    assert decision.action is Action.DEFERRED
+    assert decision.state is CandidateState.DEFERRED
+    assert decision.reason is ReasonCode.OUT_OF_DISPATCH_SCOPE
+
+
+def test_only_lanes_preserves_matching_dispatch_and_medium_issue_routing() -> None:
+    config = pipeline_config(only_lanes=(Lane.SKIPPED_TESTS,), budget_N=1)
+    matching = lane2_candidate(
+        candidate_id="matching",
+        gate_passed=True,
+        score=128.0,
+        risk=2,
+    )
+    medium = high_candidate(candidate_id="medium", score=40.0)
+
+    decisions = dispatch_candidates([matching, medium], config)
+
+    assert decision_for("matching", decisions).action is Action.OPEN_PR
+    assert decision_for("medium", decisions).action is Action.OPEN_ISSUE
 
 
 def test_dispatch_preserves_input_order_in_its_output(simulate_config: PipelineConfig) -> None:

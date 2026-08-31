@@ -31,6 +31,7 @@ from pipeline.github_client import (
     PreflightError,
     SimulationWriteError,
     publish_artifacts,
+    read_check_runs,
     run_live_preflight,
     wait_for_check_runs,
 )
@@ -273,6 +274,102 @@ def test_check_run_status_is_used_when_no_conclusion_exists() -> None:
     )
 
     assert result.detail == "awaiting_workflow_approval"
+
+
+def test_check_and_status_reads_paginate_and_dedupe_first_seen_context() -> None:
+    class Paginated(FakeGitHubTransport):
+        def get(self, path: str) -> object:
+            self.reads.append(path)
+            if path.endswith("/check-runs?per_page=100&page=1"):
+                return {
+                    "check_runs": [
+                        {"name": "first", "conclusion": "success"},
+                        *(
+                            {"name": f"check-{index}", "conclusion": "success"}
+                            for index in range(99)
+                        ),
+                    ]
+                }
+            if path.endswith("/check-runs?per_page=100&page=2"):
+                return {
+                    "check_runs": [
+                        {"name": "first", "conclusion": "failure"},
+                        {"name": "second", "conclusion": "success"},
+                    ]
+                }
+            if path.endswith("/status?per_page=100&page=1"):
+                return {
+                    "statuses": [
+                        {"context": "second", "state": "failure"},
+                        {"context": "legacy", "state": "success"},
+                        *(
+                            {"context": f"status-{index}", "state": "success"}
+                            for index in range(98)
+                        ),
+                    ]
+                }
+            if path.endswith("/status?per_page=100&page=2"):
+                return {
+                    "statuses": [
+                        {"context": "legacy-two", "state": "success"},
+                    ]
+                }
+            return super().get(path)
+
+    transport = Paginated()
+    observed = read_check_runs(PipelineConfig(), transport, HEAD_SHA)
+
+    assert "legacy" in [item.name for item in observed]
+    assert "legacy-two" in [item.name for item in observed]
+    assert next(item for item in observed if item.name == "first").conclusion == "success"
+    assert any(read.endswith("check-runs?per_page=100&page=2") for read in transport.reads)
+    assert any(read.endswith("status?per_page=100&page=1") for read in transport.reads)
+    assert any(read.endswith("status?per_page=100&page=2") for read in transport.reads)
+
+
+def test_check_read_transport_failure_is_evidence_unavailable() -> None:
+    class Interrupted(FakeGitHubTransport):
+        def get(self, path: str) -> object:
+            self.reads.append(path)
+            if path.endswith("/check-runs?per_page=100&page=1"):
+                return {
+                    "check_runs": [
+                        {"name": name, "conclusion": "success"}
+                        for name in DEFAULT_REQUIRED_CONTEXTS_MIN
+                    ]
+                    + [{"name": f"check-{index}", "conclusion": "success"} for index in range(99)]
+                }
+            if path.endswith("/check-runs?per_page=100&page=2"):
+                raise HttpTransportError("connection interrupted")
+            return super().get(path)
+
+    result = wait_for_check_runs(
+        PipelineConfig(ci_evidence_mode=CiEvidenceMode.ACTIONS),
+        client=Interrupted(),
+        elapsed_s=0,
+        sha=HEAD_SHA,
+        poll=False,
+    )
+
+    assert result.reason is ReasonCode.CI_EVIDENCE_UNAVAILABLE
+    assert result.auto_merge_eligible is False
+    assert "connection interrupted" in (result.detail or "")
+
+
+def test_check_read_page_cap_fails_closed() -> None:
+    class TooManyPages(FakeGitHubTransport):
+        def get(self, path: str) -> object:
+            self.reads.append(path)
+            if "/check-runs?per_page=100&page=" in path:
+                return {
+                    "check_runs": [
+                        {"name": f"check-{index}", "conclusion": "success"} for index in range(100)
+                    ]
+                }
+            return super().get(path)
+
+    with pytest.raises(PreflightError, match="pagination exceeded"):
+        read_check_runs(PipelineConfig(), TooManyPages(), HEAD_SHA)
 
 
 def test_a_fork_with_a_workflow_run_but_no_context_is_awaiting_approval() -> None:

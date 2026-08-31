@@ -17,6 +17,8 @@ ACCEPTED_CONCLUSIONS = frozenset({"success", "skipped", "neutral"})
 REJECTED_CONCLUSIONS = frozenset({"failure", "cancelled", "timed_out", "stale", "error"})
 PENDING_STATUSES = frozenset({"queued", "in_progress", "pending", "requested"})
 APPROVAL_STATUSES = frozenset({"action_required", "awaiting_approval", "waiting"})
+_PAGE_SIZE = 100
+_MAX_PAGES = 10
 
 
 class PreflightError(RuntimeError):
@@ -240,6 +242,33 @@ def _path(config: PipelineConfig, suffix: str) -> str:
     return f"/repos/{config.target_owner}/{config.target_repo}{suffix}"
 
 
+def _paged_items(
+    client: GitHubTransport,
+    path: str,
+    key: str,
+) -> list[object]:
+    """Read a bounded GitHub collection, preserving server order across pages."""
+    items: list[object] = []
+    for page in range(1, _MAX_PAGES + 1):
+        response = _mapping(
+            client.get(f"{path}?per_page={_PAGE_SIZE}&page={page}"),
+            key,
+        )
+        page_items = response.get(key)
+        if not isinstance(page_items, list):
+            raise PreflightError(
+                ReasonCode.CAPABILITY_UNAVAILABLE,
+                f"{key} response invalid",
+            )
+        items.extend(page_items)
+        if len(page_items) < _PAGE_SIZE:
+            return items
+    raise PreflightError(
+        ReasonCode.CAPABILITY_UNAVAILABLE,
+        f"{key} pagination exceeded {_MAX_PAGES} pages",
+    )
+
+
 def run_live_preflight(config: PipelineConfig, transport: GitHubTransport) -> LivePreflight:
     """Probe repository capabilities before any candidate work or mutation."""
     try:
@@ -371,45 +400,39 @@ def read_check_runs(
 ) -> tuple[CheckRunConclusion, ...]:
     """Read every check run reported for one SHA, plus legacy commit statuses."""
     root = _path(config, f"/commits/{sha}")
-    checks = _mapping(client.get(f"{root}/check-runs"), "check-runs")
     observed: list[CheckRunConclusion] = []
     seen: set[str] = set()
-    raw_checks = checks.get("check_runs")
-    if isinstance(raw_checks, list):
-        for raw_check in raw_checks:
-            if not isinstance(raw_check, Mapping):
-                continue
-            name = raw_check.get("name")
-            if not isinstance(name, str) or name in seen:
-                continue
-            conclusion = raw_check.get("conclusion")
-            status = raw_check.get("status")
-            seen.add(name)
-            observed.append(
-                CheckRunConclusion(
-                    name=name,
-                    conclusion=conclusion if isinstance(conclusion, str) else None,
-                    status=status if isinstance(status, str) else None,
-                )
+    for raw_check in _paged_items(client, f"{root}/check-runs", "check_runs"):
+        if not isinstance(raw_check, Mapping):
+            continue
+        name = raw_check.get("name")
+        if not isinstance(name, str) or name in seen:
+            continue
+        conclusion = raw_check.get("conclusion")
+        status = raw_check.get("status")
+        seen.add(name)
+        observed.append(
+            CheckRunConclusion(
+                name=name,
+                conclusion=conclusion if isinstance(conclusion, str) else None,
+                status=status if isinstance(status, str) else None,
             )
-    statuses = _mapping(client.get(f"{root}/status"), "status")
-    raw_statuses = statuses.get("statuses")
-    if isinstance(raw_statuses, list):
-        for raw_status in raw_statuses:
-            if not isinstance(raw_status, Mapping):
-                continue
-            context = raw_status.get("context")
-            state = raw_status.get("state")
-            if not isinstance(context, str) or context in seen or not isinstance(state, str):
-                continue
-            seen.add(context)
-            observed.append(
-                CheckRunConclusion(
-                    name=context,
-                    conclusion=state if state != "pending" else None,
-                    status="pending" if state == "pending" else "completed",
-                )
+        )
+    for raw_status in _paged_items(client, f"{root}/status", "statuses"):
+        if not isinstance(raw_status, Mapping):
+            continue
+        context = raw_status.get("context")
+        state = raw_status.get("state")
+        if not isinstance(context, str) or context in seen or not isinstance(state, str):
+            continue
+        seen.add(context)
+        observed.append(
+            CheckRunConclusion(
+                name=context,
+                conclusion=state if state != "pending" else None,
+                status="pending" if state == "pending" else "completed",
             )
+        )
     return tuple(observed)
 
 
@@ -447,9 +470,18 @@ def wait_for_check_runs(
     already_upgraded = current_mode is CiEvidenceMode.ACTIONS
     evidence = CheckRunEvidence((), settled=False, passed=False)
     while True:
-        observed = (
-            read_check_runs(config, client, sha) if conclusions is None else tuple(conclusions)
-        )
+        if conclusions is None:
+            try:
+                observed = read_check_runs(config, client, sha)
+            except (ArtifactUnavailableError, HttpTransportError, PreflightError) as exc:
+                return CiWaitResult(
+                    current_mode,
+                    ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+                    False,
+                    str(exc),
+                )
+        else:
+            observed = tuple(conclusions)
         evidence = evaluate_check_runs(
             observed,
             required_contexts=config.required_contexts_min,

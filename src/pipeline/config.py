@@ -24,12 +24,14 @@ from pydantic import (
     model_validator,
 )
 
+from pipeline.schemas import Lane
+
 logger = logging.getLogger(__name__)
 BUDGET_HARD_MAX = 25
 SECURITY_ISSUE_MODE = "generic_tracking"
 DEFAULT_BUDGET_N = 5
 DEFAULT_SESSION_TIMEOUT_S = 5400.0
-DEFAULT_REQUIRED_CONTEXTS_MIN = ("pre-commit checks",)
+DEFAULT_REQUIRED_CONTEXTS_MIN = ("pre-commit (current)",)
 DEFAULT_ALERT_ANALYSIS_WAIT_S = 2700.0
 
 
@@ -116,9 +118,10 @@ class PipelineConfig(BaseModel):
     lane1_alert_check: Lane1AlertCheck = Lane1AlertCheck.PR_REF_ALERTS
     alert_analysis_wait_s: float = Field(default=DEFAULT_ALERT_ANALYSIS_WAIT_S, gt=0, strict=True)
     ci_evidence_mode: CiEvidenceMode = CiEvidenceMode.LOCAL
-    suite_check_context: str = Field(default="Python-Unit", min_length=1, strict=True)
+    suite_check_context: str = Field(default="unit-tests-required", min_length=1, strict=True)
     ci_wait_timeout_s: int = Field(default=5400, gt=0, strict=True)
     required_contexts_min: tuple[str, ...] = DEFAULT_REQUIRED_CONTEXTS_MIN
+    only_lanes: tuple[Lane, ...] = ()
     auto_merge_enabled: bool = False
     has_issues: bool = True
     issue_sink: IssueSink = IssueSink.ISSUES
@@ -213,6 +216,22 @@ class PipelineConfig(BaseModel):
         if isinstance(value, (list, tuple)):
             return tuple(str(item) for item in value)
         return value
+
+    @field_validator("only_lanes", mode="before")
+    @classmethod
+    def normalize_only_lanes(cls, value: object) -> object:
+        """Accept a comma-separated lane scope or a sequence of lane values."""
+        if isinstance(value, str):
+            values: Sequence[object] = value.split(",")
+        elif isinstance(value, (list, tuple)):
+            values = value
+        else:
+            return value
+        return tuple(
+            item if isinstance(item, Lane) else Lane(str(item).strip().lower())
+            for item in values
+            if str(item).strip()
+        )
 
     @field_validator("pytest_command", mode="before")
     @classmethod
@@ -408,6 +427,7 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
         "ALERT_FIXTURE_PATH": "alert_fixture_path",
         "CI_EVIDENCE_MODE": "ci_evidence_mode",
         "SUITE_CHECK_CONTEXT": "suite_check_context",
+        "ONLY_LANES": "only_lanes",
         "ISSUE_SINK": "issue_sink",
         "VERSION_SOURCE": "version_source",
         "MODE": "mode",

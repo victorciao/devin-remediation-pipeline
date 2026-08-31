@@ -124,9 +124,10 @@ it did not demonstrate PR creation, merge behavior, or an independently verified
 | `lane1_alert_check` | `pr_ref_alerts` | `pr_ref_alerts`, `codeql_cli` | Selects the orchestrator-owned LANE 1 alert observation |
 | `alert_analysis_wait_s` | `2700.0` | `>0` | Bounds CodeQL analysis polling |
 | `ci_evidence_mode` | `local` | `actions`, `local` | LIVE may resolve this from Actions history; `local` forces auto-merge off, and stale `github` values are rejected |
-| `suite_check_context` | `Python-Unit` | Non-empty string | Named Actions check context used for suite evidence |
+| `suite_check_context` | `unit-tests-required` | Non-empty string | Named Actions check context used for suite evidence |
 | `ci_wait_timeout_s` | `5400` | `>0` | Bounds GitHub evidence waiting |
-| `required_contexts_min` | `pre-commit checks` | Non-empty context names | Required completed Actions context for LIVE preflight |
+| `required_contexts_min` | `pre-commit (current)` | Non-empty context names | Required completed Actions context for LIVE preflight |
+| `only_lanes` | `()` | Comma-separated `codeql`, `skipped_tests`, `deprecations` | Restricts dispatch eligibility without changing candidate discovery or reporting |
 | `auto_merge_enabled` | `false` | `true`, `false` | Never sufficient alone; forced off for local evidence |
 | `has_issues` | `true` | `true`, `false` | False aborts before writes unless degraded PR-comment sink is selected |
 | `issue_sink` | `issues` | `issues`, `pr_comment` | `pr_comment` marks artifacts/run degraded |
@@ -142,6 +143,9 @@ it did not demonstrate PR creation, merge behavior, or an independently verified
 | `devin_api_key` | unset | Runtime secret | Environment-only; required by LIVE |
 
 `SECURITY_ISSUE_MODE=generic_tracking` and `BUDGET_HARD_MAX=25` are constants, not knobs.
+`only_lanes` accepts a comma-separated lane list from `--only-lanes=...` or
+`PIPELINE_ONLY_LANES`; it restricts dispatch eligibility only, so other lanes remain
+enumerated, gated, scored, and represented in the run report.
 Security issues are always detail-free. The single remediation session is responsible for
 implementation, while the orchestrator independently verifies the declared criterion,
 publishes artifacts, and evaluates CI evidence before merge.

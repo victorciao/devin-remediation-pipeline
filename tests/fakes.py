@@ -155,7 +155,7 @@ class FakeGitHubTransport:
                     for name, state in self.check_run_statuses.items()
                 ]
             }
-        if path.endswith("/status"):
+        if "/status" in path:
             return {"statuses": []}
         if path.startswith(f"{prefix}/pulls?"):
             return list(self.existing_pull_requests)
