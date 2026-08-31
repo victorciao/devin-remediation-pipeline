@@ -1,0 +1,140 @@
+codeql:
+  business_impact:
+    observable: security_severity_level
+    rows:
+      critical: 5
+      high: 4
+      medium: 3
+      low: 2
+      note: 1
+    default: 3
+  verifiability:
+    observable: targeted_test_signal
+    rows:
+      targeted: 5
+      collectable: 4
+      indirect: 3
+      weak: 2
+      absent: 1
+    default: 3
+  automatability:
+    observable: transformation_scope
+    rows:
+      local_python_transform: 5
+      scoped_python_transform: 4
+      bounded_transform: 3
+      constrained_transform: 2
+      product_judgment: 1
+    default: 3
+  signal_quality:
+    observable: rule_precision_and_updated_at_freshness
+    rows:
+      precise_fresh: 5
+      precise: 4
+      current: 3
+      stale: 2
+      weak: 1
+    default: 3
+  risk:
+    observable: blast_radius
+    definition: "Count distinct AST-detected importers under superset/; bucket 0-1 local, 2-5 bounded, 6-20 shared, over 20 broad. Security and views paths are critical surfaces."
+    rows:
+      local_module: 1
+      bounded_module: 2
+      shared_module: 3
+      broad_module: 4
+      critical_surface: 5
+    default: 3
+
+skipped_tests:
+  business_impact:
+    observable: covered_surface_breadth
+    rows:
+      broad: 5
+      shared: 4
+      service: 3
+      local: 2
+      narrow: 1
+    default: 3
+  verifiability:
+    observable: targeted_test_signal
+    rows:
+      targeted: 5
+      collectable: 4
+      indirect: 3
+      weak: 2
+      absent: 1
+    default: 3
+  automatability:
+    observable: transformation_scope
+    rows:
+      single_test: 5
+      bounded_class: 4
+      scoped_test: 3
+      constrained_test: 2
+      broad_class: 1
+    default: 3
+  signal_quality:
+    observable: skip_reason_specificity
+    rows:
+      todo_with_cause: 4
+      explanatory: 3
+      bare_skip: 2
+      unknown: 1
+    default: 3
+  risk:
+    observable: test_only_diff_and_definition_kind
+    rows:
+      test_only_local: 1
+      test_only_shared: 2
+      shared_fixture: 3
+      broad_class: 4
+      critical_suite: 5
+    default: 2
+
+deprecations:
+  business_impact:
+    observable: public_api_exposure
+    rows:
+      public_api: 5
+      widely_used_api: 4
+      shared_api: 3
+      internal_api: 2
+      local_helper: 1
+    default: 3
+  verifiability:
+    observable: targeted_test_signal
+    rows:
+      targeted: 5
+      collectable: 4
+      indirect: 3
+      weak: 2
+      absent: 1
+    default: 3
+  automatability:
+    observable: transformation_scope
+    rows:
+      isolated_removal: 5
+      scoped_removal: 4
+      bounded_removal: 3
+      constrained_removal: 2
+      judgment_required: 1
+    default: 3
+  signal_quality:
+    observable: deprecated_age_in_majors
+    rows:
+      three_or_more: 5
+      two: 4
+      one: 3
+      zero: 2
+      unknown: 1
+    default: 3
+  risk:
+    observable: caller_and_override_count
+    rows:
+      no_callers: 1
+      bounded_callers: 2
+      shared_callers: 3
+      broad_callers: 4
+      override_surface: 5
+    default: 3

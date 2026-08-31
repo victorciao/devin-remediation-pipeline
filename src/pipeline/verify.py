@@ -1,0 +1,649 @@
+"""Orchestrator-owned evaluation of each lane's declared success criterion.
+
+Nothing a session reports about its own results is evidence here: every
+evaluator observes the outcome itself through an injected observation seam and
+returns either the evidence it observed or the terminal reason that stops the
+candidate.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from typing import Literal
+
+from pipeline.config import CiEvidenceMode, Lane1AlertCheck, PipelineConfig
+from pipeline.schemas import (
+    Candidate,
+    CriterionEvidence,
+    ItemOutcome,
+    Lane,
+    PerItemOutcome,
+    ReasonCode,
+    RedBaselineResult,
+)
+
+LANE2_CRITERION = (
+    "The test's skip marker is absent at the candidate head and the suite covering "
+    "the test passes there."
+)
+LANE1_CRITERION = (
+    "The alert's stable locator is absent at the candidate head and the suite covering "
+    "suite_scope passes there."
+)
+LANE3_CRITERION = (
+    "The module:qualname no longer resolves at the candidate head, no internal caller or "
+    "override surface references it, and the suite covering suite_scope passes there."
+)
+
+
+def declare_success_criterion(lane: Lane) -> str:
+    """Return the criterion a lane declares for every candidate it emits."""
+    if lane is Lane.SKIPPED_TESTS:
+        return LANE2_CRITERION
+    if lane is Lane.CODEQL:
+        return LANE1_CRITERION
+    return LANE3_CRITERION
+
+
+@dataclass(frozen=True)
+class SuiteResult:
+    """Observed result of running the suite covering a candidate's scope."""
+
+    passed: bool
+    command: str
+    failing_nodeids: tuple[str, ...] = ()
+    reason: ReasonCode | None = None
+    conclusion: str | None = None
+    detail: str | None = None
+
+
+@dataclass(frozen=True)
+class SymbolObservation:
+    """Observed resolution and reference surface of a deprecated symbol."""
+
+    resolves: bool
+    caller_count: int
+    override_count: int
+    command: str
+    references: tuple[str, ...] = ()
+    available: bool = True
+    detail: str | None = None
+
+
+@dataclass(frozen=True)
+class AlertObservation:
+    """Observed alert locators at a candidate head, or their unavailability."""
+
+    locators: tuple[str, ...]
+    command: str
+    available: bool = True
+    detail: str | None = None
+
+
+@dataclass(frozen=True)
+class ItemRunResult:
+    """Observed per-item outcomes of running one nodeid at one revision."""
+
+    outcomes: tuple[PerItemOutcome, ...]
+    command: str
+    reason: ReasonCode | None = None
+
+
+ItemRunner = Callable[[str, str], ItemRunResult]
+ItemDiffRunner = Callable[[str, str, str, Sequence[str]], ItemRunResult]
+SuiteRunner = Callable[[Sequence[str], str], SuiteResult]
+CiSuiteRunner = Callable[[str, str], SuiteResult]
+SymbolProbe = Callable[[Candidate, str], SymbolObservation]
+AlertProbe = Callable[[Candidate, str], AlertObservation]
+Stage = Literal["pre_pr", "post_pr"]
+
+
+@dataclass(frozen=True)
+class SkipMarkerObservation:
+    """Observed skip markers in a test's source at a revision."""
+
+    present: bool
+    command: str
+    available: bool = True
+    detail: str | None = None
+    markers: tuple[str, ...] = ()
+
+
+SkipMarkerProbe = Callable[[Candidate, str], SkipMarkerObservation]
+
+
+@dataclass
+class Observers:
+    """The observation seams an evaluator is allowed to use."""
+
+    run_item: ItemRunner | None = None
+    run_item_with_test_diff: ItemDiffRunner | None = None
+    run_suite: SuiteRunner | None = None
+    read_ci_suite: CiSuiteRunner | None = None
+    probe_symbol: SymbolProbe | None = None
+    probe_alerts: AlertProbe | None = None
+    probe_skip_marker: SkipMarkerProbe | None = None
+    commands: list[str] = field(default_factory=list)
+
+
+def is_locally_observable(nodeid: str | None, config: PipelineConfig) -> bool:
+    """Return whether a nodeid is within the configured local observation scope."""
+    return nodeid is not None and any(
+        nodeid.startswith(prefix) for prefix in config.local_item_scope
+    )
+
+
+def _unobservable(criterion: str, commands: Sequence[str], detail: str) -> CriterionEvidence:
+    return CriterionEvidence(
+        criterion=criterion,
+        satisfied=False,
+        commands=list(commands),
+        observations=[detail],
+        reason=ReasonCode.CRITERION_NOT_MET,
+    )
+
+
+def verify_lane2(
+    candidate: Candidate,
+    *,
+    base_sha: str,
+    head_sha: str,
+    observers: Observers,
+    config: PipelineConfig,
+) -> tuple[CriterionEvidence, RedBaselineResult | None]:
+    """Evaluate LANE 2's green-at-head criterion."""
+    criterion = candidate.success_criterion or LANE2_CRITERION
+    nodeid = candidate.nodeid
+    if config.ci_evidence_mode is not CiEvidenceMode.LOCAL and not is_locally_observable(
+        nodeid, config
+    ):
+        return (
+            CriterionEvidence(
+                criterion=criterion,
+                satisfied=None,
+                stage="pre_pr",
+                commands=[],
+                observations=[
+                    f"{nodeid} is outside local_item_scope; "
+                    "deferring the criterion to CI evidence at the PR head"
+                ],
+                reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+            ),
+            None,
+        )
+    if observers.run_item is None or nodeid is None:
+        return (
+            _unobservable(criterion, (), "no local checkout was available to run the nodeid"),
+            None,
+        )
+    head_run = observers.run_item(head_sha, nodeid)
+    commands = [head_run.command]
+    observations = [
+        f"{outcome.nodeid}: {outcome.outcome.value} at head" for outcome in head_run.outcomes
+    ]
+    if head_run.reason is not None:
+        if (
+            config.ci_evidence_mode is not CiEvidenceMode.LOCAL
+            and head_run.reason is ReasonCode.CAPABILITY_UNAVAILABLE
+        ):
+            return (
+                CriterionEvidence(
+                    criterion=criterion,
+                    satisfied=None,
+                    stage="pre_pr",
+                    commands=commands,
+                    observations=observations
+                    + [
+                        "test capability was unavailable at head",
+                        "the local run could not observe the nodeid; "
+                        "deferring the criterion to CI evidence at the PR head",
+                    ],
+                    reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+                ),
+                None,
+            )
+        return (
+            CriterionEvidence(
+                criterion=criterion,
+                satisfied=False,
+                commands=commands,
+                observations=observations + ["test capability was unavailable at head"],
+                reason=head_run.reason,
+            ),
+            None,
+        )
+    green = bool(head_run.outcomes) and all(
+        outcome.outcome is ItemOutcome.PASSED for outcome in head_run.outcomes
+    )
+    if not green:
+        return (
+            CriterionEvidence(
+                criterion=criterion,
+                satisfied=False,
+                commands=commands,
+                observations=observations,
+                reason=ReasonCode.GREEN_NOT_REACHED,
+            ),
+            None,
+        )
+    return (
+        CriterionEvidence(
+            criterion=criterion,
+            satisfied=True,
+            commands=commands,
+            observations=observations,
+        ),
+        None,
+    )
+
+
+def _suite_evidence(
+    candidate: Candidate,
+    criterion: str,
+    *,
+    head_sha: str,
+    observers: Observers,
+    commands: list[str],
+    observations: list[str],
+    config: PipelineConfig,
+    check_context: str,
+    stage: Stage,
+) -> CriterionEvidence | None:
+    """Return failing suite evidence, or None when the suite is green."""
+    if config.ci_evidence_mode is not CiEvidenceMode.LOCAL:
+        if stage != "post_pr":
+            return CriterionEvidence(
+                criterion=criterion,
+                satisfied=None,
+                stage=stage,
+                commands=commands,
+                observations=observations,
+                reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+            )
+        if observers.read_ci_suite is None:
+            return CriterionEvidence(
+                criterion=criterion,
+                satisfied=False,
+                stage=stage,
+                commands=commands,
+                observations=observations,
+                reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+            )
+        suite = observers.read_ci_suite(head_sha, check_context)
+        commands.append(suite.command)
+        observations.append(
+            f"{check_context} check at {head_sha}: "
+            f"{suite.conclusion or ('success' if suite.passed else 'failure')}"
+        )
+        if suite.reason is not None:
+            return CriterionEvidence(
+                criterion=criterion,
+                satisfied=False,
+                stage=stage,
+                commands=commands,
+                observations=observations,
+                reason=suite.reason,
+            )
+        if not suite.passed:
+            observations.extend(f"failing nodeid: {nodeid}" for nodeid in suite.failing_nodeids)
+            return CriterionEvidence(
+                criterion=criterion,
+                satisfied=False,
+                stage=stage,
+                commands=commands,
+                observations=observations,
+                reason=ReasonCode.SUITE_REGRESSED,
+            )
+        return None
+    if observers.run_suite is None:
+        return _unobservable(
+            criterion,
+            commands,
+            "no local checkout was available to run the suite over suite_scope",
+        )
+    scope = list(candidate.suite_scope)
+    suite = observers.run_suite(scope, head_sha)
+    commands.append(suite.command)
+    observations.append(
+        f"suite over {', '.join(scope) or 'default scope'}: "
+        f"{'passed' if suite.passed else 'failed'}"
+    )
+    if suite.passed:
+        return None
+    observations.extend(f"failing nodeid: {nodeid}" for nodeid in suite.failing_nodeids)
+    return CriterionEvidence(
+        criterion=criterion,
+        satisfied=False,
+        commands=commands,
+        observations=observations,
+        reason=ReasonCode.SUITE_REGRESSED,
+    )
+
+
+def verify_lane1(
+    candidate: Candidate,
+    *,
+    head_sha: str,
+    observers: Observers,
+    config: PipelineConfig,
+    stage: Stage = "pre_pr",
+) -> CriterionEvidence:
+    """Evaluate LANE 1's alert-absence plus suite-green criterion."""
+    criterion = candidate.success_criterion or LANE1_CRITERION
+    commands: list[str] = []
+    observations: list[str] = []
+    alert_stage = (
+        "post_pr" if config.lane1_alert_check is Lane1AlertCheck.PR_REF_ALERTS else "pre_pr"
+    )
+    if stage != alert_stage:
+        suite_failure = _suite_evidence(
+            candidate,
+            criterion,
+            head_sha=head_sha,
+            observers=observers,
+            commands=commands,
+            observations=observations,
+            config=config,
+            check_context=config.suite_check_context,
+            stage="post_pr" if stage == "post_pr" else "pre_pr",
+        )
+        if suite_failure is not None:
+            return suite_failure
+        observations.append(
+            f"alert absence is observed at the {alert_stage} stage under "
+            f"{config.lane1_alert_check.value}"
+        )
+        return CriterionEvidence(
+            criterion=criterion,
+            satisfied=None,
+            stage="pre_pr" if stage == "pre_pr" else "post_pr",
+            commands=commands,
+            observations=observations,
+        )
+    if observers.probe_alerts is None:
+        return _unobservable(
+            criterion,
+            commands,
+            f"alerts could not be read at the candidate head under "
+            f"{config.lane1_alert_check.value}",
+        )
+    observation = observers.probe_alerts(candidate, head_sha)
+    commands.append(observation.command)
+    if not observation.available:
+        return CriterionEvidence(
+            criterion=criterion,
+            satisfied=False,
+            stage="post_pr" if stage == "post_pr" else "pre_pr",
+            commands=commands,
+            observations=[observation.detail or "alert analysis did not complete in time"],
+            reason=ReasonCode.CRITERION_NOT_MET,
+        )
+    present = candidate.stable_locator in observation.locators
+    observations.append(f"stable_locator {'still present' if present else 'absent'} at {head_sha}")
+    if present:
+        return CriterionEvidence(
+            criterion=criterion,
+            satisfied=False,
+            stage="post_pr" if stage == "post_pr" else "pre_pr",
+            commands=commands,
+            observations=observations,
+            reason=ReasonCode.ALERT_STILL_PRESENT,
+        )
+    suite_failure = _suite_evidence(
+        candidate,
+        criterion,
+        head_sha=head_sha,
+        observers=observers,
+        commands=commands,
+        observations=observations,
+        config=config,
+        check_context=config.suite_check_context,
+        stage="post_pr" if stage == "post_pr" else "pre_pr",
+    )
+    if suite_failure is not None:
+        return suite_failure
+    return CriterionEvidence(
+        criterion=criterion,
+        satisfied=True,
+        stage="post_pr" if stage == "post_pr" else "pre_pr",
+        commands=commands,
+        observations=observations,
+    )
+
+
+def verify_lane3(
+    candidate: Candidate,
+    *,
+    head_sha: str,
+    observers: Observers,
+    config: PipelineConfig,
+    stage: Stage = "pre_pr",
+) -> CriterionEvidence:
+    """Evaluate LANE 3's symbol-absence plus suite-green criterion."""
+    criterion = candidate.success_criterion or LANE3_CRITERION
+    if observers.probe_symbol is None:
+        return _unobservable(
+            criterion,
+            (),
+            "no local checkout was available to re-check the symbol at head",
+        )
+    observation = observers.probe_symbol(candidate, head_sha)
+    commands = [observation.command]
+    if not observation.available:
+        return CriterionEvidence(
+            criterion=criterion,
+            satisfied=False,
+            commands=commands,
+            observations=[observation.detail or "symbol source observation unavailable"],
+            reason=ReasonCode.CAPABILITY_UNAVAILABLE,
+        )
+    resolution = "still resolves" if observation.resolves else "no longer resolves"
+    observations = [
+        f"symbol {resolution} at {head_sha}",
+        f"callers: {observation.caller_count}, overrides: {observation.override_count}",
+    ]
+    observations.extend(f"reference: {reference}" for reference in observation.references)
+    if observation.resolves or observation.caller_count or observation.override_count:
+        return CriterionEvidence(
+            criterion=criterion,
+            satisfied=False,
+            commands=commands,
+            observations=observations,
+            reason=ReasonCode.SYMBOL_STILL_REFERENCED,
+        )
+    suite_failure = _suite_evidence(
+        candidate,
+        criterion,
+        head_sha=head_sha,
+        observers=observers,
+        commands=commands,
+        observations=observations,
+        config=config,
+        check_context=config.suite_check_context,
+        stage="post_pr" if stage == "post_pr" else "pre_pr",
+    )
+    if suite_failure is not None:
+        return suite_failure
+    return CriterionEvidence(
+        criterion=criterion,
+        satisfied=True,
+        stage="post_pr" if stage == "post_pr" else "pre_pr",
+        commands=commands,
+        observations=observations,
+    )
+
+
+def verify_candidate(
+    candidate: Candidate,
+    *,
+    base_sha: str,
+    head_sha: str,
+    observers: Observers,
+    config: PipelineConfig,
+    stage: Stage = "pre_pr",
+) -> tuple[CriterionEvidence, RedBaselineResult | None]:
+    """Evaluate the candidate's lane criterion at the requested stage."""
+    if candidate.lane is Lane.SKIPPED_TESTS:
+        if stage != "pre_pr":
+            criterion = candidate.success_criterion or LANE2_CRITERION
+            post_commands: list[str] = []
+            post_observations: list[str] = []
+            nodeid = candidate.nodeid
+            check_context = (
+                config.suite_check_context
+                if is_locally_observable(nodeid, config)
+                else config.integration_suite_check_context
+            )
+            if observers.probe_skip_marker is None:
+                return (
+                    CriterionEvidence(
+                        criterion=criterion,
+                        satisfied=False,
+                        stage="post_pr",
+                        commands=post_commands,
+                        observations=["skip-marker source observation seam is unavailable"],
+                        reason=ReasonCode.CAPABILITY_UNAVAILABLE,
+                    ),
+                    None,
+                )
+            marker = observers.probe_skip_marker(candidate, head_sha)
+            post_commands.append(marker.command)
+            if not marker.available:
+                return (
+                    CriterionEvidence(
+                        criterion=criterion,
+                        satisfied=False,
+                        stage="post_pr",
+                        commands=post_commands,
+                        observations=[
+                            marker.detail or "skip-marker source observation unavailable"
+                        ],
+                        reason=ReasonCode.CAPABILITY_UNAVAILABLE,
+                    ),
+                    None,
+                )
+            if marker.present:
+                found = ", ".join(marker.markers) if marker.markers else "unknown marker"
+                return (
+                    CriterionEvidence(
+                        criterion=criterion,
+                        satisfied=False,
+                        stage="post_pr",
+                        commands=post_commands,
+                        observations=[f"skip marker(s) still present at {head_sha}: {found}"],
+                        reason=ReasonCode.GREEN_NOT_REACHED,
+                    ),
+                    None,
+                )
+            post_observations.append(f"skip marker absent at {head_sha}")
+            suite_failure = _suite_evidence(
+                candidate,
+                criterion,
+                head_sha=head_sha,
+                observers=observers,
+                commands=post_commands,
+                observations=post_observations,
+                config=config,
+                check_context=check_context,
+                stage="post_pr",
+            )
+            if suite_failure is not None:
+                return suite_failure, None
+            return (
+                CriterionEvidence(
+                    criterion=criterion,
+                    satisfied=True,
+                    stage="post_pr",
+                    commands=post_commands,
+                    observations=post_observations,
+                ),
+                None,
+            )
+        return verify_lane2(
+            candidate,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            observers=observers,
+            config=config,
+        )
+    if candidate.lane is Lane.CODEQL:
+        return (
+            verify_lane1(
+                candidate,
+                head_sha=head_sha,
+                observers=observers,
+                config=config,
+                stage=stage,
+            ),
+            None,
+        )
+    if stage != "pre_pr":
+        criterion = candidate.success_criterion or LANE3_CRITERION
+        lane3_commands: list[str] = []
+        lane3_observations: list[str] = []
+        suite_failure = _suite_evidence(
+            candidate,
+            criterion,
+            head_sha=head_sha,
+            observers=observers,
+            commands=lane3_commands,
+            observations=lane3_observations,
+            config=config,
+            check_context=config.suite_check_context,
+            stage="post_pr",
+        )
+        if suite_failure is not None:
+            return suite_failure, None
+        return (
+            CriterionEvidence(
+                criterion=criterion,
+                satisfied=True,
+                stage="post_pr",
+                commands=lane3_commands,
+                observations=lane3_observations,
+            ),
+            None,
+        )
+    return (
+        verify_lane3(
+            candidate,
+            head_sha=head_sha,
+            observers=observers,
+            config=config,
+            stage=stage,
+        ),
+        None,
+    )
+
+
+def post_pr_criterion_pending(candidate: Candidate, config: PipelineConfig) -> bool:
+    """Return whether this candidate still owes post-PR criterion evidence."""
+    if candidate.lane is Lane.CODEQL and config.lane1_alert_check is Lane1AlertCheck.PR_REF_ALERTS:
+        return True
+    return config.ci_evidence_mode is not CiEvidenceMode.LOCAL
+
+
+__all__ = [
+    "AlertObservation",
+    "AlertProbe",
+    "ItemRunResult",
+    "ItemRunner",
+    "LANE1_CRITERION",
+    "LANE2_CRITERION",
+    "LANE3_CRITERION",
+    "Observers",
+    "SkipMarkerObservation",
+    "SkipMarkerProbe",
+    "SuiteResult",
+    "SuiteRunner",
+    "SymbolObservation",
+    "SymbolProbe",
+    "declare_success_criterion",
+    "is_locally_observable",
+    "post_pr_criterion_pending",
+    "verify_candidate",
+    "verify_lane1",
+    "verify_lane2",
+    "verify_lane3",
+]

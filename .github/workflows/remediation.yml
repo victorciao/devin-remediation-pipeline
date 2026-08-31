@@ -1,0 +1,100 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+name: Remediation
+
+on:
+  repository_dispatch:
+    types: [codeql-scan-completed]
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      only_lanes:
+        description: Optional lane restriction; empty means enumerate all three lanes
+        required: false
+        default: ""
+      budget_n:
+        description: High-tier dispatch budget
+        required: false
+        default: "1"
+      max_sessions:
+        description: Session ceiling
+        required: false
+        default: "1"
+      tier_high_min:
+        description: High-tier score threshold
+        required: false
+        default: ""
+
+concurrency:
+  group: remediation-pipeline
+  cancel-in-progress: false
+
+jobs:
+  remediate:
+    runs-on: ubuntu-latest
+    env:
+      DEVIN_API_KEY: ${{ secrets.DEVIN_API_KEY }}
+      GITHUB_PAT_REMEDIATION: ${{ secrets.REMEDIATION_GITHUB_PAT }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout Superset target
+        uses: actions/checkout@v4
+        with:
+          repository: victorciao/superset
+          path: superset-target
+          token: ${{ secrets.REMEDIATION_GITHUB_PAT }}
+          fetch-depth: 0
+      - name: Configure target Git identity
+        working-directory: superset-target
+        run: |
+          git config user.name "devin-remediation"
+          git config user.email "devin-remediation@users.noreply.github.com"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install package and development dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - name: Run remediation pipeline
+        env:
+          ONLY_LANES: ${{ github.event.inputs.only_lanes || '' }}
+          BUDGET_N: ${{ github.event.inputs.budget_n || '1' }}
+          MAX_SESSIONS: ${{ github.event.inputs.max_sessions || '1' }}
+          TIER_HIGH_MIN: ${{ github.event.inputs.tier_high_min || '' }}
+        run: |
+          args=(
+            --mode=live
+            --repo-path "$GITHUB_WORKSPACE/superset-target"
+            --output-dir "$GITHUB_WORKSPACE/remediation-output"
+            --baseline fixtures/baseline.json
+            --budget-N "$BUDGET_N"
+            --max-sessions "$MAX_SESSIONS"
+            --head-branch "devin/remediation-${{ github.run_id }}"
+          )
+          if [[ -n "$ONLY_LANES" ]]; then
+            args+=(--only-lanes "$ONLY_LANES")
+          fi
+          if [[ -n "$TIER_HIGH_MIN" ]]; then
+            args+=(--tier-high-min "$TIER_HIGH_MIN")
+          fi
+          python -m pipeline "${args[@]}"
+      - name: Upload remediation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: remediation-${{ github.run_id }}
+          path: remediation-output
