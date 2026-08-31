@@ -60,6 +60,7 @@ class AbortedRun:
 
     output_dir: Path
     message: str
+    reads: list[str]
     writes: list[WriteRecord]
 
     def report(self) -> str:
@@ -138,7 +139,7 @@ def live_run(output_dir: Path, tmp_path: Path) -> AbortedRun:
                 head_branch="devin/marker-search",
                 base_branch="master",
             )
-    return AbortedRun(output_dir, str(raised.value), transport.writes)
+    return AbortedRun(output_dir, str(raised.value), transport.reads, transport.writes)
 
 
 @pytest.fixture(scope="module")
@@ -236,8 +237,23 @@ def test_a_marker_search_failure_event_records_the_reason(aborted_run: AbortedRu
     ]
 
     assert len(failures) == 1
-    assert failures[0].reason_detail == MARKER_SEARCH_FAILED
+    assert failures[0].reason_detail == "HTTP 422: Validation Failed"
     assert failures[0].transition_reason is ReasonCode.CAPABILITY_UNAVAILABLE
+
+
+def test_marker_search_uses_one_issue_scoped_paginated_query(
+    aborted_run: AbortedRun,
+) -> None:
+    """§14.1 — production dedupe reads the bounded issue-only marker index."""
+    search_reads = [read for read in aborted_run.reads if read.startswith("/search/issues?")]
+
+    assert len(search_reads) == 1
+    assert (
+        "q=repo%3Avictorciao%2Fsuperset+is%3Aissue+in%3Abody+%22devin-remediation-id%22"
+        in search_reads[0]
+    )
+    assert "per_page=100" in search_reads[0]
+    assert "page=1" in search_reads[0]
 
 
 def test_the_abort_publishes_nothing(aborted_run: AbortedRun) -> None:

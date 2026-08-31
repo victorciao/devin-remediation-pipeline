@@ -100,7 +100,7 @@ class FakeGitHubTransport:
         if path.startswith("/search/issues"):
             if self.marker_search_error is not None:
                 raise self.marker_search_error
-            return {"total_count": self.marker_hits}
+            return {"total_count": self.marker_hits, "items": []}
         if path == "/user":
             return {"login": self.token_login}
         if path.startswith(f"{prefix}/code-scanning/alerts"):

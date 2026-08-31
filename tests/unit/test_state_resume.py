@@ -8,12 +8,14 @@ from typing import Any
 
 import pytest
 
+from pipeline.http_transport import HttpTransportError
 from pipeline.schemas import Candidate, CandidateState, ReasonCode
 from pipeline.state import (
     CandidateStateStore,
     MarkerArtifact,
     MarkerSearchOutcome,
     ResumeAction,
+    build_marker_index,
     decide_resume,
     github_marker_search,
     has_local_artifact,
@@ -562,6 +564,125 @@ def test_github_marker_search_refuses_a_non_unique_or_malformed_result(payload: 
 
     with pytest.raises(ValueError):
         find("marker")
+
+
+def test_marker_index_assembles_issue_markers_across_pages() -> None:
+    """§14.1 — one bounded issue search yields all candidate artifacts."""
+    pages = {
+        1: {
+            "items": [
+                {
+                    "number": 1,
+                    "html_url": ISSUE_URL,
+                    "body": "<!-- devin-remediation-id: codeql-0 -->",
+                },
+                {"number": 2, "html_url": ISSUE_URL, "body": "no marker"},
+                {
+                    "number": 3,
+                    "html_url": PR_URL,
+                    "pull_request": {"url": PR_URL},
+                    "body": "<!-- devin-remediation-id: codeql-pr -->",
+                },
+                {
+                    "number": 5,
+                    "html_url": "https://github.test/victorciao/superset/pull/5",
+                    "body": "<!-- devin-remediation-id: codeql-pr-url -->",
+                },
+            ]
+            + [{}] * 100,
+        },
+        2: {
+            "items": [
+                {
+                    "number": 4,
+                    "html_url": "https://github.test/victorciao/superset/issues/4",
+                    "body": "<!-- devin-remediation-id: skipped-1 -->",
+                }
+            ]
+        },
+    }
+    seen: list[int] = []
+
+    def search(page: int) -> object:
+        seen.append(page)
+        return pages[page]
+
+    assert build_marker_index(search) == {
+        "codeql-0": ISSUE_ARTIFACT,
+        "skipped-1": MarkerArtifact(
+            number=4,
+            url="https://github.test/victorciao/superset/issues/4",
+            is_pull_request=False,
+        ),
+    }
+    assert seen == [1, 2]
+
+
+def test_marker_index_duplicate_issue_orphans_only_that_candidate(tmp_path: Path) -> None:
+    """§14.1 — duplicate issue markers quarantine one candidate, not the run."""
+    pages = [
+        {
+            "items": [
+                {
+                    "number": 1,
+                    "html_url": ISSUE_URL,
+                    "body": (
+                        "<!-- devin-remediation-id: duplicate -->"
+                        "<!-- devin-remediation-id: unique -->"
+                    ),
+                },
+                {
+                    "number": 2,
+                    "html_url": "https://github.test/victorciao/superset/issues/2",
+                    "body": "<!-- devin-remediation-id: duplicate -->",
+                },
+            ]
+        }
+    ]
+    store = store_for(tmp_path, marker_index_search=lambda _page: pages[0])
+
+    assert store.marker_artifact("duplicate") is None
+    assert store.marker_search_orphaned("duplicate") is True
+    assert store.marker_artifact("unique") == ISSUE_ARTIFACT
+    assert store.marker_search_failed is False
+
+
+def test_marker_index_is_built_once_for_many_candidate_lookups(tmp_path: Path) -> None:
+    """§14.1 — the batched search is cached for the store lifetime."""
+    calls: list[int] = []
+
+    def search(page: int) -> object:
+        calls.append(page)
+        return {
+            "items": [
+                {
+                    "number": 1,
+                    "html_url": ISSUE_URL,
+                    "body": "<!-- devin-remediation-id: codeql-0 -->",
+                }
+            ]
+        }
+
+    store = store_for(tmp_path, marker_index_search=search)
+
+    store.marker_artifact("codeql-0")
+    store.marker_artifact("missing")
+    store.marker_artifact("codeql-0")
+
+    assert calls == [1]
+
+
+def test_marker_index_failure_sets_search_detail(tmp_path: Path) -> None:
+    """§14.1 — an unavailable batched search fails closed with its cause."""
+
+    def search(_page: int) -> object:
+        raise HttpTransportError("GitHub request failed with HTTP 403", status_code=403)
+
+    store = store_for(tmp_path, marker_index_search=search)
+
+    assert store.marker_artifact("codeql-0") is None
+    assert store.marker_search_failed is True
+    assert store.marker_search_failure_detail == "HTTP 403: GitHub request failed with HTTP 403"
 
 
 # -- identical-row append suppression ----------------------------------------------------

@@ -89,7 +89,6 @@ from pipeline.state import (
     CandidateStateStore,
     MarkerSearchOutcome,
     StatePreservationError,
-    github_marker_search,
 )
 from pipeline.templates.render import (
     ArtifactValidationError,
@@ -1081,18 +1080,29 @@ def run_once(
         session_transport = UrllibDevinTransport()
     repo_name = f"{config.target_owner}/{config.target_repo}"
     marker_search = None
+    marker_index_search = None
     if github_transport is not None:
         transport_for_search = github_transport
-        marker_search = github_marker_search(
-            lambda marker: transport_for_search.get(
-                "/search/issues?" + urlencode({"q": f'repo:{repo_name} "{marker}"'})
+
+        def search_marker_index(page: int) -> object:
+            return transport_for_search.get(
+                "/search/issues?"
+                + urlencode(
+                    {
+                        "q": f'repo:{repo_name} is:issue in:body "devin-remediation-id"',
+                        "per_page": "100",
+                        "page": str(page),
+                    }
+                )
             )
-        )
+
+        marker_index_search = search_marker_index
     state_store = CandidateStateStore(
         output_dir
         / "state"
         / ("candidates-live.jsonl" if config.mode is Mode.LIVE else "candidates.jsonl"),
         marker_search=marker_search,
+        marker_index_search=marker_index_search,
         require_marker_proof=config.mode is Mode.LIVE,
         artifact_simulated=config.mode is Mode.SIMULATE,
     )
@@ -1177,7 +1187,7 @@ def run_once(
                 event_type="marker_search_failure",
                 run_id=run_id,
                 transition_reason=ReasonCode.CAPABILITY_UNAVAILABLE,
-                reason_detail="marker_search_failed",
+                reason_detail=state_store.marker_search_failure_detail or "marker_search_failed",
             )
         )
     produced = simulate_run(
@@ -1195,7 +1205,12 @@ def run_once(
     if marker_search_failed:
         raise RunAbort(
             f"marker_search_failed: {ReasonCode.CAPABILITY_UNAVAILABLE.value}; "
-            "dedupe capability is unavailable"
+            f"dedupe capability is unavailable"
+            + (
+                f"; {state_store.marker_search_failure_detail}"
+                if state_store.marker_search_failure_detail
+                else ""
+            )
         )
     return run_id, produced
 

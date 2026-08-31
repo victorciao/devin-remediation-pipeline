@@ -131,9 +131,26 @@ class _JsonHttpTransport:
             except HTTPError as exc:
                 headers = {str(key): str(value) for key, value in exc.headers.items()}
                 normalized_headers = {key.casefold(): value for key, value in headers.items()}
-                retryable = exc.code == 429 or (
-                    exc.code == 403 and normalized_headers.get("x-ratelimit-remaining") == "0"
+                body_message: str | None = None
+                try:
+                    raw_error = exc.read()
+                except (OSError, ValueError):
+                    raw_error = b""
+                if raw_error:
+                    try:
+                        parsed_error = json.loads(raw_error.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        parsed_error = None
+                    if isinstance(parsed_error, Mapping) and isinstance(
+                        parsed_error.get("message"), str
+                    ):
+                        body_message = str(parsed_error["message"])
+                rate_limit_signal = (
+                    normalized_headers.get("x-ratelimit-remaining") == "0"
+                    or "retry-after" in normalized_headers
+                    or (body_message is not None and "rate limit" in body_message.casefold())
                 )
+                retryable = exc.code == 429 or (exc.code == 403 and rate_limit_signal)
                 delay = self._retry_delay(headers, clock=time.time())
                 if retryable and attempt + 1 < self._max_attempts:
                     if delay is None:
@@ -144,10 +161,10 @@ class _JsonHttpTransport:
                             time.sleep(delay)
                         waited += delay
                         continue
-                raise HttpTransportError(
-                    f"{self._service_name} request failed with HTTP {exc.code}",
-                    status_code=exc.code,
-                ) from None
+                message = f"{self._service_name} request failed with HTTP {exc.code}"
+                if body_message:
+                    message += f": {body_message}"
+                raise HttpTransportError(message, status_code=exc.code) from None
             except (TimeoutError, URLError, OSError):
                 raise HttpTransportError(f"{self._service_name} request failed") from None
         raise HttpTransportError(f"{self._service_name} request retry limit exceeded")

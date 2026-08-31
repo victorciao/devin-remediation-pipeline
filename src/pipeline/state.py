@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
@@ -51,6 +52,77 @@ class MarkerArtifact:
     number: int
     url: str
     is_pull_request: bool
+
+
+class MarkerIndexBuildError(RuntimeError):
+    """Raised when the batched marker index cannot be built safely."""
+
+
+class DuplicateMarkerIndexError(ValueError):
+    """Raised with the usable index and candidate IDs carrying duplicate issues."""
+
+    def __init__(self, index: dict[str, MarkerArtifact], duplicates: set[str]) -> None:
+        super().__init__("marker index contains duplicate candidate IDs")
+        self.index = index
+        self.duplicates = duplicates
+
+
+_MARKER_PATTERN = re.compile(r"<!-- devin-remediation-id: ([^\s<>]+) -->")
+_MARKER_INDEX_PAGE_SIZE = 100
+_MARKER_INDEX_MAX_PAGES = 10
+
+
+def _marker_failure_detail(exc: Exception) -> str:
+    """Return a sanitized marker-search failure detail."""
+    status_code = getattr(exc, "status_code", None)
+    message = str(exc)
+    if status_code is not None:
+        return f"HTTP {status_code}: {message}"
+    return message or type(exc).__name__
+
+
+def build_marker_index(search_page: Callable[[int], object]) -> dict[str, MarkerArtifact]:
+    """Build an issue-only candidate marker index from bounded search pages."""
+    index: dict[str, MarkerArtifact] = {}
+    duplicates: set[str] = set()
+    for page in range(1, _MARKER_INDEX_MAX_PAGES + 1):
+        response = search_page(page)
+        if not isinstance(response, dict):
+            raise MarkerIndexBuildError("marker search response is not an object")
+        items = response.get("items")
+        if not isinstance(items, list):
+            raise MarkerIndexBuildError("marker search response lacks items")
+        for item in items:
+            if not isinstance(item, dict) or isinstance(item.get("pull_request"), dict):
+                continue
+            url = item.get("html_url")
+            number = item.get("number")
+            body = item.get("body")
+            if (
+                not isinstance(url, str)
+                or not url
+                or "/pull/" in url
+                or not isinstance(number, int)
+            ):
+                continue
+            if not isinstance(body, str):
+                continue
+            artifact = MarkerArtifact(number=number, url=url, is_pull_request=False)
+            for match in _MARKER_PATTERN.finditer(body):
+                candidate_id = match.group(1)
+                previous = index.get(candidate_id)
+                if previous is not None and previous.number != number:
+                    duplicates.add(candidate_id)
+                    index.pop(candidate_id, None)
+                elif candidate_id not in duplicates:
+                    index[candidate_id] = artifact
+        if len(items) < _MARKER_INDEX_PAGE_SIZE:
+            if duplicates:
+                raise DuplicateMarkerIndexError(index, duplicates)
+            return index
+    raise MarkerIndexBuildError(
+        f"marker search pagination exceeded {_MARKER_INDEX_MAX_PAGES} pages"
+    )
 
 
 @dataclass(frozen=True)
@@ -134,18 +206,24 @@ class CandidateStateStore:
         path: Path,
         *,
         marker_search: Callable[[str], MarkerArtifact | None] | None = None,
+        marker_index_search: Callable[[int], object] | None = None,
         require_marker_proof: bool = False,
         artifact_simulated: bool = False,
     ) -> None:
         self._path = path
         self._marker_search = marker_search
+        self._marker_index_search = marker_index_search
         self._require_marker_proof = require_marker_proof
         self._artifact_simulated = artifact_simulated
         self.marker_search_failed = False
+        self.marker_search_failure_detail: str | None = None
         self.quarantined_rows = 0
         self._quarantine_seen: set[str] | None = None
         self._marker_results: dict[str, MarkerArtifact | None] = {}
         self._marker_outcomes: dict[str, MarkerSearchOutcome] = {}
+        self._marker_index: dict[str, MarkerArtifact] | None = None
+        self._marker_index_orphans: set[str] = set()
+        self._marker_index_failed = False
 
     def _read_rows(self) -> list[Candidate]:
         if not self._path.exists():
@@ -217,6 +295,35 @@ class CandidateStateStore:
         """Search the target repository for one candidate's stable marker."""
         if candidate_id in self._marker_results:
             return self._marker_results[candidate_id]
+        if self._marker_index_search is not None:
+            if self._marker_index is None:
+                try:
+                    self._marker_index = build_marker_index(self._marker_index_search)
+                except DuplicateMarkerIndexError as exc:
+                    self._marker_index = exc.index
+                    self._marker_index_orphans = exc.duplicates
+                except Exception as exc:
+                    self.marker_search_failed = True
+                    self._marker_index = {}
+                    self._marker_index_failed = True
+                    self.marker_search_failure_detail = _marker_failure_detail(exc)
+                    self._marker_outcomes[candidate_id] = MarkerSearchOutcome.FAILED
+                    self._marker_results[candidate_id] = None
+                    return None
+            if self._marker_index_failed:
+                self._marker_outcomes[candidate_id] = MarkerSearchOutcome.FAILED
+                self._marker_results[candidate_id] = None
+                return None
+            if candidate_id in self._marker_index_orphans:
+                self._marker_outcomes[candidate_id] = MarkerSearchOutcome.ORPHANED
+                self._marker_results[candidate_id] = None
+                return None
+            result = self._marker_index.get(candidate_id)
+            self._marker_results[candidate_id] = result
+            self._marker_outcomes[candidate_id] = (
+                MarkerSearchOutcome.FOUND if result is not None else MarkerSearchOutcome.ABSENT
+            )
+            return result
         if self._marker_search is None:
             self._marker_outcomes[candidate_id] = MarkerSearchOutcome.UNCONFIGURED
             self._marker_results[candidate_id] = None
@@ -232,8 +339,9 @@ class CandidateStateStore:
             self._marker_outcomes[candidate_id] = MarkerSearchOutcome.ORPHANED
             self._marker_results[candidate_id] = None
             return None
-        except Exception:
+        except Exception as exc:
             self.marker_search_failed = True
+            self.marker_search_failure_detail = _marker_failure_detail(exc)
             self._marker_outcomes[candidate_id] = MarkerSearchOutcome.FAILED
             self._marker_results[candidate_id] = None
             return None
@@ -341,6 +449,9 @@ __all__ = [
     "StatePreservationError",
     "MarkerSearchOutcome",
     "MarkerArtifact",
+    "MarkerIndexBuildError",
+    "DuplicateMarkerIndexError",
+    "build_marker_index",
     "decide_resume",
     "has_local_artifact",
     "github_marker_search",
