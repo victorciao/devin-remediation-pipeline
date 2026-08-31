@@ -57,9 +57,12 @@ configuration errors, blocking capability preconditions, or hard session/cost ce
 
 ## LIVE
 
-LIVE is deliberately guarded and has not been run or proven in this repository. Runtime
-credentials must be supplied through the environment only; they are never accepted from a
-configuration file, Docker build argument, image layer, source file, or log:
+LIVE is deliberately guarded. A constrained LIVE run against `victorciao/superset` created
+30 tracking issues, one remediation branch, and one Devin session; it settled its candidate
+without creating a pull request or merging anything. No independently verified remediation
+has landed in the target repository. Runtime credentials must be supplied through the
+environment only; they are never accepted from a configuration file, Docker build argument,
+image layer, source file, or log:
 
 ```bash
 export DEVIN_API_KEY='...'
@@ -73,8 +76,13 @@ required by §3 0d. Issues, Actions history, Code Scanning, and token identity a
 capability probes; an unmet probe is recorded as `capability_unavailable` or
 `token_capability_missing`, rather than becoming an empty lane. Actions history resolves
 `ci_evidence_mode`; local evidence hard-disables auto-merge.
-The optional `role_session_snapshot_id` setting pins role sessions to a Devin snapshot
+The optional `session_snapshot_id` setting pins role sessions to a Devin snapshot
 prepared for the target repository; it is never hard-coded.
+
+Before LIVE can resolve `ci_evidence_mode`, the target repository must have at least one
+completed `pull_request` Actions run. A freshly created fork does not satisfy this
+precondition until its first pull request exists; otherwise LIVE fails closed with
+`ci_evidence_unavailable`.
 
 After obtaining explicit approval for a target run, provide the Devin-created branch and run:
 
@@ -90,41 +98,46 @@ The command-line entrypoint constructs guarded stdlib HTTP transports for LIVE, 
 read-only GitHub capability preflight before candidate work, and then runs Devin sessions and
 ordered GitHub publication only when the preconditions pass. A missing credential, unreadable
 capability, unavailable required service, missing `--head-branch`, or hard runtime ceiling
-causes a non-zero abort before the relevant work. No LIVE capability probes, remote writes, CI
-evidence, merge behavior, or production results are claimed here because LIVE has not been run.
+causes a non-zero abort before the relevant work. The constrained run demonstrated capability
+preflight, issue and branch publication, Devin session execution, and candidate settlement;
+it did not demonstrate PR creation, merge behavior, or an independently verified remediation.
 
 ## Configuration reference (§13)
 
 | Name | Default | Range / allowed values | Safety behavior |
 |---|---:|---|---|
 | `mode` | `simulate` | `simulate`, `live` | `live` is explicit and credential-gated; unset values default to simulate |
-| `iteration_cap` | `5` | `1..10` | Bounds the implementer/reviewer loop |
 | `coverage_bar` | `0.80` | `0.0..1.0` | Coverage threshold used by review policy |
-| `budget_N` | `10` | `1..25` (`BUDGET_HARD_MAX=25`) | Dispatch overflow is deferred; values above 25 are clamped and recorded as `guardrail_clamped` |
+| `budget_N` | `5` | `1..25` (`BUDGET_HARD_MAX=25`) | Dispatch overflow is deferred; values above 25 are clamped and recorded as `guardrail_clamped` |
 | `score_cap` | `200` | `>0` | Caps calculated scores |
 | `tier_high_min` | `60` | `> tier_medium_min` | High-tier PR routing threshold |
 | `tier_medium_min` | `20` | `>0` | Medium-tier issue routing threshold |
 | `eol_major_lag` | `2` | `>=1` | Major-version age required for EOL |
 | `merge_rate_floor` | `0.50` | `0.0..1.0` | KPI alert threshold |
 | `session_failure_ceiling` | `0.30` | `0.0..1.0` | KPI alert threshold and run safety signal |
-| `max_sessions` | `20` | `>=1` | Per-run hard session ceiling; exceeding it aborts |
+| `max_sessions` | `8` | `>=1` | Per-run hard session ceiling; exceeding it aborts |
+| `session_timeout_s` | `5400.0` | `>0` | Bounds one Devin session |
 | `max_total_acu` | `500.0` | `>0` | Per-run hard ACU ceiling; exceeding it aborts |
 | `kpi_sink` | `local` | `local`, `gsheet` | `gsheet` is rejected in SIMULATE |
-| `major_only_requires_human` | `true` | `true`, `false` | Routing label only; unresolved majors remain ineligible for auto-merge |
-| `alert_source` | `api` | `api`, `sarif_file` | SIMULATE uses the checked-in fixture |
+| `alert_source` | `code_scanning_api` | `code_scanning_api`, `sarif_file` | LANE 1 reads the fork's alerts for `master` and requires the latest CodeQL analysis to sit on `base_sha`; `sarif_file` is the SIMULATE input |
 | `alert_fixture_path` | `fixtures/codeql_alerts.json` | Path | Captured CodeQL/SARIF input |
-| `ci_evidence_mode` | resolved by §3 0d | `actions`, `local` | `local` forces auto-merge off; legacy `github` values map to `actions` |
+| `lane1_alert_check` | `pr_ref_alerts` | `pr_ref_alerts`, `codeql_cli` | Selects the orchestrator-owned LANE 1 alert observation |
+| `alert_analysis_wait_s` | `2700.0` | `>0` | Bounds CodeQL analysis polling |
+| `ci_evidence_mode` | `local` | `actions`, `local` | LIVE may resolve this from Actions history; `local` forces auto-merge off, and stale `github` values are rejected |
+| `suite_check_context` | `Python-Unit` | Non-empty string | Named Actions check context used for suite evidence |
 | `ci_wait_timeout_s` | `5400` | `>0` | Bounds GitHub evidence waiting |
+| `required_contexts_min` | `pre-commit checks` | Non-empty context names | Required completed Actions context for LIVE preflight |
 | `auto_merge_enabled` | `false` | `true`, `false` | Never sufficient alone; forced off for local evidence |
 | `has_issues` | `true` | `true`, `false` | False aborts before writes unless degraded PR-comment sink is selected |
 | `issue_sink` | `issues` | `issues`, `pr_comment` | `pr_comment` marks artifacts/run degraded |
+| `marker_search_enabled` | `true` | `true`, `false` | Enables durable marker reconciliation |
 | `version_source` | `.github/ISSUE_TEMPLATE/bug-report.yml` | Repo-relative path | No concrete release is a startup error |
 | `lane2_class_breadth_max` | `5` | `>=1` | Wider skipped classes fail automatability |
 | `target_owner` | `victorciao` | Non-empty string | GitHub target owner |
 | `target_repo` | `superset` | Non-empty string | GitHub target repository |
 | `rubrics_path` | `config/rubrics.yaml` | Path | Observable rubric tables |
 | `templates_dir` | `templates` | Path | Vendored issue/PR templates |
-| `role_session_snapshot_id` | unset | Optional string | Devin snapshot for target-repository role sessions |
+| `session_snapshot_id` | unset | Optional string | Devin snapshot for target-repository role sessions |
 | `github_token` | unset | Runtime secret | Environment-only; required by LIVE |
 | `devin_api_key` | unset | Runtime secret | Environment-only; required by LIVE |
 
@@ -170,7 +183,9 @@ The Phase 0c baseline is used for burn-down denominators. A lane absent from
 ## Verification status
 
 Verified in this workstream: package import, static checks, baseline reproduction against the
-captured Superset revision (identical except `captured_at`), credential-free SIMULATE, and the
-Docker Compose smoke when a Docker daemon is available. The implementation has not run LIVE;
-therefore live GitHub/Devin probes, remote writes, CI evidence, merge behavior, and production
-PR lifecycle outcomes are not proven.
+captured Superset revision (identical except `captured_at`), credential-free SIMULATE, the
+Docker Compose smoke when a Docker daemon is available, and a constrained LIVE run that
+performed capability preflight, created 30 tracking issues, created one branch, ran one Devin
+session, and settled one candidate without a pull request or merge. No independently verified
+remediation has landed; PR creation, merge behavior, and production remediation outcomes remain
+unproven.
