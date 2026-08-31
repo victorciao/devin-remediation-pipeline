@@ -291,28 +291,32 @@ def run_live_preflight(config: PipelineConfig, transport: GitHubTransport) -> Li
         )
         base_object = _mapping(base_ref.get("object"), "base branch object")
         base_sha = base_object.get("sha")
-        analyses = transport.get(_path(config, "/code-scanning/analyses"))
+        analyses = transport.get(_path(config, "/code-scanning/analyses?ref=refs/heads/master"))
     except HttpTransportError as exc:
         raise PreflightError(
             ReasonCode.CAPABILITY_UNAVAILABLE,
             "cannot read CodeQL analysis freshness",
         ) from exc
-    if analyses is None or (isinstance(analyses, list) and not analyses):
+    python_analyses: list[Mapping[str, object]] = []
+    if isinstance(analyses, list):
+        python_analyses = [
+            analysis
+            for analysis in analyses
+            if isinstance(analysis, Mapping)
+            and analysis.get("ref") in ("refs/heads/master", "master")
+            and analysis.get("category") == "/language:python"
+        ]
+    if not python_analyses:
         raise PreflightError(
             ReasonCode.CAPABILITY_UNAVAILABLE,
-            "target repository has no CodeQL analysis at the target base SHA",
+            "target repository has no master Python CodeQL analysis",
         )
-    if isinstance(analyses, list):
-        latest = analyses[0]
-        if (
-            not isinstance(latest, Mapping)
-            or latest.get("ref") not in (None, "refs/heads/master", "master")
-            or latest.get("commit_sha") != base_sha
-        ):
-            raise PreflightError(
-                ReasonCode.CAPABILITY_UNAVAILABLE,
-                "latest master CodeQL analysis is not fresh at the target base SHA",
-            )
+    latest_python = python_analyses[0]
+    if latest_python.get("commit_sha") != base_sha:
+        raise PreflightError(
+            ReasonCode.CAPABILITY_UNAVAILABLE,
+            "latest master Python CodeQL analysis is not fresh at the target base SHA",
+        )
 
     try:
         identity = _mapping(transport.get("/user"), "token identity")

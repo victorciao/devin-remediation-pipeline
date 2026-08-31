@@ -106,10 +106,18 @@ class FakeGitHubTransport:
         if path.startswith(f"{prefix}/code-scanning/alerts"):
             return self.code_scanning_alerts
         if path.startswith(f"{prefix}/code-scanning/analyses"):
+            if "?ref=refs/heads/master" not in path:
+                return []
             return (
                 self.code_scanning_analyses
                 if self.code_scanning_analyses is not None
-                else [{"commit_sha": self.base_sha, "ref": "refs/heads/master"}]
+                else [
+                    {
+                        "commit_sha": self.base_sha,
+                        "ref": "refs/heads/master",
+                        "category": "/language:python",
+                    }
+                ]
             )
         if path.startswith(f"{prefix}/actions/workflows"):
             return {"total_count": self.workflow_count}

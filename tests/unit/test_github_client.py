@@ -27,9 +27,11 @@ from pipeline.github_client import (
     GitHubClient,
     GitHubResponseError,
     LabelCapabilityError,
+    PreflightError,
     MergedPullRequestError,
     SimulationWriteError,
     publish_artifacts,
+    run_live_preflight,
     wait_for_check_runs,
 )
 from pipeline.http_transport import HttpTransportError
@@ -552,8 +554,74 @@ def test_dispatch_preflight_aborts_when_issues_disabled() -> None:
 
     with pytest.raises(ArtifactUnavailableError):
         publish(transport, config=live_config(has_issues=False))
-
     assert transport.writes == []
+
+
+def test_preflight_ignores_newer_non_master_analysis() -> None:
+    """A fresh master Python analysis remains authoritative over pull-request scans."""
+    transport = FakeGitHubTransport(
+        completed_workflow_runs=True,
+        code_scanning_analyses=[
+            {
+                "commit_sha": "pull-request-sha",
+                "ref": "refs/pull/31/head",
+                "category": "/language:python",
+            },
+            {
+                "commit_sha": BASE_SHA,
+                "ref": "refs/heads/master",
+                "category": "/language:python",
+            },
+        ],
+    )
+
+    run_live_preflight(live_config(), transport)
+
+    assert any(
+        read.endswith("/code-scanning/analyses?ref=refs/heads/master") for read in transport.reads
+    )
+
+
+def test_preflight_rejects_stale_master_python_analysis() -> None:
+    """A master Python analysis on another revision blocks LIVE."""
+    transport = FakeGitHubTransport(
+        completed_workflow_runs=True,
+        code_scanning_analyses=[
+            {
+                "commit_sha": "stale-sha",
+                "ref": "refs/heads/master",
+                "category": "/language:python",
+            }
+        ],
+    )
+
+    with pytest.raises(PreflightError, match="latest master Python CodeQL analysis"):
+        run_live_preflight(live_config(), transport)
+
+
+@pytest.mark.parametrize(
+    "analyses",
+    [
+        [
+            {
+                "commit_sha": BASE_SHA,
+                "ref": "refs/heads/master",
+                "category": "/language:javascript-typescript",
+            }
+        ],
+        [],
+    ],
+    ids=["javascript-only", "empty"],
+)
+def test_preflight_rejects_without_master_python_analysis(analyses: object) -> None:
+    """LIVE requires a master Python analysis, not merely another CodeQL analysis."""
+    transport = FakeGitHubTransport(
+        completed_workflow_runs=True,
+        code_scanning_analyses=analyses,
+    )
+
+    with pytest.raises(PreflightError, match="no master Python CodeQL analysis"):
+        run_live_preflight(live_config(), transport)
 
 
 # -- §10.1/§13 the auto-merge conjunction ------------------------------------------------
