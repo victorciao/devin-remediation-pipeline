@@ -193,3 +193,12 @@ performed capability preflight, created 30 tracking issues, created one branch, 
 session, and settled one candidate without a pull request or merge. No independently verified
 remediation has landed; PR creation, merge behavior, and production remediation outcomes remain
 unproven.
+
+## Automated triggers and secrets
+
+Remediation runs can start from a successful CodeQL `workflow_run` dispatch in the Superset
+fork, the weekly scheduled workflow, or a manual `workflow_dispatch` with lane, budget,
+session, and threshold inputs. The pipeline repository requires repository secrets
+`DEVIN_API_KEY` and `GITHUB_PAT_REMEDIATION`; the Superset fork requires
+`REMEDIATION_DISPATCH_TOKEN` with repository-dispatch rights on the pipeline repository.
+A human must add these secrets; the automation cannot add them.
