@@ -47,6 +47,7 @@ concurrency:
 jobs:
   remediate:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
     env:
       DEVIN_API_KEY: ${{ secrets.DEVIN_API_KEY }}
       GITHUB_PAT_REMEDIATION: ${{ secrets.REMEDIATION_GITHUB_PAT }}
