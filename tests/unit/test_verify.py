@@ -146,7 +146,7 @@ def test_actions_local_capability_failure_defers_and_preserves_attempt() -> None
     assert evidence.reason is ReasonCode.CI_EVIDENCE_UNAVAILABLE
     assert evidence.commands == ["pytest unit"]
     assert "test capability was unavailable at head" in evidence.observations
-    assert "outside local_item_scope" in evidence.observations[-1]
+    assert "local run could not observe the nodeid" in evidence.observations[-1]
 
 
 def test_local_mode_keeps_integration_capability_failure_terminal() -> None:

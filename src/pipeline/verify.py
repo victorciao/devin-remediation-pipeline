@@ -170,11 +170,6 @@ def verify_lane2(
             ),
             None,
         )
-    if nodeid is None:
-        return (
-            _unobservable(criterion, (), "no local checkout was available to run the nodeid"),
-            None,
-        )
     if observers.run_item is None or nodeid is None:
         return (
             _unobservable(criterion, (), "no local checkout was available to run the nodeid"),
@@ -199,7 +194,7 @@ def verify_lane2(
                     observations=observations
                     + [
                         "test capability was unavailable at head",
-                        f"{nodeid} is outside local_item_scope; "
+                        "the local run could not observe the nodeid; "
                         "deferring the criterion to CI evidence at the PR head",
                     ],
                     reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
