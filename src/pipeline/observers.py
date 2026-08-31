@@ -174,8 +174,27 @@ class LocalCheckout:
         if target.exists():
             return target
         target.parent.mkdir(parents=True, exist_ok=True)
+        git_prefix = ("git", "-C", str(self.repo_path))
+        present, _ = self.runner(
+            (*git_prefix, "cat-file", "-e", f"{sha}^{{commit}}"),
+            self.repo_path,
+        )
+        if present != 0:
+            fetched, _ = self.runner(
+                (*git_prefix, "fetch", "--quiet", "origin", sha),
+                self.repo_path,
+            )
+            if fetched != 0:
+                self.runner(
+                    (*git_prefix, "fetch", "--quiet", "origin"),
+                    self.repo_path,
+                )
+                self.runner(
+                    (*git_prefix, "cat-file", "-e", f"{sha}^{{commit}}"),
+                    self.repo_path,
+                )
         self.runner(
-            ("git", "-C", str(self.repo_path), "worktree", "add", "--detach", str(target), sha),
+            (*git_prefix, "worktree", "add", "--detach", str(target), sha),
             self.repo_path,
         )
         return target
