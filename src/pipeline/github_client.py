@@ -173,9 +173,9 @@ def read_named_suite(
     config: PipelineConfig,
     client: GitHubTransport,
     sha: str,
-    context: str = "Python-Unit",
 ) -> SuiteResult:
     """Read one named Actions check conclusion at a revision."""
+    context = config.suite_check_context
     command = f"GET {_path(config, f'/commits/{sha}/check-runs')} context={context}"
     try:
         conclusions = read_check_runs(config, client, sha)
@@ -617,11 +617,12 @@ class GitHubClient:
         return self._transport.get(path)
 
     def read_named_suite(self, sha: str) -> SuiteResult:
-        """Read the configured Python-Unit Actions check at a revision."""
+        """Read the configured Actions suite check at a revision."""
+        context = self._config.suite_check_context
         if self._transport is None:
             return SuiteResult(
                 passed=False,
-                command="GET check-runs context=Python-Unit",
+                command=f"GET check-runs context={context}",
                 reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
             )
         return read_named_suite(self._config, self._transport, sha)

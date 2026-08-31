@@ -125,6 +125,13 @@ def test_local_ci_evidence_hard_disables_auto_merge_on_every_path() -> None:
         ).auto_merge_enabled
         is False
     )
+
+
+def test_suite_check_context_is_environment_configurable() -> None:
+    """The named Actions suite context can be configured for the target fork."""
+    config = load_config(env={"PIPELINE_SUITE_CHECK_CONTEXT": "pre-commit checks"})
+
+    assert config.suite_check_context == "pre-commit checks"
     assert (
         load_config(
             env={"PIPELINE_CI_EVIDENCE_MODE": "local", "PIPELINE_AUTO_MERGE_ENABLED": "true"}

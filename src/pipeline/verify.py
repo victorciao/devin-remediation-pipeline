@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from types import MethodType
 from typing import Literal
 
 from pipeline.config import CiEvidenceMode, Lane1AlertCheck, PipelineConfig
@@ -111,14 +110,6 @@ class Observers:
     probe_symbol: SymbolProbe | None = None
     probe_alerts: AlertProbe | None = None
     commands: list[str] = field(default_factory=list)
-
-    def __post_init__(self) -> None:
-        """Preserve the diff seam for direct LocalCheckout observer construction."""
-        if self.run_item_with_test_diff is not None or not isinstance(self.run_item, MethodType):
-            return
-        owner = self.run_item.__self__
-        if hasattr(owner, "run_item_with_test_diff"):
-            self.run_item_with_test_diff = owner.run_item_with_test_diff
 
 
 def _unobservable(criterion: str, commands: Sequence[str], detail: str) -> CriterionEvidence:
@@ -287,7 +278,7 @@ def _suite_evidence(
         suite = observers.read_ci_suite(head_sha)
         commands.append(suite.command)
         observations.append(
-            f"Python-Unit check at {head_sha}: "
+            f"{config.suite_check_context} check at {head_sha}: "
             f"{suite.conclusion or ('success' if suite.passed else 'failure')}"
         )
         if suite.reason is not None:

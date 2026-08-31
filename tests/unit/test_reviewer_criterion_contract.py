@@ -199,7 +199,11 @@ def test_lane2_red_baseline_applies_the_session_test_path_diff_at_base(tmp_path:
         candidate,
         base_sha=base_sha,
         head_sha=head_sha,
-        observers=Observers(run_item=checkout.run_item, run_suite=checkout.run_suite),
+        observers=Observers(
+            run_item=checkout.run_item,
+            run_item_with_test_diff=checkout.run_item_with_test_diff,
+            run_suite=checkout.run_suite,
+        ),
     )
     assert evidence.satisfied is True, (
         f"red-at-base was measured without the test-path diff: {baseline} {evidence.observations}"
