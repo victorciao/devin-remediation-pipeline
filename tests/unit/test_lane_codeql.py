@@ -197,6 +197,102 @@ def test_business_impact_comes_from_security_severity(
         assert 1 <= factors.business_impact <= 5
 
 
+def test_generic_severity_does_not_enter_the_security_rubric(
+    fixture_config: PipelineConfig,
+) -> None:
+    alert = {
+        "number": 33,
+        "state": "open",
+        "rule": {
+            "id": "zizmor/dangerous-triggers",
+            "severity": "error",
+        },
+        "most_recent_instance": {
+            "message": {"text": "The workflow trigger is dangerous."},
+            "location": {
+                "path": ".github/workflows/remediation-dispatch.yml",
+                "start_line": 27,
+                "end_line": 27,
+                "start_column": 5,
+                "end_column": 24,
+            },
+        },
+    }
+
+    candidate = enumerate_fixture([alert])[0]
+
+    assert candidate.security_severity_level is None
+    factors = resolve_factors(candidate, fixture_config)
+    assert factors.factor_rows["business_impact"] == "default"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (" High ", "high"),
+        ("9.1", "critical"),
+        ("7.5", "high"),
+        ("5.0", "medium"),
+        ("3.0", "low"),
+        ("0", "note"),
+    ],
+)
+def test_security_severity_values_map_to_rubric_rows(
+    raw: str,
+    expected: str,
+) -> None:
+    alert = {
+        "number": 1,
+        "state": "open",
+        "rule": {
+            "id": "py/example",
+            "security_severity_level": raw,
+        },
+        "most_recent_instance": {
+            "message": {"text": "A test alert."},
+            "location": {
+                "path": "superset/example.py",
+                "start_line": 1,
+                "end_line": 1,
+                "start_column": 1,
+                "end_column": 2,
+            },
+        },
+    }
+
+    candidate = enumerate_fixture([alert])[0]
+
+    assert candidate.security_severity_level == expected
+
+
+def test_real_zizmor_alert_can_be_enumerated_and_scored(
+    fixture_config: PipelineConfig,
+) -> None:
+    alert = {
+        "number": 33,
+        "state": "open",
+        "rule": {
+            "id": "zizmor/dangerous-triggers",
+            "severity": "error",
+        },
+        "most_recent_instance": {
+            "message": {"text": "The workflow trigger is dangerous."},
+            "location": {
+                "path": ".github/workflows/remediation-dispatch.yml",
+                "start_line": 27,
+                "end_line": 44,
+                "start_column": 5,
+                "end_column": 24,
+            },
+        },
+    }
+
+    candidate = enumerate_fixture([alert])[0]
+    factors = resolve_factors(candidate, fixture_config)
+
+    assert factors.factor_rows["business_impact"] == "default"
+
+
 def test_enumeration_from_config_uses_the_fixture_source(fixture_config: PipelineConfig) -> None:
     """§5 — with `alert_source = sarif_file` the lane never needs an API reader."""
     candidates = enumerate_from_config(fixture_config, repo_path=TARGET_CHECKOUT, repo=TARGET_REPO)

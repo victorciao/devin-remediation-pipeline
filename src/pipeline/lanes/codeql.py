@@ -17,6 +17,7 @@ from pipeline.verify import declare_success_criterion
 JsonObject = dict[str, object]
 AlertReader = Callable[[str], object]
 RegionReader = Callable[[str, int, int], str]
+_SECURITY_SEVERITY_ROWS = ("critical", "high", "medium", "low", "note")
 
 
 def _mapping(value: object) -> Mapping[str, object]:
@@ -27,6 +28,32 @@ def _mapping(value: object) -> Mapping[str, object]:
 
 def _text(value: object) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _security_severity(raw: str | None) -> str | None:
+    """Map a CodeQL severity value onto a business-impact rubric row.
+
+    Returns None when the alert carries no security severity, so scoring falls back
+    to the configured default anchor. SARIF reports the CVSS score rather than a band.
+    """
+    if raw is None:
+        return None
+    text = raw.strip().lower()
+    if text in _SECURITY_SEVERITY_ROWS:
+        return text
+    try:
+        score = float(text)
+    except ValueError:
+        return None
+    if score >= 9.0:
+        return "critical"
+    if score >= 7.0:
+        return "high"
+    if score >= 4.0:
+        return "medium"
+    if score > 0.0:
+        return "low"
+    return "note"
 
 
 def _integer(value: object) -> int | None:
@@ -292,8 +319,7 @@ def enumerate_codeql_candidates(
             file_path=path,
             normalized_symbol=normalized_symbol,
             alert_number=_integer(alert.get("number")),
-            security_severity_level=_text(rule.get("security_severity_level"))
-            or _text(rule.get("severity")),
+            security_severity_level=_security_severity(_text(rule.get("security_severity_level"))),
             rule_precision=_text(rule.get("precision")) or "medium",
             blast_radius=_blast_radius(repo_path, path),
             updated_at_fresh=fresh,
