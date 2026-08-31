@@ -67,6 +67,8 @@ class SymbolObservation:
     override_count: int
     command: str
     references: tuple[str, ...] = ()
+    available: bool = True
+    detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -428,6 +430,14 @@ def verify_lane3(
         )
     observation = observers.probe_symbol(candidate, head_sha)
     commands = [observation.command]
+    if not observation.available:
+        return CriterionEvidence(
+            criterion=criterion,
+            satisfied=False,
+            commands=commands,
+            observations=[observation.detail or "symbol source observation unavailable"],
+            reason=ReasonCode.CAPABILITY_UNAVAILABLE,
+        )
     resolution = "still resolves" if observation.resolves else "no longer resolves"
     observations = [
         f"symbol {resolution} at {head_sha}",

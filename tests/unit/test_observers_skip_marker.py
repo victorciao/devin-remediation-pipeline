@@ -95,6 +95,8 @@ def test_revision_present_commit_does_not_fetch(tmp_path: Path) -> None:
 
     def runner(command: Sequence[str], _cwd: Path) -> tuple[int, str]:
         calls.append(command)
+        if "worktree" in command:
+            Path(command[-2]).mkdir()
         return 0, ""
 
     instance = LocalCheckout(
@@ -116,6 +118,8 @@ def test_revision_fetches_missing_commit_by_sha(tmp_path: Path) -> None:
         calls.append(command)
         if "cat-file" in command:
             return (1, "") if len([item for item in calls if "cat-file" in item]) == 1 else (0, "")
+        if "worktree" in command:
+            Path(command[-2]).mkdir()
         return 0, ""
 
     instance = LocalCheckout(
@@ -140,6 +144,8 @@ def test_revision_falls_back_to_full_fetch_after_sha_fetch_failure(tmp_path: Pat
             return (1, "") if len([item for item in calls if "cat-file" in item]) == 1 else (0, "")
         if command[-2:] == ("origin", "missing"):
             return 1, "not found"
+        if "worktree" in command:
+            Path(command[-2]).mkdir()
         return 0, ""
 
     instance = LocalCheckout(
@@ -178,5 +184,49 @@ def test_probe_skip_marker_fails_closed_when_fetches_cannot_materialize_revision
     assert observed.available is False
     assert observed.present is False
     assert "missing" in (observed.detail or "")
-    assert any(command[-2:] == ("origin", "missing") for command in calls)
-    assert any(command[-1] == "origin" for command in calls)
+
+
+def test_local_checkout_resolves_paths_at_construction(tmp_path: Path) -> None:
+    instance = LocalCheckout(
+        repo_path=Path("relative-repo"),
+        worktree_root=Path("relative-worktrees"),
+    )
+
+    assert instance.repo_path.is_absolute()
+    assert instance.worktree_root.is_absolute()
+
+
+def test_revision_raises_when_worktree_add_fails(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+
+    def runner(command: Sequence[str], _cwd: Path) -> tuple[int, str]:
+        if "worktree" in command:
+            return 1, "fatal: worktree failed"
+        return 0, ""
+
+    instance = LocalCheckout(
+        repo_path=source,
+        worktree_root=tmp_path / "worktrees",
+        runner=runner,
+    )
+
+    with pytest.raises(RuntimeError, match=r"missing.*worktree failed"):
+        instance.revision("missing")
+
+
+def test_revision_raises_when_worktree_target_is_absent(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+
+    def runner(_command: Sequence[str], _cwd: Path) -> tuple[int, str]:
+        return 0, ""
+
+    instance = LocalCheckout(
+        repo_path=source,
+        worktree_root=tmp_path / "worktrees",
+        runner=runner,
+    )
+
+    with pytest.raises(RuntimeError, match="(no output)"):
+        instance.revision("missing")

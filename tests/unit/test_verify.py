@@ -9,11 +9,13 @@ from pipeline.verify import (
     Observers,
     SkipMarkerObservation,
     SuiteResult,
+    SymbolObservation,
     is_locally_observable,
     verify_candidate,
     verify_lane2,
+    verify_lane3,
 )
-from tests.factories import lane2_candidate
+from tests.factories import lane2_candidate, lane3_candidate
 
 
 def test_lane2_green_head_satisfies_without_running_base() -> None:
@@ -295,3 +297,25 @@ def test_lane2_marker_absent_failing_suite_is_suite_regressed() -> None:
     )
     assert evidence.satisfied is False
     assert evidence.reason is ReasonCode.SUITE_REGRESSED
+
+
+def test_lane3_unavailable_symbol_observation_fails_closed() -> None:
+    evidence = verify_lane3(
+        lane3_candidate(),
+        head_sha="head",
+        observers=Observers(
+            probe_symbol=lambda _candidate, _sha: SymbolObservation(
+                resolves=False,
+                caller_count=0,
+                override_count=0,
+                command="ast probe",
+                available=False,
+                detail="module source unavailable",
+            )
+        ),
+        config=PipelineConfig(),
+    )
+
+    assert evidence.satisfied is False
+    assert evidence.reason is ReasonCode.CAPABILITY_UNAVAILABLE
+    assert evidence.observations == ["module source unavailable"]

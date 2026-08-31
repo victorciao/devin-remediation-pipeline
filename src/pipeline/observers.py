@@ -168,6 +168,10 @@ class LocalCheckout:
     runner: CommandRunner = run_command
     pytest_command: tuple[str, ...] = (sys.executable, "-m", "pytest", "-q", "--tb=no", "-rA")
 
+    def __post_init__(self) -> None:
+        self.repo_path = self.repo_path.resolve()
+        self.worktree_root = self.worktree_root.resolve()
+
     def revision(self, sha: str) -> Path:
         """Materialize ``sha`` as a detached worktree and return its path."""
         target = self.worktree_root / sha
@@ -193,16 +197,26 @@ class LocalCheckout:
                     (*git_prefix, "cat-file", "-e", f"{sha}^{{commit}}"),
                     self.repo_path,
                 )
-        self.runner(
+        code, output = self.runner(
             (*git_prefix, "worktree", "add", "--detach", str(target), sha),
             self.repo_path,
         )
+        if code != 0 or not target.exists():
+            detail = output.strip()[:1000] or "(no output)"
+            raise RuntimeError(f"could not materialize revision {sha} at {target}: {detail}")
         return target
 
     def run_item(self, sha: str, nodeid: str) -> ItemRunResult:
         """Run one nodeid at ``sha`` and report the per-item outcomes observed."""
-        worktree = self.revision(sha)
         command = (*self.pytest_command, nodeid)
+        try:
+            worktree = self.revision(sha)
+        except (OSError, subprocess.SubprocessError, RuntimeError):
+            return ItemRunResult(
+                outcomes=(),
+                command=" ".join(command),
+                reason=ReasonCode.CAPABILITY_UNAVAILABLE,
+            )
         try:
             code, output = self.runner(command, worktree)
         except (FileNotFoundError, OSError):
@@ -290,12 +304,12 @@ class LocalCheckout:
 
     def run_suite(self, scope: Sequence[str], sha: str) -> SuiteResult:
         """Run the suite covering ``scope`` at ``sha``."""
-        worktree = self.revision(sha)
         targets = tuple(path for path in scope if is_test_path(path))
         command = (*self.pytest_command, *targets)
         try:
+            worktree = self.revision(sha)
             code, output = self.runner(command, worktree)
-        except (FileNotFoundError, OSError):
+        except (FileNotFoundError, OSError, subprocess.SubprocessError, RuntimeError):
             return SuiteResult(
                 passed=False,
                 command=" ".join(command),
@@ -325,23 +339,48 @@ class LocalCheckout:
 
     def probe_symbol(self, candidate: Candidate, sha: str) -> SymbolObservation:
         """Re-check a LANE 3 symbol and its reference surface at ``sha``."""
-        worktree = self.revision(sha)
+        command = f"ast re-check of {candidate.module or ''}:{candidate.qualname or ''} at {sha}"
+        try:
+            worktree = self.revision(sha)
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            return SymbolObservation(
+                resolves=False,
+                caller_count=0,
+                override_count=0,
+                command=command,
+                available=False,
+                detail=f"could not materialize revision {sha}: {exc}",
+            )
         module = candidate.module or ""
         qualname = candidate.qualname or ""
         module_path = worktree / (module.replace(".", "/") + ".py")
-        resolves = False
-        if module_path.exists():
-            try:
-                resolves = _qualname_resolves(module_path.read_text(encoding="utf-8"), qualname)
-            except (OSError, SyntaxError, UnicodeDecodeError):
-                resolves = False
+        if not module_path.exists():
+            return SymbolObservation(
+                resolves=False,
+                caller_count=0,
+                override_count=0,
+                command=command,
+                available=False,
+                detail=f"module source file is missing: {module_path}",
+            )
+        try:
+            resolves = _qualname_resolves(module_path.read_text(encoding="utf-8"), qualname)
+        except (OSError, SyntaxError, UnicodeDecodeError) as exc:
+            return SymbolObservation(
+                resolves=False,
+                caller_count=0,
+                override_count=0,
+                command=command,
+                available=False,
+                detail=f"could not parse module source {module_path}: {exc}",
+            )
         symbol = qualname.rsplit(".", 1)[-1]
         callers, overrides = reference_surface(worktree, symbol, module_path, candidate.line or 1)
         return SymbolObservation(
             resolves=resolves,
             caller_count=callers,
             override_count=overrides,
-            command=f"ast re-check of {module}:{qualname} at {sha}",
+            command=command,
         )
 
     def probe_skip_marker(self, candidate: Candidate, sha: str) -> SkipMarkerObservation:
@@ -365,7 +404,7 @@ class LocalCheckout:
             )
         try:
             worktree = self.revision(sha)
-        except (OSError, subprocess.SubprocessError) as exc:
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
             return SkipMarkerObservation(
                 present=False,
                 command=command,
