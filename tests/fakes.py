@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from pipeline.github_client import REQUIRED_CONTEXTS
+from pipeline.config import DEFAULT_REQUIRED_CONTEXTS_MIN
 from pipeline.http_transport import HttpTransportError
 
 OWNER = "victorciao"
@@ -46,8 +46,8 @@ class WriteRecord:
 
 
 def all_contexts(state: str = "success") -> dict[str, str]:
-    """Every one of §10's 13 required contexts reporting the same state."""
-    return {context: state for context in REQUIRED_CONTEXTS}
+    """Every configured minimum required context reporting the same state."""
+    return {context: state for context in DEFAULT_REQUIRED_CONTEXTS_MIN}
 
 
 @dataclass

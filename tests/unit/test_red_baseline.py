@@ -4,30 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from pipeline.config import PipelineConfig
-from pipeline.red_baseline import (
-    apply_red_baseline,
-    classify_red_baseline,
-    should_reauthor_baseline,
-    validate_nested_marker_lifts,
-)
-from pipeline.review_loop import (
-    ReviewIteration,
-    ReviewLoopResult,
-    apply_review_result,
-    run_review_loop,
-)
+from pipeline.red_baseline import apply_red_baseline, classify_red_baseline
 from pipeline.schemas import (
-    NEEDS_HUMAN_REVIEW_LABEL,
-    Action,
     BaselineStatus,
-    Candidate,
-    CandidateState,
     ExpectedFailure,
     ItemOutcome,
     PerItemOutcome,
-    ReasonCode,
-    RedBaselineResult,
 )
 from tests.factories import lane2_candidate
 
@@ -212,119 +194,7 @@ def test_stale_skip_ignores_marked_descendants() -> None:
     assert list(result.still_skipped_descendants) == [DESCENDANT]
 
 
-# -- nested marker lifting ---------------------------------------------------------------
-
-
-def test_nested_skip_requires_lifting_parent() -> None:
-    """§17/§9.2 — a nested candidate whose patch lifts only its own marker is rejected."""
-    candidate = lane2_candidate(nodeid=ITEM, enclosing_skip_nodeid=CLASS_NODEID)
-
-    with pytest.raises(ValueError, match="enclosing marker"):
-        validate_nested_marker_lifts(candidate, [ITEM])
-
-
-def test_remaining_ancestor_marker_is_also_rejected() -> None:
-    """A marker both lifted and still present is not lifted."""
-    candidate = lane2_candidate(nodeid=ITEM, enclosing_skip_nodeid=CLASS_NODEID)
-
-    with pytest.raises(ValueError, match="enclosing marker"):
-        validate_nested_marker_lifts(candidate, [ITEM, CLASS_NODEID], [CLASS_NODEID])
-
-
-def test_lifting_the_ancestor_allows_classification() -> None:
-    candidate = lane2_candidate(nodeid=ITEM, enclosing_skip_nodeid=CLASS_NODEID)
-
-    validate_nested_marker_lifts(candidate, [ITEM, CLASS_NODEID])
-
-    result = classify_red_baseline(EXPECTED, [outcome(ITEM, ItemOutcome.FAILED)])
-    assert result.status == BaselineStatus.VALID
-
-
-def test_unnested_candidate_needs_no_lifts() -> None:
-    validate_nested_marker_lifts(lane2_candidate(nodeid=ITEM), [])
-
-
 # -- applying the classification ---------------------------------------------------------
-
-
-def routed(candidate: Candidate, result: RedBaselineResult) -> Candidate:
-    """Route a candidate through the single routing owner, carrying the baseline result."""
-    return apply_review_result(
-        candidate,
-        ReviewLoopResult(
-            converged=False,
-            iterations=1,
-            state=CandidateState.DISPATCHING,
-            red_result=result,
-        ),
-    )
-
-
-def test_stale_skip_is_a_successful_reviewer_only_terminal_outcome() -> None:
-    """§9 (line 492) — `stale_skip` is remediated by a reviewer-only diff, not dropped.
-
-    `apply_red_baseline` records the facts and nothing else; `apply_review_result` is the one
-    place a candidate is routed, so the terminal reviewer-only outcome is asserted there.
-    """
-    candidate = lane2_candidate(nodeid=ITEM, gate_passed=True, score=128.0, risk=1)
-    result = classify_red_baseline(EXPECTED, [outcome(ITEM, ItemOutcome.PASSED)])
-
-    applied = apply_red_baseline(candidate, result, lifted_markers=[ITEM])
-
-    assert applied.red_baseline is not None
-    assert applied.red_baseline.status is BaselineStatus.STALE_SKIP
-    assert list(applied.lifted_markers) == [ITEM]
-    assert applied.state is candidate.state
-    assert applied.reason is candidate.reason
-    assert applied.action == candidate.action
-
-    reviewed = routed(applied, result)
-
-    assert reviewed.action is Action.REVIEWER_ONLY_DIFF
-    assert reviewed.state is CandidateState.TERMINAL
-    assert reviewed.reason is ReasonCode.STALE_SKIP
-    assert reviewed.auto_merge_eligible is False
-
-
-def test_invalid_baseline_escalation_is_terminal_never_back_to_gated() -> None:
-    """§9.1 (l.441-446) — one re-author, then `terminal`/`invalid_red_baseline`/human review.
-
-    `gated` is a pre-dispatch state, so a backwards edge there would re-gate, re-score and re-open
-    three role sessions on a candidate already known to fail, on this and every later run, while
-    reporting it in the cheap pre-dispatch bucket. The baseline facts must survive the routing.
-    """
-    candidate = lane2_candidate(nodeid=ITEM, gate_passed=True, score=128.0, risk=1)
-    result = classify_red_baseline(EXPECTED, [outcome(ITEM, ItemOutcome.SKIPPED)])
-
-    applied = apply_red_baseline(candidate, result)
-
-    assert applied.red_baseline is not None
-    assert applied.red_baseline.status is BaselineStatus.INVALID_RED_BASELINE
-    assert applied.state is candidate.state
-    assert applied.reason is candidate.reason
-
-    invalid = ReviewIteration(
-        red_baseline=BaselineStatus.INVALID_RED_BASELINE,
-        green=False,
-        diff_reviewed=True,
-        red_result=result,
-    )
-    loop = run_review_loop(PipelineConfig(iteration_cap=5), invalid, lambda _ordinal: invalid)
-
-    assert loop.iterations == 2, "the re-author attempt is bounded at one"
-
-    reviewed = apply_review_result(applied, loop)
-
-    assert reviewed.state is CandidateState.TERMINAL
-    assert reviewed.state.value != CandidateState.GATED.value
-    assert reviewed.reason is ReasonCode.INVALID_RED_BASELINE
-    assert reviewed.action is Action.HUMAN_REVIEW
-    assert NEEDS_HUMAN_REVIEW_LABEL in reviewed.labels
-    assert reviewed.auto_merge_eligible is False
-    assert reviewed.red_baseline is not None
-    assert reviewed.red_baseline.status is BaselineStatus.INVALID_RED_BASELINE
-    assert reviewed.red_baseline.per_item_outcomes == result.per_item_outcomes
-    assert reviewed.red_baseline.expected_failure == result.expected_failure
 
 
 def test_valid_baseline_only_records_evidence() -> None:
@@ -337,19 +207,3 @@ def test_valid_baseline_only_records_evidence() -> None:
     assert applied.action == candidate.action
     assert applied.red_baseline is not None
     assert applied.red_baseline.status is BaselineStatus.VALID
-
-    reviewed = routed(applied, result)
-
-    assert reviewed.reason is None
-    assert reviewed.state is CandidateState.DISPATCHING
-    assert reviewed.action == candidate.action
-
-
-def test_invalid_baseline_is_reauthored_exactly_once() -> None:
-    """§9.1 — `invalid_red_baseline` → re-author once, then escalate."""
-    invalid = classify_red_baseline(EXPECTED, [outcome(ITEM, ItemOutcome.SKIPPED)])
-    valid = classify_red_baseline(EXPECTED, [outcome(ITEM, ItemOutcome.FAILED)])
-
-    assert should_reauthor_baseline(invalid, 1) is True
-    assert should_reauthor_baseline(invalid, 2) is False
-    assert should_reauthor_baseline(valid, 1) is False

@@ -304,7 +304,7 @@ class Candidate(StrictModel):
     suite_scope: list[str] = Field(default_factory=list)
     check_run_conclusions: list[CheckRunConclusion] = Field(default_factory=list)
     session_id: str | None = None
-    role_attempts: dict[str, int] = Field(default_factory=dict)
+    session_attempts: int = Field(default=0, ge=0)
     test_added: bool | None = None
     test_paths: list[str] = Field(default_factory=list)
     test_author: str | None = None
@@ -336,7 +336,7 @@ class EventRecord(StrictModel):
     action: Action | None = None
     merge_mode: MergeMode | None = None
     session_id: str | None = None
-    role_attempts: dict[str, int] = Field(default_factory=dict)
+    session_attempts: int = Field(default=0, ge=0)
     success_criterion: str | None = None
     criterion_evidence: CriterionEvidence | None = None
     suite_scope: list[str] = Field(default_factory=list)

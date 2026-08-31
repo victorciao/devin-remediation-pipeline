@@ -128,7 +128,7 @@ class PipelineConfig(BaseModel):
     devin_api_key: SecretStr | None = None
     rubrics_path: Path = Path("config/rubrics.yaml")
     templates_dir: Path = Path("templates")
-    role_session_snapshot_id: str | None = None
+    session_snapshot_id: str | None = None
 
     def __init__(self, **data: object) -> None:
         """Construct configuration while exposing validation failures consistently."""
@@ -395,7 +395,7 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
         "DEVIN_API_KEY": "devin_api_key",
         "RUBRICS_PATH": "rubrics_path",
         "TEMPLATES_DIR": "templates_dir",
-        "ROLE_SESSION_SNAPSHOT_ID": "role_session_snapshot_id",
+        "SESSION_SNAPSHOT_ID": "session_snapshot_id",
     }
     for key, raw_value in env.items():
         if not key.startswith("PIPELINE_"):

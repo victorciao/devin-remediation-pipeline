@@ -314,8 +314,8 @@ class SessionClient:
             "session_timeout_s": self._limits.session_timeout_s,
             "structured_output_schema": FIX_OUTPUT_SCHEMA,
         }
-        if self._config.role_session_snapshot_id is not None:
-            payload["snapshot_id"] = self._config.role_session_snapshot_id
+        if self._config.session_snapshot_id is not None:
+            payload["snapshot_id"] = self._config.session_snapshot_id
         try:
             if self._config.mode is Mode.SIMULATE:
                 digest = hashlib.sha256(f"{candidate_id}|{attempt}".encode()).hexdigest()[:16]

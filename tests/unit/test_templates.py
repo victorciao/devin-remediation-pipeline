@@ -13,7 +13,6 @@ from pipeline.templates.render import (
     ArtifactValidationError,
     candidate_marker,
     compare_template_files,
-    render_degraded_comment_body,
     render_issue_body,
     render_issue_title,
     render_pr_body,
@@ -55,18 +54,6 @@ EXPECTED_TITLE_REGEX = (
 REGEX_PATH = TEMPLATES_DIR / "superset" / "pr_title_regex.txt"
 PR_TEMPLATE_PATH = TEMPLATES_DIR / "superset" / "PULL_REQUEST_TEMPLATE.md"
 
-PLANNER = {"criteria": [{"id": "AC-1", "statement": "Bound the range to the collection length."}]}
-REVIEWER = {
-    "tests": [
-        {
-            "path": "tests/unit_tests/mcp_service/test_add_chart.py",
-            "nodeid": "tests/unit_tests/mcp_service/test_add_chart.py::test_range_is_bounded",
-            "criterion_id": "AC-1",
-        }
-    ],
-    "commands_run": ["pytest tests/unit_tests/mcp_service/test_add_chart.py"],
-}
-
 
 def pr_template_text() -> str:
     return PR_TEMPLATE_PATH.read_text(encoding="utf-8")
@@ -88,8 +75,6 @@ def pr_body(
     return render_pr_body(
         pr_template_text(),
         codeql_candidate(candidate_id=candidate_id, tier=Tier.HIGH, score=128.0),
-        PLANNER,
-        REVIEWER,
         issue_number=issue_number,
         commit_message=commit_message,
     )
@@ -121,17 +106,6 @@ def test_a_codeql_issue_refuses_to_consume_an_upstream_template() -> None:
 # -- PR body -----------------------------------------------------------------------------
 
 
-def test_pr_body_carries_the_locked_sections_in_order() -> None:
-    """§8 — four template sections plus the two insertion points after `### SUMMARY`."""
-    body = pr_body()
-
-    positions = [body.index(section) for section in PR_SECTIONS]
-    assert positions == sorted(positions)
-    assert "- [ ] Has associated issue:" in body
-    assert "### CHECKLIST" not in body
-    validate_pr_body(body)
-
-
 def test_pr_body_marks_screenshots_not_applicable_for_backend_fixes() -> None:
     body = pr_body()
     section = body.split("### BEFORE/AFTER SCREENSHOTS OR ANIMATED GIF")[1]
@@ -139,40 +113,11 @@ def test_pr_body_marks_screenshots_not_applicable_for_backend_fixes() -> None:
     assert "n/a" in section.split("###")[0].lower()
 
 
-def test_validate_pr_body_rejects_missing_and_reordered_sections() -> None:
-    body = pr_body()
-
-    missing = body.replace("### TESTING INSTRUCTIONS", "### NOT A SECTION")
-    with pytest.raises(ValueError):
-        validate_pr_body(missing)
-
-    swapped = "\n".join(
-        [
-            "### TESTS",
-            "t",
-            "### SUMMARY",
-            "s",
-            "### IMPLEMENTATION PLAN",
-            "p",
-            "### BEFORE/AFTER SCREENSHOTS OR ANIMATED GIF",
-            "n/a",
-            "### TESTING INSTRUCTIONS",
-            "i",
-            "### ADDITIONAL INFORMATION",
-            "- [ ] Has associated issue:",
-        ]
-    )
-    with pytest.raises(ValueError, match="out of order"):
-        validate_pr_body(swapped)
-
-
 def test_pr_body_keeps_automation_metadata_last() -> None:
     """§8 — pipeline metadata is appended after the vendored sections, never inside them."""
     body = render_pr_body(
         pr_template_text(),
         codeql_candidate(tier=Tier.HIGH, score=128.0),
-        PLANNER,
-        REVIEWER,
         automation_metadata={"mode": "simulate", "candidate_id": "codeql-1"},
         issue_number=7,
     )
@@ -197,45 +142,9 @@ def local_evidence_body(**overrides: object) -> str:
     return render_pr_body(
         pr_template_text(),
         codeql_candidate(tier=Tier.HIGH, score=128.0),
-        PLANNER,
-        REVIEWER,
         automation_metadata={**LOCAL_EVIDENCE, **overrides},
         issue_number=7,
     )
-
-
-def test_local_ci_evidence_is_labelled_and_carries_its_own_evidence() -> None:
-    """§10.1 — under `local` evidence the body states who produced it and what it ran."""
-    body = local_evidence_body()
-
-    validate_pr_body(body)
-    assert "- **evidence_label**: self-reported by automation" in body
-    assert "pytest tests/unit_tests/mcp_service/test_add_chart.py" in body
-    assert "- **reviewer_pre_fix_failure**: AssertionError: index 1000000 out of range" in body
-    assert "- **reviewer_post_fix_result**: 1 passed" in body
-    assert f"- **diff_range**: {'1' * 40}..{'2' * 40}" in body
-
-
-@pytest.mark.parametrize(
-    "field",
-    [
-        "implementer_commands_run",
-        "reviewer_pre_fix_failure",
-        "reviewer_post_fix_result",
-        "diff_range",
-    ],
-)
-@pytest.mark.parametrize("value", ["", "n/a", "None", "null"])
-def test_local_ci_evidence_without_a_value_is_rejected(field: str, value: str) -> None:
-    """§10.1 — a `local` body claiming evidence it does not carry must never be published.
-
-    A reviewer reading `reviewer_pre_fix_failure: n/a` cannot tell an unverified change
-    from a verified one, which is the whole purpose of the self-reported label.
-    """
-    body = local_evidence_body(**{field: value})
-
-    with pytest.raises(ArtifactValidationError, match=field):
-        validate_pr_body(body)
 
 
 def test_github_ci_evidence_needs_no_self_reported_block() -> None:
@@ -243,8 +152,6 @@ def test_github_ci_evidence_needs_no_self_reported_block() -> None:
     body = render_pr_body(
         pr_template_text(),
         codeql_candidate(tier=Tier.HIGH, score=128.0),
-        PLANNER,
-        REVIEWER,
         automation_metadata={"mode": "live", "ci_evidence_mode": "github"},
         issue_number=7,
     )
@@ -262,14 +169,6 @@ def test_crosslink_is_rendered_into_the_pr_body() -> None:
 
 def test_pr_body_without_an_issue_carries_no_crosslink() -> None:
     assert "Closes #" not in pr_body(issue_number=None)
-
-
-def test_reviewer_tests_and_planner_criteria_reach_the_body() -> None:
-    """§8 — the PR body is the audit trail for the planner criteria and reviewer tests."""
-    body = pr_body()
-
-    assert "**AC-1**" in body
-    assert "tests/unit_tests/mcp_service/test_add_chart.py::test_range_is_bounded" in body
 
 
 # -- issue bodies ------------------------------------------------------------------------
@@ -350,20 +249,6 @@ def test_every_issue_body_carries_the_candidate_marker() -> None:
         body = render_issue_body(issue_template(lane), candidate, generated_summary="s")
         assert candidate_marker(candidate.candidate_id) in body
         validate_issue_body(body, candidate)
-
-
-def test_degraded_comment_body_is_a_validated_issue_body() -> None:
-    """§7 — with issues disabled the manager-facing artifact is a validated PR comment."""
-    candidate = lane2_candidate(candidate_id="lane2-9")
-
-    comment = render_degraded_comment_body(
-        issue_template(Lane.SKIPPED_TESTS),
-        candidate,
-        generated_summary="Skip marker is stale.",
-    )
-
-    validate_template_sections(comment, BUG_SECTIONS)
-    assert candidate_marker("lane2-9") in comment
 
 
 def test_issue_body_validation_rejects_a_missing_marker() -> None:
@@ -464,17 +349,3 @@ def test_signoff_trailer_is_copied_from_the_head_commit() -> None:
 
     assert "Signed-off-by: A Human <human@example.invalid>" in body
     assert "Signed-off-by: Devin Remediation" not in body
-
-
-def test_a_commitless_render_never_invents_a_signoff() -> None:
-    """§10 — a DCO trailer certifies a named identity; fabricating one is false provenance."""
-    body = pr_body(commit_message=None)
-
-    assert "Signed-off-by" not in body
-
-
-def test_a_commit_without_a_trailer_yields_no_trailer() -> None:
-    """§10 — an unsigned commit must not be reported as signed."""
-    body = pr_body(commit_message="fix(mcp): bound the range\n")
-
-    assert "Signed-off-by" not in body

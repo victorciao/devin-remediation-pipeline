@@ -35,16 +35,6 @@ SUPPRESSED_WORDING = "Writes are suppressed; no remote artifact exists."
 LIVE_WORDING = "Remediation tracking for"
 LIVE_STATE_FILE = "candidates-live.jsonl"
 SIMULATE_STATE_FILE = "candidates.jsonl"
-ROLE_OUTPUTS: dict[str, Any] = {
-    "planner_outputs": {"codeql-pr": {"criteria": [{"id": "AC-1"}]}},
-    "implementer_outputs": {"codeql-pr": {"commands_run": ["pytest -q"]}},
-    "reviewer_outputs": {
-        "codeql-pr": {
-            "red_baseline": {"status": "valid"},
-            "green_result": {"passed": True},
-        }
-    },
-}
 
 
 def config_for(mode: Mode, **fields: Any) -> PipelineConfig:  # noqa: ANN401
@@ -153,7 +143,7 @@ def test_live_pr_bodies_do_not_claim_that_writes_were_suppressed(tmp_path: Path)
     The metadata block is the role loop's local evidence, so it is rendered from the
     implementer and reviewer outputs the loop produced for this candidate.
     """
-    render(Mode.LIVE, tmp_path / "out", **ROLE_OUTPUTS)
+    render(Mode.LIVE, tmp_path / "out")
     body = (tmp_path / "out" / "reports" / "prs" / "codeql-pr.md").read_text(encoding="utf-8")
 
     assert "**mode**: live" in body
@@ -177,7 +167,7 @@ def test_a_simulated_body_says_on_its_face_that_no_write_happened(tmp_path: Path
     A rendered body is a file someone can open months later with no memory of the mode it came
     from, so the heading and the suppression statement travel with the body itself.
     """
-    render(Mode.SIMULATE, tmp_path / "out", **ROLE_OUTPUTS)
+    render(Mode.SIMULATE, tmp_path / "out")
     bodies = issue_bodies(tmp_path / "out")
 
     assert bodies != {}

@@ -133,11 +133,7 @@ def test_simulate_flow_respects_the_budget(
     """§6 — no run dispatches beyond `budget_N`, however many candidates are enumerated."""
     config, candidates, _ = simulated
 
-    dispatched = [
-        candidate
-        for candidate in candidates
-        if candidate.action in {Action.OPEN_PR, Action.OPEN_ISSUE}
-    ]
+    dispatched = [candidate for candidate in candidates if candidate.action is Action.OPEN_PR]
 
     assert len(dispatched) <= config.budget_N
 

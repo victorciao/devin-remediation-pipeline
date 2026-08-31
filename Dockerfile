@@ -1,6 +1,9 @@
 FROM python:3.11-slim
 
 ENV PIPELINE_MODE=simulate \
+    PIPELINE_RUBRICS_PATH=/app/config/rubrics.yaml \
+    PIPELINE_TEMPLATES_DIR=/app/templates \
+    PIPELINE_ALERT_FIXTURE_PATH=/app/fixtures/codeql_alerts.json \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 

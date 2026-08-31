@@ -411,6 +411,7 @@ class CandidateRunner:
             candidate,
             state=CandidateState.SESSION_DONE,
             session_id=run.attempt.session_id,
+            session_attempts=run.attempt.attempt,
             head_sha=head_sha,
             test_nodeid=output.test_nodeid or candidate.nodeid,
             test_paths=list(output.test_paths),
@@ -1125,13 +1126,17 @@ def run_once(
     notes.extend(_capability_notes(baseline, target_exists=target_exists, config=config))
     if state_store.quarantined_rows:
         notes.append(f"state rows quarantined: {state_store.quarantined_rows}")
-    if state_store.marker_search_failed:
-        notes.append("marker search failed; affected candidates were deferred without a write")
+    marker_search_failed = state_store.marker_search_failed
+    if marker_search_failed:
+        notes.append(
+            "marker search failed; no candidate can be dispatched while dedupe capability "
+            "is unavailable"
+        )
         run_events.append(
             RunEventRecord(
                 event_type="marker_search_failure",
                 run_id=run_id,
-                transition_reason=ReasonCode.MARKER_SEARCH_FAILED,
+                transition_reason=ReasonCode.CAPABILITY_UNAVAILABLE,
                 reason_detail="marker_search_failed",
             )
         )
@@ -1147,6 +1152,11 @@ def run_once(
         token_scopes=preflight.token_scopes if preflight is not None else (),
         run_events=run_events,
     )
+    if marker_search_failed:
+        raise RunAbort(
+            f"marker_search_failed: {ReasonCode.CAPABILITY_UNAVAILABLE.value}; "
+            "dedupe capability is unavailable"
+        )
     return run_id, produced
 
 

@@ -159,8 +159,7 @@ def render_run_report(
             f"- Gated candidates: {gated_count}",
             f"- Reached dispatching but unpublished: {unpublished_count}",
             f"- Publication safety undetermined: {safety_undetermined_count}",
-            f"- Session attempts: "
-            f"{sum(sum(candidate.role_attempts.values()) for candidate in rows)}",
+            f"- Session attempts: {sum(candidate.session_attempts for candidate in rows)}",
             f"- Sessions created: {sum(candidate.session_id is not None for candidate in rows)}",
             f"- Awaiting human merge: "
             f"{sum(candidate.state is CandidateState.AWAITING_HUMAN_MERGE for candidate in rows)}",

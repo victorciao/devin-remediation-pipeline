@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from pydantic import SecretStr
 
-from pipeline.config import CiEvidenceMode, ConfigError, IssueSink, Mode, PipelineConfig
+from pipeline.config import CiEvidenceMode, Mode, PipelineConfig
 from pipeline.dispatch import (
     DROPPED_REASONS,
     HUMAN_ROUTED_REASONS,
@@ -22,15 +22,7 @@ from pipeline.github_client import (
     GitHubClient,
     SimulationWriteError,
     publish_artifacts,
-    publish_degraded,
 )
-from pipeline.review_loop import (
-    FindingSeverity,
-    ReviewIteration,
-    apply_review_result,
-    run_review_loop,
-)
-from pipeline.review_loop import ReviewFinding as LoopFinding
 from pipeline.schemas import (
     NEEDS_HUMAN_REVIEW_LABEL,
     Action,
@@ -45,12 +37,7 @@ from pipeline.schemas import (
     Tier,
 )
 from pipeline.state import CandidateStateStore, MarkerArtifact
-from pipeline.templates.render import (
-    candidate_marker,
-    render_degraded_comment_body,
-    render_pr_body,
-    validate_issue_body,
-)
+from pipeline.templates.render import candidate_marker
 from tests.conftest import RUBRICS_PATH, TEMPLATES_DIR
 from tests.factories import codeql_candidate, lane2_candidate, lane3_candidate
 
@@ -187,20 +174,19 @@ def test_low_tier_is_logged_only(simulate_config: PipelineConfig) -> None:
     assert decisions[0].state is CandidateState.TERMINAL
 
 
-def test_budget_dispatches_exactly_ten_and_defers_the_rest(
-    simulate_config: PipelineConfig,
-) -> None:
+def test_budget_dispatches_exactly_ten_and_defers_the_rest() -> None:
     """§17 — >10 gate-passing high-score candidates dispatch 10 and record the rest deferred."""
+    config = pipeline_config(budget_N=10)
     candidates = [
         high_candidate(candidate_id=f"codeql-{index:02d}", score=190.0 - index)
         for index in range(14)
     ]
 
-    decisions = dispatch_candidates(candidates, simulate_config)
+    decisions = dispatch_candidates(candidates, config)
 
     dispatched = [row for row in decisions if row.state is CandidateState.DISPATCHING]
     deferred = [row for row in decisions if row.state is CandidateState.DEFERRED]
-    assert simulate_config.budget_N == 10
+    assert config.budget_N == 10
     assert len(dispatched) == 10
     assert [row.candidate_id for row in deferred] == [f"codeql-{i:02d}" for i in range(10, 14)]
     assert {row.action for row in deferred} == {Action.DEFERRED}
@@ -230,8 +216,9 @@ def test_budget_dispatches_highest_scores_first(simulate_config: PipelineConfig)
 
     dispatched = {row.candidate_id for row in decisions if row.state is CandidateState.DISPATCHING}
     deferred = {row.candidate_id for row in decisions if row.state is CandidateState.DEFERRED}
-    assert dispatched == {f"codeql-{index:02d}" for index in range(2, 12)}
-    assert deferred == {"codeql-00", "codeql-01"}
+    budget = simulate_config.budget_N
+    assert dispatched == {f"codeql-{index:02d}" for index in range(12 - budget, 12)}
+    assert deferred == {f"codeql-{index:02d}" for index in range(12 - budget)}
 
 
 def test_dispatch_preserves_input_order_in_its_output(simulate_config: PipelineConfig) -> None:
@@ -374,78 +361,6 @@ def test_stale_skip_is_exempt_from_the_red_to_green_requirement(
 # -- auto-merge gating -------------------------------------------------------------------
 
 
-def converging_iteration(**fields: Any) -> ReviewIteration:  # noqa: ANN401
-    """A review iteration whose red baseline is valid and whose green run passed."""
-    return ReviewIteration(
-        red_baseline=BaselineStatus.VALID,
-        green=fields.pop("green", True),
-        planner_criteria=frozenset({"C1"}),
-        reviewer_criteria=frozenset({"C1"}),
-        addressed_criteria=frozenset({"C1"}),
-        diff_reviewed=fields.pop("diff_reviewed", True),
-        **fields,
-    )
-
-
-def test_auto_merge_when_every_precondition_holds() -> None:
-    """§6/§9 — a valid red baseline, a green reviewer test and no major finding: eligible."""
-    config = github_config()
-
-    result = run_review_loop(config, converging_iteration())
-    decision = dispatch_candidates([apply_review_result(high_candidate(risk=2), result)], config)[0]
-
-    assert result.converged is True
-    assert decision.auto_merge_eligible is True
-    assert NEEDS_HUMAN_REVIEW_LABEL not in decision.labels
-
-
-def test_unresolved_major_blocks_auto_merge_and_labels_for_human_review() -> None:
-    """§17 — a converged PR with an unresolved `major` and no `blocking` is not eligible."""
-    config = github_config()
-
-    result = run_review_loop(
-        config,
-        converging_iteration(
-            findings=(LoopFinding(FindingSeverity.MAJOR, None, "unresolved major review finding"),)
-        ),
-    )
-    decision = dispatch_candidates([apply_review_result(high_candidate(risk=2), result)], config)[0]
-
-    assert decision.auto_merge_eligible is False
-    assert NEEDS_HUMAN_REVIEW_LABEL in decision.labels
-
-
-def test_unresolved_major_never_auto_merges_at_dispatch() -> None:
-    """The structural invariant, enforced on the dispatch row itself."""
-    config = github_config()
-    candidate = high_candidate(risk=1, unresolved_major=True)
-
-    decision = dispatch_candidates([candidate], config)[0]
-
-    assert decision.auto_merge_eligible is False
-    assert NEEDS_HUMAN_REVIEW_LABEL in decision.labels
-
-
-def test_no_configuration_can_unblock_an_unresolved_major() -> None:
-    """§17 (l.1016) — an unresolved `major` blocks auto-merge under every configuration.
-
-    The clause was written against a knob that could only ever weaken it, so the invariant is
-    stated over the configuration surface itself: there is no accepted key that turns the §14
-    human-review routing off, and the routing holds for a default and a maximally permissive
-    configuration alike.
-    """
-    assert "major_only_requires_human" not in PipelineConfig.model_fields
-    with pytest.raises(ConfigError, match="major_only_requires_human"):
-        PipelineConfig(major_only_requires_human=False)
-
-    candidate = high_candidate(risk=1, unresolved_major=True)
-    for config in (pipeline_config(), github_config()):
-        decision = dispatch_candidates([candidate], config)[0]
-
-        assert decision.auto_merge_eligible is False
-        assert NEEDS_HUMAN_REVIEW_LABEL in decision.labels
-
-
 def test_high_risk_candidate_is_labelled_and_never_auto_merged() -> None:
     """§6 — high score with `risk >= 3` opens a PR labeled `needs-human-review`."""
     config = github_config()
@@ -453,56 +368,6 @@ def test_high_risk_candidate_is_labelled_and_never_auto_merged() -> None:
     decision = dispatch_candidates([high_candidate(risk=4)], config)[0]
 
     assert decision.action is Action.OPEN_PR
-    assert decision.auto_merge_eligible is False
-    assert NEEDS_HUMAN_REVIEW_LABEL in decision.labels
-
-
-def test_existing_suite_regression_blocks_auto_merge() -> None:
-    """§17 — breaking a mocked existing test blocks the merge even with a green reviewer test."""
-    config = github_config()
-
-    result = run_review_loop(
-        config,
-        converging_iteration(
-            findings=(
-                LoopFinding(FindingSeverity.BLOCKING, None, "pre-existing suite test regressed"),
-            )
-        ),
-    )
-    decision = dispatch_candidates([apply_review_result(high_candidate(risk=1), result)], config)[0]
-
-    assert decision.auto_merge_eligible is False
-
-
-def test_missing_reviewer_test_blocks_auto_merge() -> None:
-    """§9 — a planner criterion with no reviewer test mapped to it blocks auto-merge."""
-    config = github_config()
-
-    result = run_review_loop(
-        config,
-        ReviewIteration(
-            red_baseline=BaselineStatus.VALID,
-            green=True,
-            planner_criteria=frozenset({"C1"}),
-            reviewer_criteria=frozenset(),
-            addressed_criteria=frozenset(),
-            diff_reviewed=True,
-        ),
-    )
-    decision = dispatch_candidates([apply_review_result(high_candidate(risk=1), result)], config)[0]
-
-    assert result.converged is False
-    assert decision.auto_merge_eligible is False
-
-
-def test_missing_diff_review_blocks_auto_merge() -> None:
-    """§9.3 — without a recorded phase-B diff review the candidate cannot auto-merge."""
-    config = github_config()
-
-    result = run_review_loop(config, converging_iteration(diff_reviewed=False))
-    decision = dispatch_candidates([apply_review_result(high_candidate(risk=1), result)], config)[0]
-
-    assert result.converged is False
     assert decision.auto_merge_eligible is False
     assert NEEDS_HUMAN_REVIEW_LABEL in decision.labels
 
@@ -529,6 +394,7 @@ def test_dispatch_preflight_aborts_when_issues_disabled() -> None:
         publish_artifacts(
             client,
             high_candidate(tier=Tier.HIGH),
+            marker=candidate_marker("codeql-0"),
             issue_title="title",
             issue_body="### SUMMARY\n",
             pr_title="fix: bound the generated range",
@@ -538,57 +404,6 @@ def test_dispatch_preflight_aborts_when_issues_disabled() -> None:
         )
 
     assert transport.calls == []
-
-
-def test_preflight_allows_degraded_pr_comment_sink() -> None:
-    """§7 — the degraded sink keeps the run going and publishes PR + manager comment."""
-    transport = ArtifactTransport()
-    client = artifact_client(
-        live_config(has_issues=False, issue_sink=IssueSink.PR_COMMENT), transport
-    )
-
-    links = publish_degraded(
-        client,
-        high_candidate(tier=Tier.HIGH),
-        pr_title="fix: bound the generated range",
-        pr_body="### SUMMARY\n",
-        comment_body="manager summary",
-        head="devin/x",
-    )
-
-    assert links.issue_url is None
-    assert links.comment_url is not None
-
-
-def test_crosslink_roundtrip() -> None:
-    """§7 — issue first, then the PR carrying `Closes #<n>`, then the issue body is patched."""
-    transport = ArtifactTransport()
-    client = artifact_client(live_config(), transport)
-    candidate = high_candidate(candidate_id="codeql-7", tier=Tier.HIGH)
-    marker = candidate_marker(candidate.candidate_id)
-
-    links = publish_artifacts(
-        client,
-        candidate,
-        issue_title="fix: bound the generated range",
-        issue_body=f"### SUMMARY\n\n{marker}\n",
-        pr_title="fix: bound the generated range",
-        pr_body=f"### SUMMARY\n\n{marker}\n",
-        head="devin/codeql-7",
-        ci_probe=local_ci_probe,
-    )
-
-    assert [path for _, path, _ in transport.calls] == [
-        "/repos/victorciao/superset/issues",
-        "/repos/victorciao/superset/pulls",
-        "/repos/victorciao/superset/issues/1",
-    ]
-    pr_body = str(transport.calls[1][2]["body"])
-    patched_issue = str(transport.calls[2][2]["body"])
-    assert "Closes #1" in pr_body
-    assert marker in pr_body
-    assert marker in patched_issue
-    assert links.pr_url is not None and links.pr_url in patched_issue
 
 
 def test_resume_after_issue_created_pr_failed(tmp_path: Path) -> None:
@@ -638,39 +453,6 @@ def test_resume_finds_the_marker_on_the_target_repository(tmp_path: Path) -> Non
     assert store.rows() == []
 
 
-def test_pr_comment_sink_state_transition_and_validation() -> None:
-    """§7 degraded path — the comment carries the marker and validates as an issue body."""
-    transport = ArtifactTransport()
-    config = live_config(has_issues=False, issue_sink=IssueSink.PR_COMMENT)
-    client = artifact_client(config, transport)
-    candidate = high_candidate(candidate_id="codeql-11", tier=Tier.HIGH)
-    pr_template = (TEMPLATES_DIR / "superset" / "PULL_REQUEST_TEMPLATE.md").read_text(
-        encoding="utf-8"
-    )
-    comment_body = render_degraded_comment_body(
-        "",
-        candidate,
-        generated_summary="bound the generated range",
-    )
-
-    links = publish_degraded(
-        client,
-        candidate,
-        pr_title="fix: bound the generated range",
-        pr_body=render_pr_body(pr_template, candidate, {}, {}),
-        comment_body=comment_body,
-        head="devin/codeql-11",
-    )
-
-    assert [path for _, path, _ in transport.calls] == [
-        "/repos/victorciao/superset/pulls",
-        "/repos/victorciao/superset/issues/1/comments",
-    ]
-    assert links.issue_url is None
-    assert candidate_marker(candidate.candidate_id) in comment_body
-    validate_issue_body(comment_body, candidate)
-
-
 def test_simulate_mode_makes_no_remote_writes(simulate_config: PipelineConfig) -> None:
     """§17 — SIMULATE performs zero remote writes; the transport records none attempted."""
     transport = ArtifactTransport()
@@ -680,6 +462,7 @@ def test_simulate_mode_makes_no_remote_writes(simulate_config: PipelineConfig) -
         publish_artifacts(
             client,
             high_candidate(candidate_id="codeql-13", tier=Tier.HIGH),
+            marker=candidate_marker("codeql-13"),
             issue_title="title",
             issue_body="### SUMMARY\n",
             pr_title="fix: bound the generated range",

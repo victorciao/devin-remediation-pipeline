@@ -88,8 +88,6 @@ def decide_resume(
         if artifacts_present or has_local_artifact(persisted):
             return ResumeDecision(ResumeAction.SKIP)
         return ResumeDecision(ResumeAction.RESUME_AT_STEP, "publication")
-    if persisted.state is CandidateState.PR_CREATED and artifacts_present:
-        return ResumeDecision(ResumeAction.SKIP)
     if not has_local_artifact(persisted) and (
         artifacts_present or not marker_search_available or marker_search_orphaned
     ):
@@ -306,6 +304,10 @@ class CandidateStateStore:
             marker = self.marker_artifact(candidate.candidate_id)
             current = self.latest().get(candidate.candidate_id)
             if has_local_artifact(current) or marker is not None:
+                return False
+            if self.marker_search_unavailable(
+                candidate.candidate_id
+            ) or self.marker_search_orphaned(candidate.candidate_id):
                 return False
             self._append_locked(candidate)
             return True

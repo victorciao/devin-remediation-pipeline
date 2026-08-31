@@ -77,7 +77,7 @@ def event_from_candidate(candidate: Candidate, *, run_id: str) -> EventRecord:
         action=candidate.action,
         merge_mode=candidate.merge_mode,
         session_id=candidate.session_id,
-        role_attempts=candidate.role_attempts,
+        session_attempts=candidate.session_attempts,
         success_criterion=candidate.success_criterion,
         criterion_evidence=candidate.criterion_evidence,
         suite_scope=candidate.suite_scope,

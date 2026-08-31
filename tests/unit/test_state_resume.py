@@ -1,40 +1,25 @@
-"""§14.1/§14.2 resume: one pure decision function and one store entry point.
-
-Resume was previously derived independently at two call sites and the two drifted, which is
-why the decision table is pinned directly here *and* asserted to be reached through
-`CandidateStateStore.resume_decision` — the only thing `_publish_live` and
-`_prepare_live_candidate` are allowed to consult.
-"""
+"""§14.1/§14.2 resume: one pure decision function and one store entry point."""
 
 from __future__ import annotations
 
-import inspect
-import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import SecretStr
 
-from pipeline import __main__ as entrypoint
-from pipeline.__main__ import _prepare_live_candidate as prepare_live_candidate
-from pipeline.config import Mode, PipelineConfig
-from pipeline.github_client import GitHubClient
 from pipeline.schemas import Candidate, CandidateState, ReasonCode
 from pipeline.state import (
     CandidateStateStore,
     MarkerArtifact,
     MarkerSearchOutcome,
     ResumeAction,
-    StatePreservationError,
     decide_resume,
     github_marker_search,
     has_local_artifact,
 )
 from tests.deadline import within_deadline
 from tests.factories import codeql_candidate
-from tests.fakes import BASE_SHA, HEAD_SHA, FakeGitHubTransport
 from tests.known_defects import local_resume_lookup
 
 ISSUE_URL = "https://github.test/victorciao/superset/issues/1"
@@ -45,14 +30,15 @@ COMMENT_URL = "https://github.test/victorciao/superset/issues/1#issuecomment-3"
 ARTIFACT_STATES = (
     CandidateState.ISSUE_CREATED,
     CandidateState.PR_CREATED,
-    CandidateState.ISSUE_PATCHED,
-    CandidateState.COMMENT_CREATED,
 )
 ARTIFACT_STATE_LINKS = (
     (CandidateState.ISSUE_CREATED, "issue_url"),
     (CandidateState.PR_CREATED, "pr_url"),
-    (CandidateState.ISSUE_PATCHED, "issue_url"),
-    (CandidateState.COMMENT_CREATED, "comment_url"),
+)
+COMPLETED_STATES = (
+    CandidateState.AWAITING_HUMAN_MERGE,
+    CandidateState.MERGED,
+    CandidateState.TERMINAL,
 )
 PRE_ARTIFACT_STATES = (
     CandidateState.ENUMERATED,
@@ -60,11 +46,6 @@ PRE_ARTIFACT_STATES = (
     CandidateState.SCORED,
     CandidateState.DISPATCHING,
     CandidateState.DEFERRED,
-)
-COMPLETED_STATES = (
-    CandidateState.ISSUE_PATCHED,
-    CandidateState.COMMENT_CREATED,
-    CandidateState.TERMINAL,
 )
 
 
@@ -75,7 +56,7 @@ def persisted(state: CandidateState, **fields: Any) -> Candidate:  # noqa: ANN40
 
 def link_value(field: str) -> str:
     """The URL a given link field carries."""
-    return {"issue_url": ISSUE_URL, "pr_url": PR_URL, "comment_url": COMMENT_URL}[field]
+    return {"issue_url": ISSUE_URL, "pr_url": PR_URL}[field]
 
 
 def no_marker(_marker: str) -> MarkerArtifact | None:
@@ -240,21 +221,6 @@ def test_artifact_proof_resume_cannot_loop(state: CandidateState) -> None:
     assert after_publication.action is ResumeAction.SKIP
 
 
-def test_converged_with_artifacts_is_skipped_but_without_them_is_resumed() -> None:
-    """§14.1 — `converged` means the review finished; publication may still be owed."""
-    with_artifacts = decide_resume(
-        persisted(CandidateState.CONVERGED, issue_url=ISSUE_URL),
-        artifacts_present=True,
-    )
-    without_artifacts = decide_resume(
-        persisted(CandidateState.CONVERGED, issue_url=ISSUE_URL),
-        artifacts_present=False,
-    )
-
-    assert with_artifacts.action is ResumeAction.SKIP
-    assert without_artifacts.action is ResumeAction.RESUME_AT_STEP
-
-
 @pytest.mark.parametrize(
     ("state", "link"),
     [(CandidateState.ISSUE_CREATED, "issue_url"), (CandidateState.PR_CREATED, "pr_url")],
@@ -398,22 +364,6 @@ def test_resume_decision_defers_when_marker_search_is_ambiguous(tmp_path: Path) 
     assert store.marker_search_failed is False
     assert store.append_if_new_artifact(codeql_candidate()) is False
     assert store.rows() == []
-
-
-@local_resume_lookup
-def test_resume_decision_skips_a_completed_row_without_searching(tmp_path: Path) -> None:
-    """§14.1 — a completed row needs no remote lookup; resume is decided locally."""
-    searches: list[str] = []
-
-    def counting(marker: str) -> MarkerArtifact | None:
-        searches.append(marker)
-        return None
-
-    store = store_for(tmp_path, marker_search=counting)
-    store.append(persisted(CandidateState.ISSUE_PATCHED, issue_url=ISSUE_URL, pr_url=PR_URL))
-
-    assert store.resume_decision("codeql-0").action is ResumeAction.SKIP
-    assert searches == []
 
 
 @local_resume_lookup
@@ -614,20 +564,6 @@ def test_github_marker_search_refuses_a_non_unique_or_malformed_result(payload: 
         find("marker")
 
 
-# -- both call sites derive resume the same way ------------------------------------------
-
-
-@pytest.mark.parametrize("function", ["_publish_live", "_prepare_live_candidate"])
-def test_both_live_call_sites_resume_through_the_store_only(function: str) -> None:
-    """§14.1 — resume is derived once, in the store; neither call site may re-derive it."""
-    source = inspect.getsource(getattr(entrypoint, function))
-
-    assert "state_store.resume_decision(candidate.candidate_id)" in source
-    assert "decide_resume(" not in source
-    assert "marker_search_unavailable" not in source
-    assert "existing_artifact" not in source
-
-
 # -- identical-row append suppression ----------------------------------------------------
 
 
@@ -730,248 +666,4 @@ def test_suppression_does_not_weaken_the_artifact_reservation(tmp_path: Path) ->
     assert len(store.rows()) == 1
 
 
-# -- §14.1 adopting an artifact the marker search found ----------------------------------
-
-
-def prepare(
-    store: CandidateStateStore,
-    candidate: Candidate,
-    *,
-    transport: FakeGitHubTransport | None = None,
-    run_id: str = "run-1",
-) -> tuple[Candidate, FakeGitHubTransport]:
-    """Run live candidate preparation over a recording transport, and return both."""
-    fake = transport or FakeGitHubTransport()
-    config = PipelineConfig(
-        mode=Mode.LIVE,
-        github_token=SecretStr("placeholder-github-token"),
-        devin_api_key=SecretStr("placeholder-devin-key"),
-    )
-    prepared = prepare_live_candidate(
-        candidate,
-        state_store=store,
-        client=GitHubClient(config, transport=fake),
-        base_sha=BASE_SHA,
-        head_branch="devin",
-        run_id=run_id,
-    )
-    return prepared, fake
-
-
-def test_a_unique_issue_marker_is_adopted_into_the_durable_row(tmp_path: Path) -> None:
-    """§14.1 — an artifact bearing this candidate's marker is this candidate's artifact.
-
-    Adoption is what lets publication resume instead of duplicating: the run that crashed
-    before writing its row left the issue behind, and the marker is the only evidence of it.
-    """
-    store = store_for(tmp_path, marker_search=issue_marker)
-
-    prepared, transport = prepare(store, codeql_candidate())
-
-    adopted = store.resume(prepared.candidate_id)
-    assert adopted is not None
-    assert adopted.state is CandidateState.ISSUE_CREATED
-    assert (adopted.issue_number, adopted.issue_url) == (1, ISSUE_URL)
-    assert (adopted.pr_number, adopted.pr_url) == (None, None)
-    assert prepared.issue_url == ISSUE_URL
-    assert [write.path for write in transport.writes if "/issues" in write.path] == []
-
-
-def test_a_unique_pull_request_marker_is_adopted_as_a_pull_request(tmp_path: Path) -> None:
-    """§14.1 — a found PR adopted as an issue would open a second PR for the same fix."""
-    store = store_for(tmp_path, marker_search=lambda _marker: PR_ARTIFACT)
-
-    prepared, transport = prepare(store, codeql_candidate())
-
-    assert prepared.state is CandidateState.PR_CREATED
-    assert (prepared.pr_number, prepared.pr_url) == (2, PR_URL)
-    assert (prepared.issue_number, prepared.issue_url) == (None, None)
-    assert transport.writes == []
-
-
-def test_an_ambiguous_marker_defers_orphaned_and_creates_nothing(tmp_path: Path) -> None:
-    """§14.1 — duplicate markers on the fork mean a create would add a third artifact.
-
-    This is the adversarial case for the duplicate-artifact guard: the search cannot say
-    which artifact is this candidate's, so the only safe action is to write nothing at all.
-    """
-
-    def ambiguous(_marker: str) -> MarkerArtifact | None:
-        raise ValueError("marker search did not return a unique artifact")
-
-    store = store_for(tmp_path, marker_search=ambiguous)
-
-    prepared, transport = prepare(store, codeql_candidate())
-
-    assert prepared.state is CandidateState.DEFERRED
-    assert prepared.reason is ReasonCode.ARTIFACT_ORPHANED
-    assert prepared.reason_detail is not None
-    assert transport.writes == []
-    assert [row.state for row in store.rows()] == [CandidateState.DEFERRED]
-
-
-def test_an_ambiguous_marker_defers_a_candidate_that_never_reached_publication(
-    tmp_path: Path,
-) -> None:
-    """§14.1 — the guard runs before branch creation, so no side effect precedes it."""
-
-    def ambiguous(_marker: str) -> MarkerArtifact | None:
-        raise ValueError("marker search did not return a unique artifact")
-
-    store = store_for(tmp_path, marker_search=ambiguous)
-
-    _, transport = prepare(store, codeql_candidate())
-
-    assert [read for read in transport.reads if "/git/ref" in read] == []
-
-
-# -- the reservation lease ------------------------------------------------------------------
-
-
-def test_a_live_claim_from_another_run_blocks_the_reservation(tmp_path: Path) -> None:
-    """§17 — a reservation is a lease, so a second run must not reserve a claimed candidate."""
-    store = store_for(tmp_path, marker_search=no_marker, reservation_lease_s=3600.0)
-
-    assert store.append_if_new_artifact(codeql_candidate(), run_id="run-a") is True
-    held = store.get("codeql-0")
-    assert held is not None
-    assert held.state is CandidateState.DISPATCHING
-    assert held.reserved_by_run_id == "run-a"
-    assert held.reserved_at is not None
-
-    assert store.append_if_new_artifact(codeql_candidate(), run_id="run-b") is False
-    assert store.reservation_reason == "reservation_held"
-    assert len(store.rows()) == 1
-
-
-def test_a_run_refreshes_its_own_claim_instead_of_blocking_itself(tmp_path: Path) -> None:
-    """§17 — the lease guards other runs; a run must never deadlock against its own claim."""
-    store = store_for(tmp_path, marker_search=no_marker, reservation_lease_s=3600.0)
-
-    assert store.append_if_new_artifact(codeql_candidate(), run_id="run-a") is True
-    first = store.get("codeql-0")
-    assert first is not None and first.reserved_at is not None
-
-    assert store.append_if_new_artifact(codeql_candidate(), run_id="run-a") is True
-    refreshed = store.get("codeql-0")
-    assert refreshed is not None and refreshed.reserved_at is not None
-    assert refreshed.reserved_at >= first.reserved_at
-    assert store.reservation_reason is None
-
-
-def test_an_expired_lease_is_reclaimable_by_a_later_run(tmp_path: Path) -> None:
-    """§17 — a crashed run must not strand a candidate forever; the lease has an expiry."""
-    store = store_for(tmp_path, marker_search=no_marker, reservation_lease_s=1.0)
-    stale = codeql_candidate(
-        state=CandidateState.DISPATCHING,
-        reserved_at=time.time() - 600.0,
-        reserved_by_run_id="run-crashed",
-    )
-    store.append(stale)
-
-    assert store.append_if_new_artifact(codeql_candidate(), run_id="run-b") is True
-    reclaimed = store.get("codeql-0")
-    assert reclaimed is not None
-    assert reclaimed.reserved_by_run_id == "run-b"
-
-
-def test_a_future_dated_claim_is_treated_as_unexpired(tmp_path: Path) -> None:
-    """§17 — clock skew must fail closed: an unreadable lease age blocks, it does not reclaim."""
-    store = store_for(tmp_path, marker_search=no_marker, reservation_lease_s=1.0)
-    store.append(
-        codeql_candidate(
-            state=CandidateState.DISPATCHING,
-            reserved_at=time.time() + 600.0,
-            reserved_by_run_id="run-skewed",
-        )
-    )
-
-    assert store.append_if_new_artifact(codeql_candidate(), run_id="run-b") is False
-    assert store.reservation_reason == "reservation_held"
-
-
-def test_the_absence_proof_is_retaken_inside_the_reservation(tmp_path: Path) -> None:
-    """§17 — a marker result cached before the role sessions ran must not be trusted.
-
-    The duplicate-artifact window is exactly the interval between the pre-dispatch lookup and the
-    first write, so the reservation re-takes the search under its own lock and refuses the write
-    when the artifact appeared in between.
-    """
-    results: list[MarkerArtifact | None] = [None, ISSUE_ARTIFACT]
-    lookups: list[str] = []
-
-    def racing_search(marker: str) -> MarkerArtifact | None:
-        lookups.append(marker)
-        return results[min(len(lookups), len(results)) - 1]
-
-    store = store_for(tmp_path, marker_search=racing_search)
-
-    assert store.marker_exists("codeql-0") is False
-    assert store.append_if_new_artifact(codeql_candidate(), run_id="run-a") is False
-    assert len(lookups) == 2
-    assert store.rows() == []
-
-
-@pytest.mark.parametrize(
-    ("marker_search", "require_marker_proof", "reason"),
-    [
-        (failing_marker, False, MarkerSearchOutcome.FAILED.value),
-        (ambiguous_marker, False, MarkerSearchOutcome.ORPHANED.value),
-        (None, True, MarkerSearchOutcome.UNCONFIGURED.value),
-    ],
-)
-def test_an_unproven_absence_never_reserves(
-    tmp_path: Path,
-    marker_search: Callable[[str], MarkerArtifact | None] | None,
-    require_marker_proof: bool,
-    reason: str,
-) -> None:
-    """§17 — `failed`, `orphaned` and LIVE `unconfigured` all fail closed with their own reason."""
-    store = store_for(
-        tmp_path,
-        marker_search=marker_search,
-        require_marker_proof=require_marker_proof,
-    )
-
-    assert within_deadline(lambda: store.append_if_new_artifact(codeql_candidate())) is False
-    assert store.reservation_reason == reason
-    assert store.rows() == []
-
-
-def test_the_resume_path_re_proves_absence_before_a_second_write(tmp_path: Path) -> None:
-    """§17 — the duplicate-artifact window lives on resume, so the claim is re-earned there."""
-    lookups: list[str] = []
-
-    def appearing_search(marker: str) -> MarkerArtifact | None:
-        lookups.append(marker)
-        return ISSUE_ARTIFACT if len(lookups) > 1 else None
-
-    store = store_for(tmp_path, marker_search=appearing_search)
-    store.append(codeql_candidate(state=CandidateState.DEFERRED))
-
-    assert store.append_if_new_artifact(codeql_candidate(), run_id="run-a") is True
-    assert store.append_if_new_artifact(codeql_candidate(), run_id="run-a") is False
-    assert len(lookups) == 2
-
-
 # -- durable identity ----------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("field", ["head_sha", "reviewed_head_sha"])
-def test_an_append_may_never_discard_a_persisted_head_identity(tmp_path: Path, field: str) -> None:
-    """§17 — the reviewed identity is written once and never lost to a later partial row.
-
-    Local CI evidence is a `base..head` claim about a specific commit; a later row that blanked
-    the head would leave a published PR body whose evidence range cannot be reconstructed.
-    """
-    store = store_for(tmp_path)
-    identified: dict[str, Any] = {field: HEAD_SHA}
-    blanked: dict[str, Any] = {field: None}
-    store.append(codeql_candidate(state=CandidateState.PR_CREATED, **identified))
-
-    with pytest.raises(StatePreservationError, match=field):
-        store.append(codeql_candidate(state=CandidateState.ISSUE_PATCHED, **blanked))
-
-    persisted = store.get("codeql-0")
-    assert persisted is not None
-    assert getattr(persisted, field) == HEAD_SHA

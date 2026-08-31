@@ -13,8 +13,8 @@ from pipeline.http_transport import HttpTransportError
 from pipeline.schemas import Candidate, CheckRunConclusion, MergeMode, ReasonCode, Tier
 
 ACCEPTED_CONCLUSIONS = frozenset({"success", "skipped", "neutral"})
-REJECTED_CONCLUSIONS = frozenset({"failure", "cancelled", "timed_out", "action_required", "stale"})
-PENDING_STATUSES = frozenset({"queued", "in_progress", "waiting", "pending", "requested"})
+REJECTED_CONCLUSIONS = frozenset({"failure", "cancelled", "timed_out", "stale", "error"})
+PENDING_STATUSES = frozenset({"queued", "in_progress", "pending", "requested"})
 APPROVAL_STATUSES = frozenset({"action_required", "awaiting_approval", "waiting"})
 
 
@@ -70,6 +70,14 @@ class CheckRunEvidence:
     detail: str | None = None
 
 
+def _check_run_state(item: CheckRunConclusion) -> str | None:
+    """Return the state a check run reports, from its conclusion or its status."""
+    if item.conclusion:
+        return item.conclusion
+    status = item.status or ""
+    return status or None
+
+
 def evaluate_check_runs(
     conclusions: Sequence[CheckRunConclusion],
     *,
@@ -83,11 +91,16 @@ def evaluate_check_runs(
     and successful before the evidence counts as passing.
     """
     observed = tuple(conclusions)
+    if not observed:
+        return CheckRunEvidence(
+            observed,
+            settled=False,
+            passed=False,
+            reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+        )
     by_name = {item.name: item for item in observed}
-    if any(
-        item.status in APPROVAL_STATUSES or item.conclusion == "action_required"
-        for item in observed
-    ):
+    states = {item.name: _check_run_state(item) for item in observed}
+    if any(state in APPROVAL_STATUSES for state in states.values()):
         return CheckRunEvidence(
             observed,
             settled=False,
@@ -95,7 +108,7 @@ def evaluate_check_runs(
             reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
             detail="awaiting_workflow_approval",
         )
-    rejected = [item.name for item in observed if (item.conclusion or "") in REJECTED_CONCLUSIONS]
+    rejected = [name for name, state in states.items() if state in REJECTED_CONCLUSIONS]
     if rejected:
         return CheckRunEvidence(
             observed,
@@ -105,9 +118,7 @@ def evaluate_check_runs(
             detail=", ".join(sorted(rejected)),
         )
     unsettled = [
-        item.name
-        for item in observed
-        if item.conclusion is None or (item.status or "") in PENDING_STATUSES
+        name for name, state in states.items() if state is None or state in PENDING_STATUSES
     ]
     if unsettled:
         return CheckRunEvidence(
@@ -117,7 +128,7 @@ def evaluate_check_runs(
             reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
             detail=", ".join(sorted(unsettled)),
         )
-    if any((item.conclusion or "") not in ACCEPTED_CONCLUSIONS for item in observed):
+    if any(state not in ACCEPTED_CONCLUSIONS for state in states.values()):
         return CheckRunEvidence(
             observed,
             settled=True,
@@ -134,7 +145,7 @@ def evaluate_check_runs(
             observed,
             settled=True,
             passed=False,
-            reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+            reason=ReasonCode.CI_CHECK_FAILED,
             detail="required contexts missing or unsuccessful: " + ", ".join(missing),
         )
     return CheckRunEvidence(observed, settled=True, passed=True)
@@ -425,6 +436,13 @@ def wait_for_check_runs(
                     "ci_workflows_absent",
                     evidence.conclusions,
                 )
+            return CiWaitResult(
+                current_mode,
+                ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+                False,
+                "awaiting_workflow_approval",
+                evidence.conclusions,
+            )
         if not poll:
             break
         remaining = deadline - clock()
@@ -435,7 +453,7 @@ def wait_for_check_runs(
         current_mode,
         ReasonCode.CI_EVIDENCE_UNAVAILABLE,
         False,
-        evidence.detail,
+        None,
         evidence.conclusions,
     )
 

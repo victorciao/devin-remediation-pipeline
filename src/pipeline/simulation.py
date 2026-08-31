@@ -9,7 +9,7 @@ from pipeline.config import Mode, PipelineConfig
 from pipeline.observability.events import EventLog, append_candidate_events
 from pipeline.observability.kpis import write_kpi_report
 from pipeline.observability.report import write_run_report
-from pipeline.schemas import Action, Candidate, CandidateState, Lane, RunEventRecord
+from pipeline.schemas import Action, Candidate, Lane, RunEventRecord
 from pipeline.state import CandidateStateStore
 from pipeline.templates.render import (
     render_issue_body,
@@ -44,23 +44,7 @@ def render_run_artifacts(
         artifact_simulated=config.mode is Mode.SIMULATE,
     )
     rendered_candidates = [
-        candidate.model_copy(
-            update={
-                "artifact_simulated": config.mode is Mode.SIMULATE,
-                "state": (
-                    CandidateState.DISPATCHING
-                    if config.mode is Mode.SIMULATE
-                    and candidate.state
-                    in {
-                        CandidateState.ISSUE_CREATED,
-                        CandidateState.PR_CREATED,
-                        CandidateState.AWAITING_HUMAN_MERGE,
-                        CandidateState.MERGED,
-                    }
-                    else candidate.state
-                ),
-            }
-        )
+        candidate.model_copy(update={"artifact_simulated": config.mode is Mode.SIMULATE})
         for candidate in candidates
     ]
     for candidate in rendered_candidates:

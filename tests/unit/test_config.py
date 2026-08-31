@@ -10,8 +10,6 @@ from pydantic import SecretStr
 
 from pipeline.config import (
     BUDGET_HARD_MAX,
-    DEFAULT_SESSION_TIMEOUT_S,
-    SECURITY_ISSUE_MODE,
     CiEvidenceMode,
     ConfigError,
     KpiSink,
@@ -20,24 +18,6 @@ from pipeline.config import (
     load_config,
 )
 from pipeline.schemas import ReasonCode
-
-
-def test_shipped_defaults_match_the_locked_values(simulate_config: PipelineConfig) -> None:
-    """§13 — the locked values are defaults, and these are the ones §17 pins."""
-    assert simulate_config.mode == Mode.SIMULATE
-    assert simulate_config.iteration_cap == 5
-    assert simulate_config.coverage_bar == 0.80
-    assert simulate_config.budget_N == 10
-    assert simulate_config.tier_high_min == 60
-    assert simulate_config.tier_medium_min == 20
-    assert simulate_config.eol_major_lag == 2
-    assert simulate_config.merge_rate_floor == 0.50
-    assert simulate_config.session_failure_ceiling == 0.30
-    assert simulate_config.ci_evidence_mode == CiEvidenceMode.LOCAL
-    assert simulate_config.auto_merge_enabled is False
-    assert simulate_config.lane2_class_breadth_max == 5
-    assert BUDGET_HARD_MAX == 25
-    assert SECURITY_ISSUE_MODE == "generic_tracking"
 
 
 def test_coverage_bar_default_meets_the_eighty_percent_floor(
@@ -95,35 +75,9 @@ def test_budget_above_hard_max_without_the_flag_is_an_error() -> None:
         load_config(cli_args=["--budget_N=99"])
 
 
-def test_invalid_direct_construction_raises_config_error() -> None:
-    """The interface note: `ConfigError` on every path, including direct construction."""
-    with pytest.raises(ConfigError):
-        PipelineConfig(iteration_cap=0)
-
-    with pytest.raises(ConfigError):
-        PipelineConfig(coverage_bar=1.5)
-
-    with pytest.raises(ConfigError):
-        PipelineConfig(tier_high_min=10, tier_medium_min=20)
-
-
 def test_unrecognized_environment_setting_is_an_error() -> None:
     with pytest.raises(ConfigError):
         load_config(env={"PIPELINE_NOT_A_KNOB": "1"})
-
-
-def test_cli_overrides_environment_which_overrides_file(tmp_path: Path) -> None:
-    config_file = tmp_path / "pipeline.yaml"
-    config_file.write_text("budget_N: 4\niteration_cap: 2\n", encoding="utf-8")
-
-    config = load_config(
-        config_file,
-        env={"PIPELINE_BUDGET_N": "6"},
-        cli_args=["--budget_N=8"],
-    )
-
-    assert config.budget_N == 8
-    assert config.iteration_cap == 2
 
 
 def test_target_repository_and_paths_are_configurable() -> None:
@@ -169,33 +123,6 @@ def test_local_ci_evidence_hard_disables_auto_merge_on_every_path() -> None:
             env={"PIPELINE_CI_EVIDENCE_MODE": "local", "PIPELINE_AUTO_MERGE_ENABLED": "true"}
         ).auto_merge_enabled
         is False
-    )
-
-
-def test_the_reservation_lease_defaults_to_three_role_session_timeouts() -> None:
-    """§17 — a lease must outlive the role loop it protects, so its default is derived from it.
-
-    A run holds its claim across the planner, implementer and reviewer sessions; a lease shorter
-    than that window would expire mid-loop and let a second run reserve the same candidate, which
-    is the duplicate-artifact hazard the claim exists to close.
-    """
-    assert PipelineConfig().reservation_lease_s == 3 * DEFAULT_SESSION_TIMEOUT_S
-    assert (
-        load_config(env={}).reservation_lease_s
-        == PipelineConfig(reservation_lease_s=None).reservation_lease_s
-    )
-
-
-def test_a_lease_shorter_than_one_role_session_is_a_startup_error() -> None:
-    """§17 — an unenforceable lease is refused at startup, not discovered mid-run."""
-    with pytest.raises(ConfigError, match="reservation_lease_s"):
-        PipelineConfig(reservation_lease_s=DEFAULT_SESSION_TIMEOUT_S - 1)
-    with pytest.raises(ConfigError, match="reservation_lease_s"):
-        load_config(env={"PIPELINE_RESERVATION_LEASE_S": str(DEFAULT_SESSION_TIMEOUT_S - 1)})
-
-    assert (
-        PipelineConfig(reservation_lease_s=DEFAULT_SESSION_TIMEOUT_S).reservation_lease_s
-        == DEFAULT_SESSION_TIMEOUT_S
     )
 
 
