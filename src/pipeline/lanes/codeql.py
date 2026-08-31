@@ -260,7 +260,7 @@ def enumerate_codeql_candidates(
         normalized_symbol, symbol_start_line, symbol_source = _enclosing_symbol(
             repo_path, path, start_line
         )
-        stable_locator = "|".join((rule_id, path, normalized_symbol, digest))
+        stable_locator = "|".join((rule_id, path, normalized_symbol))
         message = _mapping(instance.get("message"))
         region_source = "source_region"
         region = (
@@ -311,7 +311,39 @@ def enumerate_codeql_candidates(
             suite_scope=[path],
         )
         candidates.append(candidate)
-    return candidates
+    return _collapse_duplicate_alerts(candidates)
+
+
+def _alert_order(candidate: Candidate) -> float:
+    """Sort key that places an absent alert number after every present one."""
+    return candidate.alert_number if candidate.alert_number is not None else float("inf")
+
+
+def _collapse_duplicate_alerts(candidates: list[Candidate]) -> list[Candidate]:
+    """Keep one candidate per identity, recording the alert numbers it now covers.
+
+    Two alerts of the same rule inside the same symbol are one defect, one issue and one
+    pull request: the position digest that once separated them is drift metadata, not
+    identity.
+    """
+    grouped: dict[str, list[Candidate]] = {}
+    for candidate in candidates:
+        grouped.setdefault(candidate.candidate_id, []).append(candidate)
+    survivors: list[Candidate] = []
+    emitted: set[str] = set()
+    for candidate in candidates:
+        if candidate.candidate_id in emitted:
+            continue
+        emitted.add(candidate.candidate_id)
+        duplicates = grouped[candidate.candidate_id]
+        survivor = min(duplicates, key=_alert_order)
+        covered = sorted(
+            row.alert_number
+            for row in duplicates
+            if row is not survivor and row.alert_number is not None
+        )
+        survivors.append(survivor.model_copy(update={"duplicate_alert_numbers": covered}))
+    return survivors
 
 
 def read_alert_fixture(path: Path) -> object:

@@ -227,6 +227,7 @@ class Candidate(StrictModel):
     file_path: str | None = None
     normalized_symbol: str | None = None
     alert_number: int | None = None
+    duplicate_alert_numbers: list[int] = Field(default_factory=list)
     security_severity_level: str | None = None
     rule_precision: str | None = None
     blast_radius: str | None = None

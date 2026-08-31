@@ -55,7 +55,7 @@ def codeql_candidate(
         candidate_id=candidate_id,
         stable_locator=fields.pop(
             "stable_locator",
-            f"{rule_id}|{file_path}|{normalized_symbol}|{position_digest}",
+            f"{rule_id}|{file_path}|{normalized_symbol}",
         ),
         rule_id=rule_id,
         file_path=file_path,
