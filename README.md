@@ -187,12 +187,31 @@ The Phase 0c baseline is used for burn-down denominators. A lane absent from
 ## Verification status
 
 Verified in this workstream: package import, static checks, baseline reproduction against the
-captured Superset revision (identical except `captured_at`), credential-free SIMULATE, the
-Docker Compose smoke when a Docker daemon is available, and a constrained LIVE run that
-performed capability preflight, created 30 tracking issues, created one branch, ran one Devin
-session, and settled one candidate without a pull request or merge. No independently verified
-remediation has landed; PR creation, merge behavior, and production remediation outcomes remain
-unproven.
+captured Superset revision (identical except `captured_at`), and a credential-free SIMULATE run
+per lane in Docker, each reaching its designed outcome at the default threshold (`codeql`
+81/high and `deprecations` 200/high run the full simulated loop; `skipped_tests` is medium and
+therefore issue-only).
+
+All three lanes have also completed LIVE against the Superset fork, with independent criterion
+verification at the pull request head rather than trust in the session's own report:
+
+* `codeql` — issue [#44](https://github.com/victorciao/superset/issues/44), pull request
+  [#45](https://github.com/victorciao/superset/pull/45), merged.
+* `skipped_tests` — issue [#4](https://github.com/victorciao/superset/issues/4), pull request
+  [#42](https://github.com/victorciao/superset/pull/42).
+* `deprecations` — issue [#30](https://github.com/victorciao/superset/issues/30), pull request
+  [#46](https://github.com/victorciao/superset/pull/46).
+
+The event-driven path is verified end to end on hosted runners: a merge to the fork's `master`
+produced a CodeQL completion, the fork's dispatch workflow sent `codeql-scan-completed`, and the
+resulting `repository_dispatch` run adopted 30 existing issues by marker without creating
+duplicates, created one session, pushed one branch with the remediation pull request token,
+opened a pull request, verified the criterion, observed authoritative required checks, and
+settled at `awaiting_human_merge`.
+
+Merging is never performed by this system. A verified candidate settles at
+`awaiting_human_merge` for a human to merge, and auto-merge is disabled by design; a merge
+performed by automation is therefore absent from the evidence on purpose.
 
 ## Automated triggers and secrets
 
