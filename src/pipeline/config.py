@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 from collections.abc import Mapping, Sequence
 from enum import Enum
 from pathlib import Path
@@ -80,7 +81,8 @@ class Lane1AlertCheck(str, Enum):
 class CiEvidenceMode(str, Enum):
     """CI evidence mode values."""
 
-    GITHUB = "github"
+    ACTIONS = "actions"
+    GITHUB = "actions"
     LOCAL = "local"
 
 
@@ -129,6 +131,14 @@ class PipelineConfig(BaseModel):
     rubrics_path: Path = Path("config/rubrics.yaml")
     templates_dir: Path = Path("templates")
     session_snapshot_id: str | None = None
+    pytest_command: tuple[str, ...] = (
+        "python3",
+        "-m",
+        "pytest",
+        "-q",
+        "--tb=no",
+        "-rA",
+    )
 
     def __init__(self, **data: object) -> None:
         """Construct configuration while exposing validation failures consistently."""
@@ -188,9 +198,11 @@ class PipelineConfig(BaseModel):
         if info.field_name == "alert_source":
             return AlertSource(normalized)
         if info.field_name == "ci_evidence_mode":
-            return CiEvidenceMode(normalized)
+            return CiEvidenceMode.ACTIONS if normalized == "github" else CiEvidenceMode(normalized)
         if info.field_name == "lane1_alert_check":
             return Lane1AlertCheck(normalized)
+        if normalized == "github":
+            return IssueSink.ISSUES
         return IssueSink(normalized)
 
     @field_validator("required_contexts_min", mode="before")
@@ -201,6 +213,14 @@ class PipelineConfig(BaseModel):
             return tuple(item.strip() for item in value.split(",") if item.strip())
         if isinstance(value, (list, tuple)):
             return tuple(str(item) for item in value)
+        return value
+
+    @field_validator("pytest_command", mode="before")
+    @classmethod
+    def normalize_pytest_command(cls, value: object) -> object:
+        """Accept a configured target interpreter command."""
+        if isinstance(value, str):
+            return tuple(shlex.split(value))
         return value
 
     @field_validator("github_token", "devin_api_key", mode="before")
@@ -261,6 +281,8 @@ class PipelineConfig(BaseModel):
             raise ConfigError("tier_high_min must be greater than tier_medium_min")
         if self.mode == Mode.LIVE and (self.github_token is None or self.devin_api_key is None):
             raise ConfigError("mode=live requires github_token and devin_api_key")
+        if self.mode == Mode.LIVE and not self.required_contexts_min:
+            raise ConfigError("mode=live requires non-empty required_contexts_min")
         if self.max_sessions < self.budget_N:
             raise ConfigError(f"max_sessions={self.max_sessions} is below budget_N={self.budget_N}")
         if not self.required_contexts_min and self.auto_merge_enabled:
@@ -396,6 +418,7 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
         "RUBRICS_PATH": "rubrics_path",
         "TEMPLATES_DIR": "templates_dir",
         "SESSION_SNAPSHOT_ID": "session_snapshot_id",
+        "PYTEST_COMMAND": "pytest_command",
     }
     for key, raw_value in env.items():
         if not key.startswith("PIPELINE_"):
@@ -461,15 +484,13 @@ def load_config(
     if config_file is not None:
         values.update(_load_file(Path(config_file)))
     values.update(_env_values(env if env is not None else os.environ))
-    cli_values, explicit_budget_flag = _parse_cli(cli_args)
+    cli_values, _ = _parse_cli(cli_args)
     values.update(cli_values)
 
     raw_budget = values.get("budget_N", DEFAULT_BUDGET_N)
     if isinstance(raw_budget, str):
         raw_budget = _parse_int("budget_N", raw_budget)
     if isinstance(raw_budget, int) and raw_budget > BUDGET_HARD_MAX:
-        if not explicit_budget_flag:
-            raise ConfigError("budget_N above BUDGET_HARD_MAX requires --i-know-what-im-doing")
         logger.warning(
             "guardrail_clamped",
             extra={"reason": "guardrail_clamped", "budget_N": raw_budget},

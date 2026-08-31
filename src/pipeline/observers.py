@@ -9,7 +9,9 @@ pull-request ref itself.
 from __future__ import annotations
 
 import ast
+import re
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -18,7 +20,7 @@ from pathlib import Path
 from pipeline.config import PipelineConfig
 from pipeline.lanes.codeql import enumerate_codeql_candidates
 from pipeline.lanes.deprecations import reference_surface
-from pipeline.schemas import Candidate, ItemOutcome, PerItemOutcome
+from pipeline.schemas import Candidate, ItemOutcome, PerItemOutcome, ReasonCode
 from pipeline.verify import AlertObservation, ItemRunResult, SuiteResult, SymbolObservation
 
 CommandRunner = Callable[[Sequence[str], Path], tuple[int, str]]
@@ -52,8 +54,16 @@ def parse_item_outcomes(output: str) -> tuple[PerItemOutcome, ...]:
         outcome = _OUTCOME_PREFIXES.get(head)
         if outcome is None or not rest:
             continue
-        nodeid, _, detail = rest.partition(" - ")
+        skip_match = re.match(r"\[\d+\]\s+(.+?):\d+:\s*(.*)$", rest)
+        if skip_match is not None:
+            nodeid = skip_match.group(1)
+            detail = skip_match.group(2)
+        else:
+            nodeid, _, detail = rest.partition(" - ")
         exception_type, _, message = detail.partition(": ")
+        if outcome is ItemOutcome.FAILED and detail.strip().startswith("assert "):
+            exception_type = "AssertionError"
+            message = detail
         outcomes.append(
             PerItemOutcome(
                 nodeid=nodeid.strip(),
@@ -90,7 +100,7 @@ class LocalCheckout:
     repo_path: Path
     worktree_root: Path
     runner: CommandRunner = run_command
-    pytest_command: tuple[str, ...] = ("python", "-m", "pytest", "-q", "--tb=no", "-rA")
+    pytest_command: tuple[str, ...] = (sys.executable, "-m", "pytest", "-q", "--tb=no", "-rA")
 
     def revision(self, sha: str) -> Path:
         """Materialize ``sha`` as a detached worktree and return its path."""
@@ -108,20 +118,136 @@ class LocalCheckout:
         """Run one nodeid at ``sha`` and report the per-item outcomes observed."""
         worktree = self.revision(sha)
         command = (*self.pytest_command, nodeid)
-        _, output = self.runner(command, worktree)
-        return ItemRunResult(outcomes=parse_item_outcomes(output), command=" ".join(command))
+        try:
+            code, output = self.runner(command, worktree)
+        except (FileNotFoundError, OSError):
+            return ItemRunResult(
+                outcomes=(),
+                command=" ".join(command),
+                reason=ReasonCode.CAPABILITY_UNAVAILABLE,
+            )
+        if code in {3, 4, 5} or "No module named pytest" in output:
+            return ItemRunResult(
+                outcomes=parse_item_outcomes(output),
+                command=" ".join(command),
+                reason=ReasonCode.CAPABILITY_UNAVAILABLE,
+            )
+        outcomes = parse_item_outcomes(output)
+        if not outcomes and code == 0 and re.search(r"\d+\s+passed", output):
+            outcomes = (PerItemOutcome(nodeid=nodeid, outcome=ItemOutcome.PASSED),)
+        return ItemRunResult(outcomes=outcomes, command=" ".join(command))
+
+    def run_item_with_test_diff(
+        self,
+        base_sha: str,
+        head_sha: str,
+        nodeid: str,
+        test_paths: Sequence[str],
+    ) -> ItemRunResult:
+        """Run an item at base after applying only the candidate test-path diff."""
+        target = self.worktree_root / f"{base_sha}-tests-from-{head_sha}"
+        if not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            code, output = self.runner(
+                (
+                    "git",
+                    "-C",
+                    str(self.repo_path),
+                    "worktree",
+                    "add",
+                    "--detach",
+                    str(target),
+                    base_sha,
+                ),
+                self.repo_path,
+            )
+            if code != 0:
+                return ItemRunResult(
+                    (),
+                    f"git worktree add {target} {base_sha}: {output.strip()}",
+                    ReasonCode.CAPABILITY_UNAVAILABLE,
+                )
+            code, output = self.runner(
+                ("git", "-C", str(self.repo_path), "diff", "--name-only", base_sha, head_sha),
+                self.repo_path,
+            )
+            if code != 0:
+                return ItemRunResult(
+                    (),
+                    f"git diff --name-only {base_sha} {head_sha}: {output.strip()}",
+                    ReasonCode.CAPABILITY_UNAVAILABLE,
+                )
+            paths = tuple(
+                path
+                for path in output.splitlines()
+                if path.startswith("tests/")
+                or "/tests/" in path
+                or path.startswith("test_")
+                or path.endswith("_test.py")
+            )
+            if paths:
+                code, output = self.runner(
+                    ("git", "-C", str(target), "checkout", head_sha, "--", *paths),
+                    target,
+                )
+                if code != 0:
+                    return ItemRunResult(
+                        (),
+                        f"git checkout {head_sha} -- {' '.join(paths)}: {output.strip()}",
+                        ReasonCode.CAPABILITY_UNAVAILABLE,
+                    )
+        command = (*self.pytest_command, nodeid)
+        try:
+            code, output = self.runner(command, target)
+        except (FileNotFoundError, OSError):
+            return ItemRunResult((), " ".join(command), ReasonCode.CAPABILITY_UNAVAILABLE)
+        if code in {3, 4, 5} or "No module named pytest" in output:
+            return ItemRunResult(
+                parse_item_outcomes(output), " ".join(command), ReasonCode.CAPABILITY_UNAVAILABLE
+            )
+        outcomes = parse_item_outcomes(output)
+        if not outcomes and code == 0 and re.search(r"\d+\s+passed", output):
+            outcomes = (PerItemOutcome(nodeid=nodeid, outcome=ItemOutcome.PASSED),)
+        return ItemRunResult(outcomes, " ".join(command))
 
     def run_suite(self, scope: Sequence[str], sha: str) -> SuiteResult:
         """Run the suite covering ``scope`` at ``sha``."""
         worktree = self.revision(sha)
-        command = (*self.pytest_command, *scope)
-        code, output = self.runner(command, worktree)
+        targets = tuple(
+            path
+            for path in scope
+            if path.startswith("tests/")
+            or "/tests/" in path
+            or path.startswith("test_")
+            or path.endswith("_test.py")
+        )
+        command = (*self.pytest_command, *targets)
+        try:
+            code, output = self.runner(command, worktree)
+        except (FileNotFoundError, OSError):
+            return SuiteResult(
+                passed=False,
+                command=" ".join(command),
+                reason=ReasonCode.CAPABILITY_UNAVAILABLE,
+            )
+        parsed = parse_item_outcomes(output)
         failing = tuple(
             outcome.nodeid
-            for outcome in parse_item_outcomes(output)
+            for outcome in parsed
             if outcome.outcome in (ItemOutcome.FAILED, ItemOutcome.ERROR)
         )
-        return SuiteResult(passed=code == 0, command=" ".join(command), failing_nodeids=failing)
+        capability = (
+            code in {3, 4, 5}
+            or bool(re.search(r"(?:collected\s+0\s+items|no tests ran)", output, re.IGNORECASE))
+            or "No module named pytest" in output
+            or "ERROR collecting" in output
+        )
+        return SuiteResult(
+            passed=code == 0 and not capability,
+            command=" ".join(command),
+            failing_nodeids=failing,
+            reason=ReasonCode.CAPABILITY_UNAVAILABLE if capability else None,
+        )
 
     def probe_symbol(self, candidate: Candidate, sha: str) -> SymbolObservation:
         """Re-check a LANE 3 symbol and its reference surface at ``sha``."""

@@ -16,11 +16,12 @@ guide, not a replacement for that plan.
 ## Setup
 
 Python 3.11 or newer is required. Install the package and development tools in a virtual
-environment:
+environment. Editable installation is unavailable in this checkout; use `PYTHONPATH=src`
+when invoking the source tree:
 
 ```bash
 python3.11 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m pip install '.[dev]'
 ```
 
 The package has no required network service for SIMULATE. The checked-in CodeQL fixture and
@@ -99,7 +100,7 @@ evidence, merge behavior, or production results are claimed here because LIVE ha
 | `mode` | `simulate` | `simulate`, `live` | `live` is explicit and credential-gated; unset values default to simulate |
 | `iteration_cap` | `5` | `1..10` | Bounds the implementer/reviewer loop |
 | `coverage_bar` | `0.80` | `0.0..1.0` | Coverage threshold used by review policy |
-| `budget_N` | `10` | `1..25` (`BUDGET_HARD_MAX=25`) | Dispatch overflow is deferred; above 25 requires the explicit acknowledgment flag and is clamped |
+| `budget_N` | `10` | `1..25` (`BUDGET_HARD_MAX=25`) | Dispatch overflow is deferred; values above 25 are clamped and recorded as `guardrail_clamped` |
 | `score_cap` | `200` | `>0` | Caps calculated scores |
 | `tier_high_min` | `60` | `> tier_medium_min` | High-tier PR routing threshold |
 | `tier_medium_min` | `20` | `>0` | Medium-tier issue routing threshold |
@@ -112,7 +113,7 @@ evidence, merge behavior, or production results are claimed here because LIVE ha
 | `major_only_requires_human` | `true` | `true`, `false` | Routing label only; unresolved majors remain ineligible for auto-merge |
 | `alert_source` | `api` | `api`, `sarif_file` | SIMULATE uses the checked-in fixture |
 | `alert_fixture_path` | `fixtures/codeql_alerts.json` | Path | Captured CodeQL/SARIF input |
-| `ci_evidence_mode` | resolved by §3 0d | `github`, `local` | `local` forces auto-merge off |
+| `ci_evidence_mode` | resolved by §3 0d | `actions`, `local` | `local` forces auto-merge off; legacy `github` values map to `actions` |
 | `ci_wait_timeout_s` | `5400` | `>0` | Bounds GitHub evidence waiting |
 | `auto_merge_enabled` | `false` | `true`, `false` | Never sufficient alone; forced off for local evidence |
 | `has_issues` | `true` | `true`, `false` | False aborts before writes unless degraded PR-comment sink is selected |
@@ -128,24 +129,26 @@ evidence, merge behavior, or production results are claimed here because LIVE ha
 | `devin_api_key` | unset | Runtime secret | Environment-only; required by LIVE |
 
 `SECURITY_ISSUE_MODE=generic_tracking` and `BUDGET_HARD_MAX=25` are constants, not knobs.
-Security issues are always detail-free. Structural role separation and reviewer ownership
-are not configurable.
-An incomplete post-join reviewer diff inspection is recorded as
-`diff_review_incomplete`, distinct from an unresolved implementation/reviewer disagreement.
+Security issues are always detail-free. The single remediation session is responsible for
+implementation, while the orchestrator independently verifies the declared criterion,
+publishes artifacts, and evaluates CI evidence before merge.
 
 ## Docker and Compose smoke
 
 The image uses Python 3.11, copies only the package and `config/`, `templates/`, and
-`fixtures/`, and runs as a non-root user. No network is needed for the smoke:
+`fixtures/`, and runs as a non-root user. The target checkout is mounted read-only at
+`/target-repo`; override `SUPERSET_CHECKOUT` when the clone is elsewhere. Bind-mounted output
+must be writable by the container user:
 
 ```bash
 mkdir -p docker-output
-docker compose run --rm remediation
+PIPELINE_UID="$(id -u)" PIPELINE_GID="$(id -g)" \
+  docker compose run --rm remediation
 ```
 
-Compose uses `network_mode: none` and mounts `./docker-output` at `/output`. LIVE credentials,
-if ever used by an embedding deployment, are runtime environment values and are not Docker
-build inputs.
+Compose uses `network_mode: none`, mounts `./docker-output` at `/output`, and mounts the
+target checkout read-only. LIVE credentials, if ever used by an embedding deployment, are
+runtime environment values and are not Docker build inputs.
 
 ## Observability and artifacts
 
@@ -170,5 +173,4 @@ Verified in this workstream: package import, static checks, baseline reproductio
 captured Superset revision (identical except `captured_at`), credential-free SIMULATE, and the
 Docker Compose smoke when a Docker daemon is available. The implementation has not run LIVE;
 therefore live GitHub/Devin probes, remote writes, CI evidence, merge behavior, and production
-PR lifecycle outcomes are not proven. Reviewer-owned files under `tests/` are intentionally
-not modified or run.
+PR lifecycle outcomes are not proven.

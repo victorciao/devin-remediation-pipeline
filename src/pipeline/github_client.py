@@ -211,6 +211,12 @@ def run_live_preflight(config: PipelineConfig, transport: GitHubTransport) -> Li
             ReasonCode.CAPABILITY_UNAVAILABLE,
             "repository has_issues is unavailable",
         )
+    permissions = repository.get("permissions")
+    if isinstance(permissions, Mapping) and permissions.get("push") is False:
+        raise PreflightError(
+            ReasonCode.TOKEN_CAPABILITY_MISSING,
+            "token does not have push access to the target repository",
+        )
     if not has_issues:
         raise PreflightError(
             ReasonCode.CAPABILITY_UNAVAILABLE,
@@ -228,14 +234,40 @@ def run_live_preflight(config: PipelineConfig, transport: GitHubTransport) -> Li
                 ReasonCode.TOKEN_CAPABILITY_MISSING,
                 "token cannot read code-scanning alerts",
             ) from exc
-        if exc.status_code == 404:
-            code_scanning_available = False
-            notes.append("code_scanning: capability_unavailable")
-        else:
+        raise PreflightError(
+            ReasonCode.CAPABILITY_UNAVAILABLE,
+            "cannot read code-scanning alerts",
+        ) from exc
+
+    try:
+        base_ref = _mapping(
+            transport.get(_path(config, "/git/ref/heads/master")),
+            "base branch reference",
+        )
+        base_object = _mapping(base_ref.get("object"), "base branch object")
+        base_sha = base_object.get("sha")
+        analyses = transport.get(_path(config, "/code-scanning/analyses"))
+    except HttpTransportError as exc:
+        raise PreflightError(
+            ReasonCode.CAPABILITY_UNAVAILABLE,
+            "cannot read CodeQL analysis freshness",
+        ) from exc
+    if analyses is None or (isinstance(analyses, list) and not analyses):
+        raise PreflightError(
+            ReasonCode.CAPABILITY_UNAVAILABLE,
+            "target repository has no CodeQL analysis at the target base SHA",
+        )
+    if isinstance(analyses, list):
+        latest = analyses[0]
+        if (
+            not isinstance(latest, Mapping)
+            or latest.get("ref") not in (None, "refs/heads/master", "master")
+            or latest.get("commit_sha") != base_sha
+        ):
             raise PreflightError(
                 ReasonCode.CAPABILITY_UNAVAILABLE,
-                "cannot read code-scanning alerts",
-            ) from exc
+                "latest master CodeQL analysis is not fresh at the target base SHA",
+            )
 
     try:
         identity = _mapping(transport.get("/user"), "token identity")
@@ -246,13 +278,6 @@ def run_live_preflight(config: PipelineConfig, transport: GitHubTransport) -> Li
                 config,
                 "/actions/runs?"
                 + urlencode({"event": "pull_request", "status": "completed", "per_page": "1"}),
-            )
-        )
-        dispatch_runs = transport.get(
-            _path(
-                config,
-                "/actions/runs?"
-                + urlencode({"event": "workflow_dispatch", "status": "completed", "per_page": "1"}),
             )
         )
     except HttpTransportError as exc:
@@ -271,14 +296,14 @@ def run_live_preflight(config: PipelineConfig, transport: GitHubTransport) -> Li
         for scope in value.split(",")
         if scope.strip()
     )
-    has_completed_actions = _workflow_count(workflows) > 0 and (
-        _has_completed_run(pull_request_runs) or _has_completed_run(dispatch_runs)
-    )
-    ci_mode = CiEvidenceMode.GITHUB if has_completed_actions else CiEvidenceMode.LOCAL
-    if ci_mode is CiEvidenceMode.LOCAL:
-        notes.append("ci_evidence_mode: local (no completed pull_request/workflow_dispatch run)")
-    else:
-        notes.append("ci_evidence_mode: github (completed Actions history observed)")
+    has_completed_actions = _workflow_count(workflows) > 0 and _has_completed_run(pull_request_runs)
+    if not has_completed_actions:
+        raise PreflightError(
+            ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+            "target repository has no completed pull_request Actions run",
+        )
+    ci_mode = CiEvidenceMode.ACTIONS
+    notes.append("ci_evidence_mode: actions (completed pull_request Actions history observed)")
     return LivePreflight(
         has_issues=has_issues,
         code_scanning_available=code_scanning_available,
@@ -346,14 +371,6 @@ def upgrade_ci_mode(
     already_upgraded: bool = False,
 ) -> CiModeTransition:
     """Upgrade local evidence to GitHub evidence once check runs are observed."""
-    if current is CiEvidenceMode.LOCAL and not already_upgraded and evidence.conclusions:
-        if evidence.detail == "awaiting_workflow_approval":
-            return CiModeTransition(
-                CiEvidenceMode.LOCAL,
-                False,
-                ReasonCode.AWAITING_WORKFLOW_APPROVAL,
-            )
-        return CiModeTransition(CiEvidenceMode.GITHUB, True)
     if evidence.detail == "awaiting_workflow_approval":
         return CiModeTransition(current, False, ReasonCode.AWAITING_WORKFLOW_APPROVAL)
     return CiModeTransition(current, False)
@@ -750,14 +767,6 @@ class GitHubClient:
             url,
             state,
             merged_at if isinstance(merged_at, str) else None,
-        )
-
-    def patch_pr_body(self, number: int, body: str) -> None:
-        """Update a PR body after retrieving its commit provenance."""
-        self._write(
-            "patch",
-            f"/repos/{self._config.target_owner}/{self._config.target_repo}/pulls/{number}",
-            {"body": body},
         )
 
     def add_labels(self, number: int, labels: Sequence[str]) -> None:

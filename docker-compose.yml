@@ -16,3 +16,4 @@ services:
       - /app/fixtures/baseline.json
     volumes:
       - ./docker-output:/output
+      - ${SUPERSET_CHECKOUT:-/home/ubuntu/repos/superset}:/target-repo:ro

@@ -29,7 +29,6 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from pipeline.config import (
-    AlertSource,
     CiEvidenceMode,
     ConfigError,
     Mode,
@@ -153,6 +152,7 @@ class CandidateRunner:
 
     def _persist(self, candidate: Candidate, **update: object) -> Candidate:
         """Append one lifecycle row, preserving durable artifact identity."""
+        update.setdefault("run_id", self.run_id)
         updated = candidate.model_copy(update=update)
         self.state_store.append(updated)
         return updated
@@ -318,6 +318,7 @@ class CandidateRunner:
             state=CandidateState.ISSUE_CREATED,
             issue_number=number,
             issue_url=url,
+            issue_adopted=adopted,
         )
 
     def _dispatch(self, candidate: Candidate) -> Candidate:
@@ -364,7 +365,11 @@ class CandidateRunner:
 
             def record(evidence: SessionAttempt, row: Candidate = candidate) -> None:
                 """Persist the session identity before the session is polled."""
-                self.state_store.append(row.model_copy(update={"session_id": evidence.session_id}))
+                self.state_store.append(
+                    row.model_copy(
+                        update={"run_id": self.run_id, "session_id": evidence.session_id}
+                    )
+                )
 
             try:
                 run = self.orchestrator.run_candidate(
@@ -406,6 +411,9 @@ class CandidateRunner:
             "verify_command": output.verify_command,
             "testing_notes": output.testing_notes,
             "criterion_notes": output.criterion_notes,
+            "claimed_test_nodeid": output.test_nodeid,
+            "claimed_test_paths": list(output.test_paths),
+            "claimed_suite_scope": list(output.suite_scope),
         }
         return self._persist(
             candidate,
@@ -413,12 +421,15 @@ class CandidateRunner:
             session_id=run.attempt.session_id,
             session_attempts=run.attempt.attempt,
             head_sha=head_sha,
-            test_nodeid=output.test_nodeid or candidate.nodeid,
-            test_paths=list(output.test_paths),
-            test_added=output.test_nodeid is not None,
-            test_author=run.attempt.session_id,
+            claimed_test_nodeid=output.test_nodeid,
+            claimed_test_paths=list(output.test_paths),
+            claimed_suite_scope=list(output.suite_scope),
+            test_nodeid=candidate.test_nodeid,
+            test_paths=list(candidate.test_paths),
+            test_added=candidate.test_added,
+            test_author=candidate.test_author,
             fix_summary=output.fix_summary,
-            suite_scope=list(output.suite_scope) or candidate.suite_scope,
+            suite_scope=list(candidate.suite_scope),
         )
 
     def _verify(self, candidate: Candidate) -> Candidate:
@@ -434,6 +445,10 @@ class CandidateRunner:
         if baseline is not None:
             update["red_baseline"] = baseline
             update["lifted_markers"] = list(baseline.still_skipped_descendants)
+        if evidence.satisfied is True and candidate.lane is Lane.SKIPPED_TESTS:
+            update["test_added"] = True
+            update["test_nodeid"] = candidate.nodeid
+            update["test_author"] = "orchestrator"
         if evidence.reason is ReasonCode.STALE_SKIP:
             update["test_added"] = False
             update["test_exempt_reason"] = ReasonCode.STALE_SKIP
@@ -850,14 +865,16 @@ def _enumerate(
     notes: list[str],
 ) -> list[Candidate]:
     """Enumerate all three lanes for this run, fresh, regardless of trigger."""
-    valid = baseline.get("baseline_valid_lanes")
-    valid_lanes = {str(item) for item in valid} if isinstance(valid, list) else set()
+    if config.mode is Mode.LIVE and not target_exists:
+        notes.append("target checkout unavailable; LIVE discovery aborted")
+        return []
+    all_lanes = {lane.value for lane in Lane}
     baseline_major = baseline.get("current_major")
     current_major = baseline_major if isinstance(baseline_major, int) else None
     candidates: list[Candidate] = []
     skipped_failures: list[dict[str, str | int | None]] = []
     deprecation_failures: list[dict[str, str | int | bool | None]] = []
-    if "codeql" in valid_lanes:
+    if Lane.CODEQL.value in all_lanes:
         payload: object
         if config.mode is Mode.LIVE and preflight is not None and preflight.code_scanning_available:
             payload = preflight.code_scanning_alerts
@@ -872,7 +889,7 @@ def _enumerate(
                 base_sha=base_sha,
             )
         )
-    if "skipped_tests" in valid_lanes:
+    if Lane.SKIPPED_TESTS.value in all_lanes:
         if target_exists:
             skipped, _failures = enumerate_skipped_tests(
                 repo_path,
@@ -880,7 +897,7 @@ def _enumerate(
                 failures=skipped_failures,
             )
             candidates.extend(skipped)
-        else:
+        elif config.mode is not Mode.LIVE:
             candidates.extend(
                 _fixture_candidates(
                     baseline,
@@ -889,7 +906,7 @@ def _enumerate(
                     current_major=current_major,
                 )
             )
-    if "deprecations" in valid_lanes:
+    if Lane.DEPRECATIONS.value in all_lanes:
         if target_exists:
             release = baseline.get("current_release")
             candidates.extend(
@@ -902,7 +919,7 @@ def _enumerate(
                     failures=deprecation_failures,
                 )
             )
-        else:
+        elif config.mode is not Mode.LIVE:
             candidates.extend(
                 _fixture_candidates(
                     baseline,
@@ -1038,8 +1055,8 @@ def run_once(
             }
         )
         notes.extend(preflight.notes)
-        if not preflight.code_scanning_available:
-            config = config.model_copy(update={"alert_source": AlertSource.SARIF_FILE})
+        if not target_exists:
+            raise RunAbort("LIVE requires a usable target checkout; fixture discovery is disabled")
         session_transport = UrllibDevinTransport()
     repo_name = f"{config.target_owner}/{config.target_repo}"
     marker_search = None
@@ -1095,6 +1112,7 @@ def run_once(
         checkout = LocalCheckout(
             repo_path=repo_path,
             worktree_root=output_dir / "worktrees",
+            pytest_command=config.pytest_command,
         )
     if config.mode is Mode.SIMULATE:
         observers = simulated_observers(base_sha=resolved_base_sha)

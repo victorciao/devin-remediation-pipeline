@@ -213,6 +213,7 @@ class Candidate(StrictModel):
     """A normalized remediation candidate and its current pipeline state."""
 
     candidate_id: str = Field(min_length=1)
+    run_id: str | None = None
     lane: Lane
     repo: str = Field(min_length=1)
     stable_locator: str = Field(min_length=1)
@@ -286,6 +287,7 @@ class Candidate(StrictModel):
     reason_detail: str | None = None
     pr_url: str | None = None
     issue_url: str | None = None
+    issue_adopted: bool = False
     merged_at: str | None = None
     merge_verified: bool = False
     auto_merge_requested: bool = False
@@ -313,6 +315,9 @@ class Candidate(StrictModel):
     red_baseline: RedBaselineResult | None = None
     lifted_markers: list[str] = Field(default_factory=list)
     test_nodeid: str | None = None
+    claimed_test_nodeid: str | None = None
+    claimed_test_paths: list[str] = Field(default_factory=list)
+    claimed_suite_scope: list[str] = Field(default_factory=list)
     fix_summary: str | None = None
 
 
@@ -343,6 +348,7 @@ class EventRecord(StrictModel):
     check_run_conclusions: list[CheckRunConclusion] = Field(default_factory=list)
     pr_url: str | None = None
     issue_url: str | None = None
+    issue_adopted: bool = False
     issue_number: int | None = Field(default=None, ge=1)
     pr_number: int | None = Field(default=None, ge=1)
     merged_at: str | None = None

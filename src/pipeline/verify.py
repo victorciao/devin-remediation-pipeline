@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from typing import Literal
 
 from pipeline.config import CiEvidenceMode, Lane1AlertCheck, PipelineConfig
 from pipeline.red_baseline import classify_red_baseline
@@ -55,6 +56,7 @@ class SuiteResult:
     passed: bool
     command: str
     failing_nodeids: tuple[str, ...] = ()
+    reason: ReasonCode | None = None
 
 
 @dataclass(frozen=True)
@@ -84,12 +86,14 @@ class ItemRunResult:
 
     outcomes: tuple[PerItemOutcome, ...]
     command: str
+    reason: ReasonCode | None = None
 
 
 ItemRunner = Callable[[str, str], ItemRunResult]
 SuiteRunner = Callable[[Sequence[str], str], SuiteResult]
 SymbolProbe = Callable[[Candidate, str], SymbolObservation]
 AlertProbe = Callable[[Candidate, str], AlertObservation]
+Stage = Literal["pre_pr", "post_pr"]
 
 
 @dataclass
@@ -142,7 +146,23 @@ def verify_lane2(
             _unobservable(criterion, (), "no local checkout was available to run the nodeid"),
             None,
         )
-    base_run = observers.run_item(base_sha, nodeid)
+    owner = getattr(observers.run_item, "__self__", None)
+    with_diff = getattr(owner, "run_item_with_test_diff", None)
+    if callable(with_diff):
+        base_run = with_diff(base_sha, head_sha, nodeid, candidate.test_paths)
+    else:
+        base_run = observers.run_item(base_sha, nodeid)
+    if base_run.reason is not None:
+        return (
+            CriterionEvidence(
+                criterion=criterion,
+                satisfied=False,
+                commands=[base_run.command],
+                observations=["test capability was unavailable at base"],
+                reason=base_run.reason,
+            ),
+            None,
+        )
     baseline = classify_red_baseline(
         _baseline_expectation(candidate),
         base_run.outcomes,
@@ -183,6 +203,17 @@ def verify_lane2(
     observations.extend(
         f"{outcome.nodeid}: {outcome.outcome.value} at head" for outcome in head_run.outcomes
     )
+    if head_run.reason is not None:
+        return (
+            CriterionEvidence(
+                criterion=criterion,
+                satisfied=False,
+                commands=commands,
+                observations=observations + ["test capability was unavailable at head"],
+                reason=head_run.reason,
+            ),
+            baseline,
+        )
     green = bool(head_run.outcomes) and all(
         outcome.outcome is ItemOutcome.PASSED for outcome in head_run.outcomes
     )
@@ -217,10 +248,54 @@ def _suite_evidence(
     commands: list[str],
     observations: list[str],
     config: PipelineConfig,
+    stage: Stage,
 ) -> CriterionEvidence | None:
     """Return failing suite evidence, or None when the suite is green."""
     if config.ci_evidence_mode is not CiEvidenceMode.LOCAL:
-        observations.append("suite-green is observed post-PR from the fork's Python-Unit context")
+        if observers.run_suite is None:
+            return CriterionEvidence(
+                criterion=criterion,
+                satisfied=False,
+                stage=stage,
+                commands=commands,
+                observations=observations,
+                reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+            )
+        scope = list(candidate.suite_scope)
+        suite = observers.run_suite(scope, head_sha)
+        commands.append(suite.command)
+        observations.append(
+            f"Python-Unit suite over {', '.join(scope) or 'default scope'} at {head_sha}: "
+            f"{'success' if suite.passed else 'failure'}"
+        )
+        if suite.reason is not None:
+            return CriterionEvidence(
+                criterion=criterion,
+                satisfied=False,
+                stage=stage,
+                commands=commands,
+                observations=observations,
+                reason=suite.reason,
+            )
+        if not suite.passed:
+            observations.extend(f"failing nodeid: {nodeid}" for nodeid in suite.failing_nodeids)
+            return CriterionEvidence(
+                criterion=criterion,
+                satisfied=False,
+                stage=stage,
+                commands=commands,
+                observations=observations,
+                reason=ReasonCode.SUITE_REGRESSED,
+            )
+        if stage != "post_pr":
+            return CriterionEvidence(
+                criterion=criterion,
+                satisfied=None,
+                stage=stage,
+                commands=commands,
+                observations=observations,
+                reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
+            )
         return None
     if observers.run_suite is None:
         return _unobservable(
@@ -253,7 +328,7 @@ def verify_lane1(
     head_sha: str,
     observers: Observers,
     config: PipelineConfig,
-    stage: str = "pre_pr",
+    stage: Stage = "pre_pr",
 ) -> CriterionEvidence:
     """Evaluate LANE 1's alert-absence plus suite-green criterion."""
     criterion = candidate.success_criterion or LANE1_CRITERION
@@ -271,6 +346,7 @@ def verify_lane1(
             commands=commands,
             observations=observations,
             config=config,
+            stage="post_pr" if stage == "post_pr" else "pre_pr",
         )
         if suite_failure is not None:
             return suite_failure
@@ -322,6 +398,7 @@ def verify_lane1(
         commands=commands,
         observations=observations,
         config=config,
+        stage="post_pr" if stage == "post_pr" else "pre_pr",
     )
     if suite_failure is not None:
         return suite_failure
@@ -340,6 +417,7 @@ def verify_lane3(
     head_sha: str,
     observers: Observers,
     config: PipelineConfig,
+    stage: Stage = "pre_pr",
 ) -> CriterionEvidence:
     """Evaluate LANE 3's symbol-absence plus suite-green criterion."""
     criterion = candidate.success_criterion or LANE3_CRITERION
@@ -373,12 +451,14 @@ def verify_lane3(
         commands=commands,
         observations=observations,
         config=config,
+        stage="post_pr" if stage == "post_pr" else "pre_pr",
     )
     if suite_failure is not None:
         return suite_failure
     return CriterionEvidence(
         criterion=criterion,
         satisfied=True,
+        stage="post_pr" if stage == "post_pr" else "pre_pr",
         commands=commands,
         observations=observations,
     )
@@ -391,18 +471,36 @@ def verify_candidate(
     head_sha: str,
     observers: Observers,
     config: PipelineConfig,
-    stage: str = "pre_pr",
+    stage: Stage = "pre_pr",
 ) -> tuple[CriterionEvidence, RedBaselineResult | None]:
     """Evaluate the candidate's lane criterion at the requested stage."""
     if candidate.lane is Lane.SKIPPED_TESTS:
         if stage != "pre_pr":
-            evidence = CriterionEvidence(
-                criterion=candidate.success_criterion or LANE2_CRITERION,
-                satisfied=True,
+            criterion = candidate.success_criterion or LANE2_CRITERION
+            post_commands: list[str] = []
+            post_observations: list[str] = []
+            suite_failure = _suite_evidence(
+                candidate,
+                criterion,
+                head_sha=head_sha,
+                observers=observers,
+                commands=post_commands,
+                observations=post_observations,
+                config=config,
                 stage="post_pr",
-                observations=["LANE 2 evidence is complete before the pull request"],
             )
-            return evidence, candidate.red_baseline
+            if suite_failure is not None:
+                return suite_failure, candidate.red_baseline
+            return (
+                CriterionEvidence(
+                    criterion=criterion,
+                    satisfied=True,
+                    stage="post_pr",
+                    commands=post_commands,
+                    observations=post_observations,
+                ),
+                candidate.red_baseline,
+            )
         return verify_lane2(
             candidate,
             base_sha=base_sha,
@@ -421,12 +519,28 @@ def verify_candidate(
             None,
         )
     if stage != "pre_pr":
+        criterion = candidate.success_criterion or LANE3_CRITERION
+        lane3_commands: list[str] = []
+        lane3_observations: list[str] = []
+        suite_failure = _suite_evidence(
+            candidate,
+            criterion,
+            head_sha=head_sha,
+            observers=observers,
+            commands=lane3_commands,
+            observations=lane3_observations,
+            config=config,
+            stage="post_pr",
+        )
+        if suite_failure is not None:
+            return suite_failure, None
         return (
             CriterionEvidence(
-                criterion=candidate.success_criterion or LANE3_CRITERION,
+                criterion=criterion,
                 satisfied=True,
                 stage="post_pr",
-                observations=["LANE 3 evidence is complete before the pull request"],
+                commands=lane3_commands,
+                observations=lane3_observations,
             ),
             None,
         )
@@ -436,6 +550,7 @@ def verify_candidate(
             head_sha=head_sha,
             observers=observers,
             config=config,
+            stage=stage,
         ),
         None,
     )
