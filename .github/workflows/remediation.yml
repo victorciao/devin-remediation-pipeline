@@ -52,6 +52,8 @@ jobs:
       GITHUB_PAT_REMEDIATION: ${{ secrets.REMEDIATION_GITHUB_PAT }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Checkout Superset target
         uses: actions/checkout@v4
         with:
@@ -98,3 +100,57 @@ jobs:
         with:
           name: remediation-${{ github.run_id }}
           path: remediation-output
+      - name: Publish remediation run history
+        if: always()
+        continue-on-error: true
+        run: |
+          state_file="$(find remediation-output/state -maxdepth 1 -type f -name '*.jsonl' -print -quit 2>/dev/null || true)"
+          if [[ -z "$state_file" ]]; then
+            echo "No remediation state JSONL found; skipping run-history publication."
+            exit 0
+          fi
+
+          timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+          run_dir="history/${timestamp}-${{ github.run_id }}"
+          mkdir -p "$run_dir/state" "$run_dir/reports"
+          cp "$state_file" "$run_dir/state/$(basename "$state_file")"
+          if [[ -f remediation-output/reports/events.jsonl ]]; then
+            cp remediation-output/reports/events.jsonl "$run_dir/reports/events.jsonl"
+          fi
+
+          result_args=()
+          while IFS= read -r history_dir; do
+            result_args+=(--run-dir "$history_dir")
+          done < <(find history -mindepth 1 -maxdepth 1 -type d -print | sort)
+          python -m pipeline.observability.results \
+            "${result_args[@]}" \
+            --baseline fixtures/baseline.json \
+            --out RESULTS.md
+
+          git config user.name "devin-remediation"
+          git config user.email "devin-remediation@users.noreply.github.com"
+          git add history RESULTS.md
+          if git diff --cached --quiet; then
+            echo "No remediation history or RESULTS.md changes to commit."
+            exit 0
+          fi
+          git commit -m "chore(observability): record run ${{ github.run_id }} and refresh RESULTS.md"
+          git remote set-url --push origin "https://x-access-token:${GITHUB_PAT_REMEDIATION}@github.com/${{ github.repository }}.git"
+
+          for attempt in 1 2 3; do
+            if ! git fetch origin main; then
+              sleep 5
+              continue
+            fi
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              sleep 5
+              continue
+            fi
+            if git push --quiet origin HEAD:main; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Failed to publish remediation run history after 3 attempts."
+          exit 0
