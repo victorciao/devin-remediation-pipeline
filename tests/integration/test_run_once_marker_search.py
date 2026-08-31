@@ -29,6 +29,7 @@ from pipeline.observability.events import EventLog
 from pipeline.schemas import (
     CandidateState,
     EventRecord,
+    Lane,
     ReasonCode,
     RunEventRecord,
 )
@@ -259,6 +260,90 @@ def test_marker_search_uses_one_issue_scoped_paginated_query(
 def test_the_abort_publishes_nothing(aborted_run: AbortedRun) -> None:
     """§14.1 — fail-closed: an unavailable dedupe capability performs no remote write."""
     assert aborted_run.writes == []
+
+
+def test_medium_tier_adopts_marker_issue_without_dispatching(
+    tmp_path: Path,
+) -> None:
+    """§17.2 — medium candidates converge on one issue and never enter session dispatch."""
+    fixture_alerts = read_alert_fixture(FIXTURES_DIR / "codeql_alerts.json")
+    assert isinstance(fixture_alerts, list)
+    transport = FakeGitHubTransport(
+        base_sha="1" * 40,
+        code_scanning_alerts=[fixture_alerts[5]],
+        completed_workflow_runs=True,
+    )
+    config = config_for(
+        Mode.LIVE,
+        tier_high_min=100.0,
+        tier_medium_min=80.0,
+        only_lanes=(Lane.CODEQL,),
+        budget_N=1,
+        max_sessions=1,
+    )
+    first_output = tmp_path / "first"
+    second_output = tmp_path / "second"
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(entrypoint, "UrllibGitHubTransport", lambda: transport)
+        patch.setattr(entrypoint, "UrllibDevinTransport", FakeDevinTransport)
+        entrypoint.run_once(
+            config=config,
+            repo_path=TARGET_CHECKOUT,
+            output_dir=first_output,
+            baseline_path=baseline_file(tmp_path),
+            base_sha="1" * 40,
+            head_branch="devin/medium-marker-first",
+            base_branch="master",
+        )
+
+    first_rows = read_rows(first_output / "state" / LIVE_STATE_FILE)
+    first_latest = {row["candidate_id"]: row for row in first_rows}
+    codeql_rows = [row for row in first_latest.values() if row["lane"] == Lane.CODEQL.value]
+    assert len(codeql_rows) == 1
+    candidate_id = codeql_rows[0]["candidate_id"]
+    issue_number = codeql_rows[0]["issue_number"]
+    issue_url = codeql_rows[0]["issue_url"]
+    assert isinstance(issue_number, int)
+    assert isinstance(issue_url, str)
+    issue_write = next(
+        record
+        for record in transport.writes
+        if record.path.endswith("/issues") and record.payload["body"]
+    )
+    transport.marker_items = (
+        {
+            "number": issue_number,
+            "html_url": issue_url,
+            "body": issue_write.payload["body"],
+        },
+    )
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(entrypoint, "UrllibGitHubTransport", lambda: transport)
+        patch.setattr(entrypoint, "UrllibDevinTransport", FakeDevinTransport)
+        entrypoint.run_once(
+            config=config,
+            repo_path=TARGET_CHECKOUT,
+            output_dir=second_output,
+            baseline_path=baseline_file(tmp_path),
+            base_sha="1" * 40,
+            head_branch="devin/medium-marker-second",
+            base_branch="master",
+        )
+
+    all_issue_writes = [record for record in transport.writes if record.path.endswith("/issues")]
+    assert len(all_issue_writes) == 1
+    assert all(not record.path.endswith("/git/refs") for record in transport.writes)
+    assert all(not record.path.endswith("/pulls") for record in transport.writes)
+
+    second_rows = read_rows(second_output / "state" / LIVE_STATE_FILE)
+    second_latest = {row["candidate_id"]: row for row in second_rows}
+    second = second_latest[candidate_id]
+    assert second["issue_adopted"] is True
+    assert second["marker_search_outcome"] == MarkerSearchOutcome.FOUND.value
+    assert second["session_id"] is None
+    assert second["head_branch"] is None
+    assert second["pr_url"] is None
 
 
 def test_a_live_run_keeps_its_durable_state_in_its_own_file(aborted_run: AbortedRun) -> None:

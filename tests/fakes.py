@@ -66,6 +66,7 @@ class FakeGitHubTransport:
     pr_state: str = "open"
     pr_merged_at: str | None = None
     marker_hits: int = 0
+    marker_items: Sequence[Mapping[str, object]] = ()
     marker_search_error: HttpTransportError | None = None
     token_login: str = "devin-bot"
     has_issues: bool = True
@@ -100,7 +101,10 @@ class FakeGitHubTransport:
         if path.startswith("/search/issues"):
             if self.marker_search_error is not None:
                 raise self.marker_search_error
-            return {"total_count": self.marker_hits, "items": []}
+            return {
+                "total_count": self.marker_hits or len(self.marker_items),
+                "items": list(self.marker_items),
+            }
         if path == "/user":
             return {"login": self.token_login}
         if path.startswith(f"{prefix}/code-scanning/alerts"):
