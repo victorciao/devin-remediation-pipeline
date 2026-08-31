@@ -118,6 +118,11 @@ _MARKER_DEFER_REASONS = {
 }
 
 
+def _int_field(value: object) -> int | None:
+    """Return an integer field without accepting booleans as integers."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 @dataclass
 class LiveTarget:
     """The live fork, its transport and the base the run pins candidates to."""
@@ -804,6 +809,10 @@ def _record_candidate(
         if deprecated_value is not None and current_major is not None
         else False
     )
+    public_value = record.get("public_api_surface")
+    public = public_value if isinstance(public_value, bool) else None
+    callers = _int_field(record.get("caller_count"))
+    overrides = _int_field(record.get("override_count"))
     return candidate.model_copy(
         update={
             "candidate_id": f"{lane.value}-{uuid.uuid5(uuid.NAMESPACE_URL, locator_value).hex}",
@@ -818,6 +827,12 @@ def _record_candidate(
             "targeted_test_signal": "targeted",
             "transformation_scope": "isolated_removal",
             "reason": None if eol else ReasonCode.NOT_EOL,
+            "current_major": current_major,
+            "public_api_surface": public,
+            "caller_count": callers,
+            "override_count": overrides,
+            "internal_caller": callers > 0 if callers is not None else None,
+            "override_surface": overrides > 0 if overrides is not None else None,
         }
     )
 
