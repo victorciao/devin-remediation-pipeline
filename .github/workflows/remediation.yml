@@ -39,6 +39,10 @@ on:
         description: High-tier score threshold
         required: false
         default: ""
+      max_total_acu:
+        description: Per-run ACU ceiling; empty uses the configured default
+        required: false
+        default: ""
 
 concurrency:
   group: remediation-pipeline
@@ -78,6 +82,7 @@ jobs:
           BUDGET_N: ${{ github.event.inputs.budget_n || '1' }}
           MAX_SESSIONS: ${{ github.event.inputs.max_sessions || '1' }}
           TIER_HIGH_MIN: ${{ github.event.inputs.tier_high_min || '' }}
+          MAX_TOTAL_ACU: ${{ github.event.inputs.max_total_acu || '' }}
         run: |
           args=(
             --mode=live
@@ -93,6 +98,9 @@ jobs:
           fi
           if [[ -n "$TIER_HIGH_MIN" ]]; then
             args+=(--tier-high-min "$TIER_HIGH_MIN")
+          fi
+          if [[ -n "$MAX_TOTAL_ACU" ]]; then
+            args+=(--max-total-acu "$MAX_TOTAL_ACU")
           fi
           python -m pipeline "${args[@]}"
       - name: Upload remediation artifacts
