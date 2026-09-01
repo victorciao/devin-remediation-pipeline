@@ -24,6 +24,21 @@ def test_coverage_bar_default_meets_the_eighty_percent_floor(
     assert simulate_config.coverage_bar >= 0.80
 
 
+def test_verification_pass_rate_floor_is_configurable() -> None:
+    """The verification KPI floor follows the normal CLI and environment precedence."""
+    assert PipelineConfig().verification_pass_rate_floor == 0.80
+    assert (
+        load_config(cli_args=["--verification-pass-rate-floor=0.75"]).verification_pass_rate_floor
+        == 0.75
+    )
+    assert (
+        load_config(
+            env={"PIPELINE_VERIFICATION_PASS_RATE_FLOOR": "0.65"}
+        ).verification_pass_rate_floor
+        == 0.65
+    )
+
+
 @pytest.mark.parametrize("raw", ["", "   ", "LIVE-ish", "dry-run", None])
 def test_mode_unset_empty_or_unrecognized_resolves_to_simulate(raw: str | None) -> None:
     """§17 — every unusable mode value resolves to `simulate`."""

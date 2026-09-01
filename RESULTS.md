@@ -81,6 +81,8 @@ Candidates without an issue or a pull request: 29 (excluded from the table above
 - **Edited:** 0
 - **Rejected:** 0
 - **Merge Rate Alert:** 0
+- **Verification Pass Rate Alert:** 0
+- **Publication Safety Alert:** 0
 - **Session Failure Alert:** 0
 
 ## Burn-down by lane

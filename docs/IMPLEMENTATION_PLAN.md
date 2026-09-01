@@ -248,7 +248,8 @@ or a fork match — never by a state value alone. A per-candidate failure defers
 | `required_contexts_min` / `ci_wait_timeout_s` | probe-measured (`pre-commit checks`) / `5400` | **safety-relevant** — §12; must be present and successful on the head; expiry → `ci_evidence_unavailable` |
 | `issue_sink` / `has_issues` / `marker_search_enabled` | `issues` / probed / `true` | **safety-relevant** — issue publication for both tiers; issues disabled on the fork or search unavailable → defer, never write, and a high-tier candidate is deferred before its session is created |
 | `session_timeout_s` / `max_acu_limit` / `max_total_acu` | `5400` / per-session / `500` | — |
-| `merge_rate_floor` / `session_failure_ceiling` | `0.50` / `0.30` | KPI thresholds are always written to local artifacts |
+| `merge_rate_floor` / `verification_pass_rate_floor` / `session_failure_ceiling` | `0.50` / `0.80` / `0.30` | KPI thresholds are always written to local artifacts |
+| `verification_pass_rate_alert` / `publication_safety_alert` | derived | Alert when verification pass rate is below its floor or publication safety is undetermined |
 | `coverage_bar` | `0.80` | enforced by `[tool.coverage.report] fail_under = 80` over six pure-logic modules; those modules currently measure approximately 94% |
 
 Also configurable: target `owner/repo`, GitHub token, Devin API key, rubrics, templates. **SIMULATE** (default) needs **no credentials**, makes **no** network writes and creates no sessions: discovery from fixtures, gates, scoring, rendering, reporting; every artifact is marked `artifact_simulated = true` with `writes_suppressed

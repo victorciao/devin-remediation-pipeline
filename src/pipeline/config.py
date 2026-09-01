@@ -94,6 +94,7 @@ class PipelineConfig(BaseModel):
     tier_medium_min: float = Field(default=20, gt=0, strict=True)
     eol_major_lag: int = Field(default=2, ge=1, strict=True)
     merge_rate_floor: float = Field(default=0.50, ge=0.0, le=1.0, strict=True)
+    verification_pass_rate_floor: float = Field(default=0.80, ge=0.0, le=1.0, strict=True)
     session_failure_ceiling: float = Field(default=0.30, ge=0.0, le=1.0, strict=True)
     max_sessions: int = Field(default=DEFAULT_BUDGET_N + 3, ge=1, strict=True)
     session_timeout_s: float = Field(default=DEFAULT_SESSION_TIMEOUT_S, gt=0, strict=True)
@@ -332,6 +333,7 @@ def _parse_cli(args: Sequence[str]) -> tuple[dict[str, object], bool]:
         elif normalized_key in {
             "coverage_bar",
             "merge_rate_floor",
+            "verification_pass_rate_floor",
             "session_failure_ceiling",
             "max_total_acu",
             "session_timeout_s",
@@ -360,6 +362,7 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
         "TIER_MEDIUM_MIN": "tier_medium_min",
         "EOL_MAJOR_LAG": "eol_major_lag",
         "MERGE_RATE_FLOOR": "merge_rate_floor",
+        "VERIFICATION_PASS_RATE_FLOOR": "verification_pass_rate_floor",
         "SESSION_FAILURE_CEILING": "session_failure_ceiling",
         "HAS_ISSUES": "has_issues",
         "MARKER_SEARCH_ENABLED": "marker_search_enabled",
@@ -410,6 +413,7 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
             "TIER_HIGH_MIN",
             "TIER_MEDIUM_MIN",
             "MERGE_RATE_FLOOR",
+            "VERIFICATION_PASS_RATE_FLOOR",
             "SESSION_FAILURE_CEILING",
             "MAX_TOTAL_ACU",
             "SESSION_TIMEOUT_S",

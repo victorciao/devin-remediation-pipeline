@@ -192,6 +192,7 @@ def compute_kpis(
         and not has_local_artifact(candidate)
         for candidate in candidates
     )
+    verification_pass_rate = verification_passes / len(session_ids) if session_ids else None
     terminal_states = {
         CandidateState.TERMINAL,
         CandidateState.MERGED,
@@ -210,7 +211,7 @@ def compute_kpis(
             candidate.state is CandidateState.DISPATCHING for candidate in candidates
         ),
         "publication_safety_undetermined": safety_undetermined,
-        "verification_pass_rate": (verification_passes / len(session_ids) if session_ids else None),
+        "verification_pass_rate": verification_pass_rate,
         "stale_skip_count": stale_skips,
         "test_inclusion_rate": (
             sum(
@@ -245,6 +246,11 @@ def compute_kpis(
             and merge_rate is not None
             and merge_rate < config.merge_rate_floor
         ),
+        "verification_pass_rate_alert": int(
+            verification_pass_rate is not None
+            and verification_pass_rate < config.verification_pass_rate_floor
+        ),
+        "publication_safety_alert": int(safety_undetermined > 0),
         "session_failure_alert": int(
             (session_failures / len(events) if events else 0.0) > config.session_failure_ceiling
         ),

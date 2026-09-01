@@ -114,7 +114,10 @@ it did not demonstrate PR creation, merge behavior, or an independently verified
 | `tier_medium_min` | `20` | `>0` | Medium-tier issue routing threshold |
 | `eol_major_lag` | `2` | `>=1` | Major-version age required for EOL |
 | `merge_rate_floor` | `0.50` | `0.0..1.0` | KPI alert threshold |
+| `verification_pass_rate_floor` | `0.80` | `0.0..1.0` | KPI alert threshold |
 | `session_failure_ceiling` | `0.30` | `0.0..1.0` | KPI alert threshold and run safety signal |
+| `verification_pass_rate_alert` | derived | `0` or `1` | Alerts when verification pass rate is below its floor |
+| `publication_safety_alert` | derived | `0` or `1` | Alerts when publication safety is undetermined |
 | `max_sessions` | `8` | `>=1` | Per-run hard session ceiling; exceeding it aborts |
 | `session_timeout_s` | `5400.0` | `>0` | Bounds one Devin session |
 | `max_total_acu` | `500.0` | `>0` | Per-run hard ACU ceiling; exceeding it aborts |
