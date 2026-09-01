@@ -42,7 +42,9 @@ PYTHONPATH=src .venv/bin/python -m pipeline \
 If the target checkout is absent, the entrypoint uses the baseline records for the skipped
 test and deprecation lanes and still runs from the checked-in fixtures. SIMULATE creates no
 remote writes: the GitHub transport seam rejects mutation before a transport method can be
-called. It renders the artifacts that a live run would publish.
+called. It renders the artifacts that a live run would publish. SIMULATE labels session counts
+as `(simulated)` and prefixes alert lines with `SIMULATED`; verification and publication-safety
+alerts remain visible.
 
 Configuration precedence is configuration file, then `PIPELINE_*` environment variables,
 then command-line options. For example:
@@ -59,8 +61,7 @@ configuration errors, blocking capability preconditions, or hard session/cost ce
 
 LIVE is deliberately guarded. A constrained LIVE run against `victorciao/superset` created
 30 tracking issues, one remediation branch, and one Devin session; it settled its candidate
-without creating a pull request or merging anything. No independently verified remediation
-has landed in the target repository. Runtime credentials must be supplied through the
+without creating a pull request or merging anything. Runtime credentials must be supplied through the
 environment only; they are never accepted from a configuration file, Docker build argument,
 image layer, source file, or log:
 
@@ -88,7 +89,7 @@ After obtaining explicit approval for a target run, provide the Devin-created br
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m pipeline \
-  --mode=live --head-branch devin/remediation-run \
+  --mode=live --head-branch devin/remediation \
   --repo-path /home/ubuntu/repos/superset \
   --output-dir ./live-output \
   --baseline fixtures/baseline.json

@@ -15,15 +15,15 @@ from pipeline.observability.kpis import (
     compute_burndown,
     compute_kpis,
 )
-from pipeline.schemas import Candidate, CandidateState, EventRecord
+from pipeline.schemas import (
+    REMOVED_LEGACY_CANDIDATE_KEYS,
+    Candidate,
+    CandidateState,
+    EventRecord,
+)
 
 _SHORT_ID_LENGTH = 12
 _KPI_SECTION_KEYS = ("deferred_by_reason",)
-# Removed publication fields are accepted only while reading historical evidence so seeded
-# pre-removal runs remain renderable; writers and live state reads stay strict.
-_REMOVED_LEGACY_CANDIDATE_KEYS = frozenset(
-    {"merge_mode", "auto_merge_requested", "auto_merge_eligible"}
-)
 LIFECYCLE_PROGRESS: dict[CandidateState, int] = {
     CandidateState.ENUMERATED: 0,
     CandidateState.GATED: 1,
@@ -83,9 +83,7 @@ def _read_historical_events(path: Path) -> list[EventRecord]:
         }:
             continue
         payload = {
-            key: value
-            for key, value in payload.items()
-            if key not in _REMOVED_LEGACY_CANDIDATE_KEYS
+            key: value for key, value in payload.items() if key not in REMOVED_LEGACY_CANDIDATE_KEYS
         }
         events.append(EventRecord.model_validate(payload, strict=False))
     return events
@@ -114,7 +112,7 @@ def read_run(run_dir: Path) -> RunArtifacts:
             payload = {
                 key: value
                 for key, value in payload.items()
-                if key not in _REMOVED_LEGACY_CANDIDATE_KEYS
+                if key not in REMOVED_LEGACY_CANDIDATE_KEYS
             }
         candidate = Candidate.model_validate(payload, strict=False)
         latest[candidate.candidate_id] = candidate

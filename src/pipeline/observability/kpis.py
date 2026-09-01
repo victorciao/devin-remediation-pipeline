@@ -19,7 +19,7 @@ class NotApplicable:
 
 
 BurnDownValue: TypeAlias = int | NotApplicable
-KpiValue: TypeAlias = float | int | None | NotApplicable | dict[str, int]
+KpiValue: TypeAlias = float | int | None | NotApplicable | dict[str, int] | dict[str, float]
 
 
 @dataclass(frozen=True)
@@ -113,13 +113,13 @@ def compute_kpis(
         for candidate_id, rows in by_candidate.items()
         if any(event.session_id is not None for event in rows)
     }
+    dispatched_ids = _dispatched_candidate_ids(candidates, session_ids)
     verification_passes = sum(
         any(
             event.criterion_evidence is not None and event.criterion_evidence.satisfied is True
-            for event in rows
+            for event in by_candidate.get(candidate_id, [])
         )
-        for rows in by_candidate.values()
-        if any(event.session_id is not None for event in rows)
+        for candidate_id in dispatched_ids
     )
     stale_skips = len(
         {event.candidate_id for event in events if event.reason is ReasonCode.STALE_SKIP}
@@ -192,7 +192,7 @@ def compute_kpis(
         and not has_local_artifact(candidate)
         for candidate in candidates
     )
-    verification_pass_rate = verification_passes / len(session_ids) if session_ids else None
+    verification_pass_rate = verification_passes / len(dispatched_ids) if dispatched_ids else None
     terminal_states = {
         CandidateState.TERMINAL,
         CandidateState.MERGED,
@@ -212,6 +212,9 @@ def compute_kpis(
         ),
         "publication_safety_undetermined": safety_undetermined,
         "verification_pass_rate": verification_pass_rate,
+        "verification_pass_rate_by_lane": _verification_pass_rate_by_lane(
+            candidates, events, dispatched_ids
+        ),
         "stale_skip_count": stale_skips,
         "test_inclusion_rate": (
             sum(
@@ -277,6 +280,45 @@ def _latest_pr_events(events: list[EventRecord]) -> list[EventRecord]:
         if event.pr_url is not None:
             latest[event.candidate_id] = event
     return list(latest.values())
+
+
+def _dispatched_candidate_ids(
+    candidates: list[Candidate],
+    session_ids: set[str],
+) -> set[str]:
+    """Return candidates evidenced as dispatched by a branch or session."""
+    return {
+        candidate.candidate_id for candidate in candidates if candidate.head_branch is not None
+    } | session_ids
+
+
+def _verification_pass_rate_by_lane(
+    candidates: list[Candidate],
+    events: list[EventRecord],
+    dispatched_ids: set[str],
+) -> dict[str, float]:
+    """Compute verification pass rates per dispatched candidate lane."""
+    candidate_lanes = {candidate.candidate_id: candidate.lane.value for candidate in candidates}
+    event_lanes = {event.candidate_id: event.lane.value for event in events}
+    lanes: dict[str, list[str]] = {}
+    for candidate_id in dispatched_ids:
+        lane = candidate_lanes.get(candidate_id) or event_lanes.get(candidate_id)
+        if lane is not None:
+            lanes.setdefault(lane, []).append(candidate_id)
+    by_candidate: dict[str, list[EventRecord]] = {}
+    for event in events:
+        by_candidate.setdefault(event.candidate_id, []).append(event)
+    return {
+        lane: sum(
+            any(
+                event.criterion_evidence is not None and event.criterion_evidence.satisfied is True
+                for event in by_candidate.get(candidate_id, [])
+            )
+            for candidate_id in candidate_ids
+        )
+        / len(candidate_ids)
+        for lane, candidate_ids in lanes.items()
+    }
 
 
 def _settled_pr_events(events: list[EventRecord]) -> list[EventRecord]:
@@ -381,11 +423,18 @@ def render_kpi_report(
             "deferred_by_reason",
             "marker_search_outcomes",
             "criterion_satisfaction_by_lane",
+            "verification_pass_rate_by_lane",
         }:
             continue
         label = name.replace("_", " ").title()
+        if config.mode is Mode.SIMULATE and name in {
+            "sessions_created",
+            "sessions_per_candidate",
+        }:
+            label += " (simulated)"
         if name.endswith("_alert") and metric_value:
-            lines.append(f"> **ALERT: {label}**")
+            prefix = "SIMULATED " if config.mode is Mode.SIMULATE else ""
+            lines.append(f"> **{prefix}ALERT: {label}**")
         elif name.endswith("_alert"):
             continue
         else:
@@ -410,6 +459,12 @@ def render_kpi_report(
     by_lane = metrics["criterion_satisfaction_by_lane"]
     if isinstance(by_lane, dict) and by_lane:
         lines.extend(f"- **{lane}:** {count}" for lane, count in sorted(by_lane.items()))
+    else:
+        lines.append("- None")
+    lines.extend(["", "## Verification pass rate by lane", ""])
+    pass_rates = metrics["verification_pass_rate_by_lane"]
+    if isinstance(pass_rates, dict) and pass_rates:
+        lines.extend(f"- **{lane}:** {rate}" for lane, rate in sorted(pass_rates.items()))
     else:
         lines.append("- None")
     lines.extend(["", "## Burn-down — remediation PRs opened against baseline", ""])

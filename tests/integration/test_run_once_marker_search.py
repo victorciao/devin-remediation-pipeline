@@ -399,7 +399,10 @@ def test_an_unconfigured_marker_search_completes_normally(tmp_path: Path) -> Non
     )
 
     events = EventLog(output_dir / "reports" / "events.jsonl").read_run_events()
+    rows = read_rows(output_dir / "state" / SIMULATE_STATE_FILE)
 
     assert produced != ()
     assert list((output_dir / "reports").glob("run-*.md")) != []
     assert [event for event in events if event.event_type == "marker_search_failure"] == []
+    assert rows
+    assert all(row["marker_search_outcome"] == MarkerSearchOutcome.ABSENT.value for row in rows)

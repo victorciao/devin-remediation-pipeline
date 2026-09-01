@@ -61,6 +61,7 @@ Candidates without an issue or a pull request: 29 (excluded from the table above
 - **Unpublished:** 0
 - **Publication Safety Undetermined:** 0
 - **Verification Pass Rate:** 1.0
+- **Verification Pass Rate By Lane:** codeql=1.0, deprecations=1.0, skipped_tests=1.0
 - **Stale Skip Count:** 0
 - **Test Inclusion Rate:** 0.0
 - **Criterion Satisfaction By Lane:** codeql=3, deprecations=2, skipped_tests=1

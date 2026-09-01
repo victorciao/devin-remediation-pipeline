@@ -119,7 +119,7 @@ Each factor is a 1–5 rubric row from `config/rubrics.yaml`, one table per lane
 
 ## 9. The session contract
 
-The orchestrator first creates `devin/remediation/<candidate_id>` from the target base and pins `base_sha`, then creates one session.
+The orchestrator first creates the stable publication prefix `devin/remediation/<candidate_id>` from the target base and pins `base_sha`, then creates one session. Hosted workflows pass the stable `devin/remediation` prefix; the candidate ID suffix makes each branch and PR lookup durable across runs.
 
 The prompt must contain: repo and branch; `base_sha`; lane and locator (alert rule + path + region, or nodeid, or `module:qualname`); the fix objective; **the lane's success criterion verbatim, and the evidence the session must leave behind for it** (§10), including a regression test at the narrowest level that can express the
 fix — a unit test is preferred to an integration test, and re-enabling an existing test counts; the command to run it; `git commit --signoff` and push to the candidate branch only; and the prohibition on opening any PR or issue, touching other branches, or editing unrelated tests.
@@ -168,12 +168,12 @@ write succeeds and the candidate later fails its criterion, the issue stays open
 
 Each run reconciles both artifacts against the fork before writing either. Duplicate detection differs between them, and the asymmetry is deliberate:
 
-- **PR path (high tier)** — one exact query taken immediately before the write: `GET /repos/{o}/{r}/pulls?state=all&head=<owner>:<candidate branch>`. A match is adopted, never duplicated. No marker. Because the branch name derives from `candidate_id`, at most one PR can ever exist per candidate.
+- **PR path (high tier)** — one exact query taken immediately before the write: `GET /repos/{o}/{r}/pulls?state=all&head=<owner>:<candidate branch>`. A match is adopted, never duplicated. No marker. The stable branch prefix plus `candidate_id` suffix makes the lookup durable across hosted runs, so at most one PR can ever exist per candidate.
 - **Issue path (both tiers)** — there is no branch to key on, so the issue body carries a hidden HTML-comment marker holding `candidate_id`, and dedupe is a GitHub issue search for that marker. Search indexing lags: measured on this fork at up to **~17 s**, so a crash after creating an issue but before its state row lands can
   let a later run create a second issue. **This residual window is a known, accepted, bounded risk: the blast radius is one duplicate issue, never a duplicate PR and never a merge.** Resume searches the marker first, adopts a found issue (recording its number and URL), and creates one only when the search returns nothing; a
   search that errors or is unconfigured defers the candidate and writes nothing. No write-intent rows, no reservation leases.
 
-The issue body renders the fork's issue template heading set, the marker, the lane, the locator and the score with its factor breakdown; a medium-tier body adds why the candidate was not automated. Its title obeys the PR title regex.
+Before hosted execution, committed run directories under `history/` are restored into the live append-only state file in chronological order; publication exports only rows appended by the current run. Previously settled candidates are reconciled from that state and skipped, never redispatched. The issue body renders the fork's issue template heading set, the marker, the lane, the locator and the score with its factor breakdown; a medium-tier body adds why the candidate was not automated. Its title obeys the PR title regex.
 
 The PR body renders Superset's `.github/PULL_REQUEST_TEMPLATE.md` heading set verbatim and in order — `SUMMARY`, `BEFORE/AFTER SCREENSHOTS OR ANIMATED GIF` (`n/a` for backend fixes), `TESTING INSTRUCTIONS`, `ADDITIONAL INFORMATION` with its checkbox block — plus an `EVIDENCE` section after `SUMMARY` stating the criterion and the
 commands the orchestrator ran with their outcomes, and a config-gated `AUTOMATION METADATA` section last. The body states that every commit carries the `Signed-off-by` trailer and that a human owns the merge; the pipeline never merges. A body failing section presence/order validation defers the candidate with
@@ -209,6 +209,8 @@ Every failure is terminal, leaves **at most one artifact** on the fork, and neve
 | A check run concludes `failure`/`cancelled`/`timed_out`, or `required_contexts_min` is absent or unsuccessful | `terminal/ci_check_failed` | PR URL as open-not-merged, with the offending check runs |
 | Check runs never settle within `ci_wait_timeout_s`, or the PR waits on workflow approval | `terminal/ci_evidence_unavailable` | PR URL as open-not-merged, with the unsettled check runs |
 | PR passes the post-PR gate and remains open | `awaiting_human_merge` / `manual_merge_required` | PR URL, gate result, merge owned by a human |
+| A persisted `awaiting_human_merge` PR is observed as merged | `merged` | externally observed `merged_at` and verified merge evidence |
+| A persisted `awaiting_human_merge` PR is observed closed without a merge | `terminal/closed_pull_request` | PR URL and close outcome |
 | Issue marker search errors or is unconfigured | `deferred/marker_search_failed` / `deferred/marker_search_unconfigured` | not published this run; retried next run, no issue written |
 | High-tier candidate fails its criterion after its issue was written | the criterion's terminal reason, with `issue_url` retained | issue URL as open-unremediated; no PR |
 
@@ -227,11 +229,12 @@ or a fork match — never by a state value alone. A per-candidate failure defers
   stops a known alert being re-dispatched under a new `candidate_id`.
 - **Layer 1** JSONL event log per candidate: `run_id`, lane, `candidate_id`, gate results and failed gate, score with factor breakdown, tier, `session_id`, the declared criterion and its observed evidence, `test_nodeid`/`test_paths`/`suite_scope`, PR or issue URL and number, every check run's name and conclusion,
   terminal state and reason, both artifact identities where a high-tier candidate has an issue and a PR, LANE 2 breadth fields, `related_candidate_id`.
+- Failed sessions retain their observed `session_id` on terminal and deferred rows; retries may replace that ID, so it is evidence rather than durable identity.
 - **Layer 2** `reports/run-<run_id>.md`: candidates seen, gated out with reasons, scored, dispatched, deferred, every terminal candidate with its reason, PR and issue links, merge results, `skipped`/`neutral` check runs named, and every `awaiting_human_merge` PR called out as awaiting a human. No candidate may be unaccounted
   for.
 - **Layer 3** `reports/kpis.md`: observed human-merge rate (verified externally merged PRs over published PRs); **verification pass rate = candidates whose declared criterion was satisfied / candidates dispatched**, reported overall and per lane since the criteria differ; backlog burn-down per lane against
   `fixtures/baseline.json` (`n/a` for a lane absent from `baseline_valid_lanes`); test-inclusion rate over the candidates whose criterion required a test; issues created and issues adopted, split by tier, with high-tier issues closed by their merged PR counted separately; session-failure rate; deferred-by-reason. Alerts when
-  merge rate `< merge_rate_floor = 0.50` or session-failure rate `> session_failure_ceiling = 0.30`.
+  merge rate `< merge_rate_floor = 0.50`, verification pass rate `< verification_pass_rate_floor = 0.80`, publication safety undetermined, or session-failure rate `> session_failure_ceiling = 0.30`. Verification pass rate uses dispatched candidates evidenced by persisted `head_branch`, and is reported overall and per lane.
 
 ## 15. Configuration and modes
 
