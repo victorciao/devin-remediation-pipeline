@@ -74,13 +74,6 @@ class CiEvidenceMode(str, Enum):
     LOCAL = "local"
 
 
-class IssueSink(str, Enum):
-    """Manager-facing artifact sink values."""
-
-    ISSUES = "issues"
-    PR_COMMENT = "pr_comment"
-
-
 class PipelineConfig(BaseModel):
     """The §13 configuration surface with its shipped defaults."""
 
@@ -113,7 +106,6 @@ class PipelineConfig(BaseModel):
     required_contexts_min: tuple[str, ...] = DEFAULT_REQUIRED_CONTEXTS_MIN
     only_lanes: tuple[Lane, ...] = ()
     has_issues: bool = True
-    issue_sink: IssueSink = IssueSink.ISSUES
     marker_search_enabled: bool = True
     version_source: str = ".github/ISSUE_TEMPLATE/bug-report.yml"
     lane2_class_breadth_max: int = Field(default=5, ge=1, strict=True)
@@ -163,7 +155,6 @@ class PipelineConfig(BaseModel):
     @field_validator(
         "alert_source",
         "ci_evidence_mode",
-        "issue_sink",
         mode="before",
     )
     @classmethod
@@ -174,9 +165,7 @@ class PipelineConfig(BaseModel):
         normalized = value.strip().lower()
         if info.field_name == "alert_source":
             return AlertSource(normalized)
-        if info.field_name == "ci_evidence_mode":
-            return CiEvidenceMode(normalized)
-        return IssueSink(normalized)
+        return CiEvidenceMode(normalized)
 
     @field_validator("required_contexts_min", "local_item_scope", mode="before")
     @classmethod
@@ -377,7 +366,6 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
         "LOCAL_ITEM_SCOPE": "local_item_scope",
         "INTEGRATION_SUITE_CHECK_CONTEXT": "integration_suite_check_context",
         "ONLY_LANES": "only_lanes",
-        "ISSUE_SINK": "issue_sink",
         "VERSION_SOURCE": "version_source",
         "MODE": "mode",
         "TARGET_OWNER": "target_owner",

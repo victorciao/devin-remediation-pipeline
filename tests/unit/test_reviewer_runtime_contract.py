@@ -17,7 +17,6 @@ from pipeline.config import (
     BUDGET_HARD_MAX,
     CiEvidenceMode,
     ConfigError,
-    IssueSink,
     Mode,
     PipelineConfig,
     load_config,
@@ -174,14 +173,6 @@ def test_budget_above_the_hard_max_is_clamped_rather_than_a_startup_error() -> N
     """§15: `budget_N` is clamped at `BUDGET_HARD_MAX`, logging `guardrail_clamped`."""
     loaded = load_config(env={"PIPELINE_BUDGET_N": str(BUDGET_HARD_MAX + 5)}, cli_args=())
     assert loaded.budget_N == BUDGET_HARD_MAX
-
-
-def test_documented_issue_sink_value_issues_is_settable() -> None:
-    """§15: `issue_sink=issues` is valid and legacy `github` fails loudly."""
-    loaded = load_config(env={"PIPELINE_ISSUE_SINK": "issues"}, cli_args=())
-    assert loaded.issue_sink is IssueSink.ISSUES
-    with pytest.raises(ConfigError):
-        load_config(env={"PIPELINE_ISSUE_SINK": "github"}, cli_args=())
 
 
 def test_live_requires_a_non_empty_required_contexts_min() -> None:
