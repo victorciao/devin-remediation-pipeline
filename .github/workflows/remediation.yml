@@ -58,6 +58,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          token: ${{ secrets.REMEDIATION_GITHUB_PAT }}
           fetch-depth: 0
       - name: Checkout Superset target
         uses: actions/checkout@v4
@@ -76,6 +77,15 @@ jobs:
           python-version: "3.11"
       - name: Install package and development dependencies
         run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - name: Restore remediation history state
+        run: |
+          if [[ ! -d history ]] || ! find history -mindepth 1 -maxdepth 1 -type d -print -quit | grep -q .; then
+            echo "No prior remediation history found; starting with empty state."
+            exit 0
+          fi
+          python -m pipeline.history seed \
+            --history-dir history \
+            --out remediation-output/state/candidates-live.jsonl
       - name: Run remediation pipeline
         env:
           ONLY_LANES: ${{ github.event.inputs.only_lanes || '' }}
@@ -91,7 +101,7 @@ jobs:
             --baseline fixtures/baseline.json
             --budget-N "$BUDGET_N"
             --max-sessions "$MAX_SESSIONS"
-            --head-branch "devin/remediation-${{ github.run_id }}"
+            --head-branch "devin/remediation"
           )
           if [[ -n "$ONLY_LANES" ]]; then
             args+=(--only-lanes "$ONLY_LANES")
@@ -113,16 +123,25 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
-          state_file="$(find remediation-output/state -maxdepth 1 -type f -name '*.jsonl' -print -quit 2>/dev/null || true)"
-          if [[ -z "$state_file" ]]; then
+          state_file="remediation-output/state/candidates-live.jsonl"
+          if [[ ! -f "$state_file" ]]; then
             echo "No remediation state JSONL found; skipping run-history publication."
+            exit 0
+          fi
+          export_file="remediation-output/state/candidates-live-export.jsonl"
+          python -m pipeline.history export \
+            --state "$state_file" \
+            --seed-meta "$state_file.seed.json" \
+            --out "$export_file"
+          if [[ ! -s "$export_file" ]]; then
+            echo "No post-seed remediation state rows; skipping run-history publication."
             exit 0
           fi
 
           timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
           run_dir="history/${timestamp}-${{ github.run_id }}"
           mkdir -p "$run_dir/state" "$run_dir/reports"
-          cp "$state_file" "$run_dir/state/$(basename "$state_file")"
+          cp "$export_file" "$run_dir/state/candidates-live.jsonl"
           if [[ -f remediation-output/reports/events.jsonl ]]; then
             cp remediation-output/reports/events.jsonl "$run_dir/reports/events.jsonl"
           fi
@@ -144,7 +163,6 @@ jobs:
             exit 0
           fi
           git commit -m "chore(observability): record run ${{ github.run_id }} and refresh RESULTS.md"
-          git remote set-url --push origin "https://x-access-token:${GITHUB_PAT_REMEDIATION}@github.com/${{ github.repository }}.git"
 
           for attempt in 1 2 3; do
             if ! git fetch origin main; then
@@ -161,5 +179,5 @@ jobs:
             fi
             sleep 5
           done
-          echo "Failed to publish remediation run history after 3 attempts."
+          echo "::error::Failed to publish remediation run history after 3 attempts."
           exit 0

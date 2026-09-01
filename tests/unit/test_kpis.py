@@ -319,6 +319,47 @@ def test_verification_pass_rate_none_does_not_alert(simulate_config: PipelineCon
     assert rollup[VERIFICATION_PASS_RATE_ALERT] == 0
 
 
+def test_verification_pass_rate_uses_dispatched_candidates_and_reports_lanes(
+    simulate_config: PipelineConfig,
+) -> None:
+    """§11 — persisted branch evidence supplies the candidate denominator per lane."""
+    satisfied = CriterionEvidence(criterion="criterion", satisfied=True)
+    candidates = [
+        codeql_candidate(candidate_id="codeql-dispatched", head_branch="devin/codeql"),
+        lane2_candidate(candidate_id="lane2-dispatched", head_branch="devin/lane2"),
+    ]
+    events = [
+        event(
+            "codeql-dispatched",
+            lane=Lane.CODEQL,
+            session_id="session-codeql",
+            criterion_evidence=satisfied,
+        ),
+        event("lane2-dispatched", lane=Lane.SKIPPED_TESTS),
+    ]
+
+    rollup = compute_kpis(candidates, events, {}, simulate_config)
+
+    assert rollup["verification_pass_rate"] == 0.5
+    assert rollup["verification_pass_rate_by_lane"] == {
+        Lane.CODEQL.value: 1.0,
+        Lane.SKIPPED_TESTS.value: 0.0,
+    }
+
+
+def test_sessions_are_simulation_labelled_in_both_reports(simulate_config: PipelineConfig) -> None:
+    """§14.1 — simulated session counts and safety alerts are visibly labelled."""
+    candidate = codeql_candidate(marker_search_outcome="failed", session_id="simulated-session")
+    kpi = render_kpi_report([candidate], [], {}, simulate_config)
+    run = render_run_report([candidate], run_id="run", mode=Mode.SIMULATE)
+
+    assert "Sessions Created (simulated)" in kpi
+    assert "Sessions Per Candidate (simulated)" in kpi
+    assert "SIMULATED ALERT" in run
+    assert "Sessions created (simulated)" in run
+    assert "Sessions per candidate (simulated)" in run
+
+
 @pytest.mark.parametrize(
     ("safety_candidates", "expected_alert"),
     [

@@ -124,6 +124,13 @@ def render_run_report(
     marker_lines = [
         f"- `{outcome}`: {count}" for outcome, count in sorted(marker_outcomes.items())
     ] or ["- None"]
+    safety_alert = (
+        f"> **{'SIMULATED ' if mode is Mode.SIMULATE else ''}ALERT: "
+        "Publication Safety Undetermined**"
+        if safety_undetermined_count > 0
+        else None
+    )
+    session_count = sum(candidate.session_id is not None for candidate in rows)
     return "\n".join(
         [
             f"# Run {run_id}",
@@ -159,8 +166,11 @@ def render_run_report(
             f"- Gated candidates: {gated_count}",
             f"- Reached dispatching but unpublished: {unpublished_count}",
             f"- Publication safety undetermined: {safety_undetermined_count}",
+            *([safety_alert] if safety_alert is not None else []),
             f"- Session attempts: {sum(candidate.session_attempts for candidate in rows)}",
-            f"- Sessions created: {sum(candidate.session_id is not None for candidate in rows)}",
+            f"- Sessions created{' (simulated)' if mode is Mode.SIMULATE else ''}: {session_count}",
+            f"- Sessions per candidate{' (simulated)' if mode is Mode.SIMULATE else ''}: "
+            f"{session_count / len(rows) if rows else 0.0}",
             f"- Awaiting human merge: "
             f"{sum(candidate.state is CandidateState.AWAITING_HUMAN_MERGE for candidate in rows)}",
             f"- Merged: {sum(candidate.state is CandidateState.MERGED for candidate in rows)}",

@@ -86,6 +86,7 @@ from pipeline.simulation_fixtures import simulated_observers
 from pipeline.state import (
     CandidateStateStore,
     MarkerSearchOutcome,
+    ResumeAction,
     StatePreservationError,
 )
 from pipeline.templates.render import (
@@ -231,12 +232,9 @@ class CandidateRunner:
     def _reconcile(self, candidate: Candidate) -> Candidate:
         """Adopt persisted and fork-side artifact identity before any write."""
         outcome = self.state_store.marker_search_outcome(candidate.candidate_id)
-        candidate = candidate.model_copy(update={"marker_search_outcome": outcome.value})
         if outcome is MarkerSearchOutcome.UNCONFIGURED and self.config.mode is not Mode.LIVE:
             outcome = MarkerSearchOutcome.ABSENT
-        defer_reason = _MARKER_DEFER_REASONS.get(outcome)
-        if defer_reason is not None:
-            return self._deferred(candidate, defer_reason, outcome.value)
+        candidate = candidate.model_copy(update={"marker_search_outcome": outcome.value})
         update: dict[str, object] = {"base_sha": candidate.base_sha or self.base_sha}
         persisted = self.state_store.resume(candidate.candidate_id)
         if persisted is not None:
@@ -256,9 +254,58 @@ class CandidateRunner:
         if artifact is not None and not artifact.is_pull_request:
             update["issue_number"] = artifact.number
             update["issue_url"] = artifact.url
+        if (
+            self.live is not None
+            and persisted is not None
+            and persisted.state is CandidateState.AWAITING_HUMAN_MERGE
+            and persisted.pr_number is not None
+        ):
+            match = self.live.client.pull_request(persisted.pr_number)
+            if match is not None and match.merged_at is not None:
+                observed_update = {
+                    **update,
+                    "pr_number": match.number,
+                    "pr_url": match.url,
+                    "merged_at": match.merged_at,
+                    "merge_verified": True,
+                }
+                return self._persist(
+                    candidate,
+                    state=CandidateState.MERGED,
+                    **observed_update,
+                )
+            if match is not None and match.state == "closed":
+                observed_update = {
+                    **update,
+                    "pr_number": match.number,
+                    "pr_url": match.url,
+                }
+                return self._persist(
+                    candidate,
+                    state=CandidateState.TERMINAL,
+                    reason=ReasonCode.CLOSED_PULL_REQUEST,
+                    **observed_update,
+                )
         if persisted is not None and persisted.merged_at is not None:
             return self._persist(candidate, state=CandidateState.MERGED, **update)
-        return candidate.model_copy(update=update)
+        reconciled = candidate.model_copy(update=update)
+        if (
+            persisted is not None
+            and self.state_store.resume_decision(candidate.candidate_id).action is ResumeAction.SKIP
+        ):
+            self.notes.append(f"{candidate.candidate_id}: already settled in a previous run")
+            return reconciled.model_copy(
+                update={
+                    "state": persisted.state,
+                    "reason": persisted.reason,
+                    "reason_detail": persisted.reason_detail,
+                    "merge_verified": persisted.merge_verified,
+                }
+            )
+        defer_reason = _MARKER_DEFER_REASONS.get(outcome)
+        if defer_reason is not None:
+            return self._deferred(candidate, defer_reason, outcome.value)
+        return reconciled
 
     def _issue_template(self, candidate: Candidate) -> str:
         if candidate.lane is Lane.CODEQL:
@@ -364,6 +411,7 @@ class CandidateRunner:
         prompt_base = candidate.base_sha or self.base_sha
         criterion = candidate.success_criterion or ""
         last_detail = "session produced no usable output"
+        last_session_id: str | None = candidate.session_id
         for attempt in range(1, _MAX_SESSION_ATTEMPTS + 1):
             prompt = render_fix_prompt(
                 candidate,
@@ -377,6 +425,8 @@ class CandidateRunner:
 
             def record(evidence: SessionAttempt, row: Candidate = candidate) -> None:
                 """Persist the session identity before the session is polled."""
+                nonlocal last_session_id
+                last_session_id = evidence.session_id
                 self.state_store.append(
                     row.model_copy(
                         update={"run_id": self.run_id, "session_id": evidence.session_id}
@@ -391,10 +441,18 @@ class CandidateRunner:
                     session_created=record,
                 )
             except SessionCeilingError as exc:
-                return self._deferred(candidate, ReasonCode.SESSION_CEILING, str(exc))
+                return self._deferred(
+                    candidate.model_copy(
+                        update={"session_id": last_session_id or candidate.session_id}
+                    ),
+                    ReasonCode.SESSION_CEILING,
+                    str(exc),
+                )
             except SessionInfeasibleError as exc:
                 terminal = self._observe_terminal_head(
-                    candidate.model_copy(update={"session_id": candidate.session_id})
+                    candidate.model_copy(
+                        update={"session_id": last_session_id or candidate.session_id}
+                    )
                 )
                 return self._terminal(
                     terminal,
@@ -403,7 +461,11 @@ class CandidateRunner:
                 )
             except SessionDedupeError as exc:
                 return self._terminal(
-                    self._observe_terminal_head(candidate),
+                    self._observe_terminal_head(
+                        candidate.model_copy(
+                            update={"session_id": last_session_id or candidate.session_id}
+                        )
+                    ),
                     ReasonCode.SESSION_FAILED,
                     str(exc),
                 )
@@ -412,7 +474,9 @@ class CandidateRunner:
                 continue
             return self._apply_fix_output(candidate, run)
         return self._terminal(
-            self._observe_terminal_head(candidate),
+            self._observe_terminal_head(
+                candidate.model_copy(update={"session_id": last_session_id or candidate.session_id})
+            ),
             ReasonCode.SESSION_BLOCKED,
             last_detail,
         )
@@ -1101,6 +1165,14 @@ def run_once(
         ),
         state_store=state_store,
     )
+    if config.mode is Mode.SIMULATE:
+        candidates = [
+            # Normalize unconfigured markers for candidates bypassing _reconcile.
+            candidate.model_copy(update={"marker_search_outcome": MarkerSearchOutcome.ABSENT.value})
+            if candidate.marker_search_outcome == MarkerSearchOutcome.UNCONFIGURED.value
+            else candidate
+            for candidate in candidates
+        ]
     dispatched = _select(candidates, config)
 
     live: LiveTarget | None = None

@@ -399,7 +399,17 @@ def test_an_unconfigured_marker_search_completes_normally(tmp_path: Path) -> Non
     )
 
     events = EventLog(output_dir / "reports" / "events.jsonl").read_run_events()
+    rows = read_rows(output_dir / "state" / SIMULATE_STATE_FILE)
 
     assert produced != ()
     assert list((output_dir / "reports").glob("run-*.md")) != []
     assert [event for event in events if event.event_type == "marker_search_failure"] == []
+    assert rows
+    published = [row for row in rows if row["action"] != "log_only"]
+    assert all(
+        row["marker_search_outcome"] == MarkerSearchOutcome.ABSENT.value for row in published
+    )
+    assert all(row["marker_search_outcome"] is None for row in rows if row["action"] == "log_only")
+    assert "Publication safety undetermined: 0" in next(
+        path.read_text(encoding="utf-8") for path in (output_dir / "reports").glob("run-*.md")
+    )

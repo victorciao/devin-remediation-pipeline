@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from pydantic import SecretStr
@@ -9,14 +10,17 @@ from pydantic import SecretStr
 from pipeline.__main__ import CandidateRunner, LiveTarget
 from pipeline.config import Mode, PipelineConfig
 from pipeline.github_client import GitHubClient
-from pipeline.schemas import CandidateState, ReasonCode
+from pipeline.schemas import Action, Candidate, CandidateState, ReasonCode, RetryDecision, Tier
 from pipeline.session_client import (
     FixOutput,
+    SessionAttempt,
     SessionBlockedError,
+    SessionCeilingError,
     SessionDedupeError,
     SessionInfeasibleError,
+    SessionOutputError,
 )
-from pipeline.state import CandidateStateStore
+from pipeline.state import CandidateStateStore, MarkerArtifact
 from pipeline.verify import Observers
 from tests.factories import codeql_candidate
 from tests.fakes import BASE_SHA, HEAD_SHA, FakeGitHubTransport
@@ -26,13 +30,14 @@ def _runner(
     tmp_path: Path,
     transport: FakeGitHubTransport,
     orchestrator: object,
+    marker_search: Callable[[str], MarkerArtifact | None] | None = None,
 ) -> tuple[CandidateRunner, CandidateStateStore]:
     config = PipelineConfig(
         mode=Mode.LIVE,
         github_token=SecretStr("placeholder-token"),
         devin_api_key=SecretStr("placeholder-key"),
     )
-    store = CandidateStateStore(tmp_path / "candidates.jsonl")
+    store = CandidateStateStore(tmp_path / "candidates.jsonl", marker_search=marker_search)
     runner = CandidateRunner(
         config=config,
         run_id="run",
@@ -136,3 +141,193 @@ def test_terminal_head_read_failure_is_swallowed(tmp_path: Path) -> None:
     assert result.reason is ReasonCode.SESSION_FAILED
     assert result.head_sha is None
     assert store.latest()[candidate.candidate_id].state is CandidateState.TERMINAL
+
+
+class CallbackFailureOrchestrator:
+    """Create a durable session identity, then fail in the requested lifecycle path."""
+
+    def __init__(self, failure: BaseException) -> None:
+        self.failure = failure
+
+    def run_candidate(self, _candidate: object, _prompt: str, **kwargs: object) -> object:
+        callback = kwargs["session_created"]
+        assert callable(callback)
+        callback(
+            SessionAttempt(
+                "codeql-0",
+                1,
+                "created-session",
+                True,
+                RetryDecision.PROCEED,
+            )
+        )
+        raise self.failure
+
+
+def test_session_failures_preserve_the_created_session_id(tmp_path: Path) -> None:
+    """Every contained failure row retains the session created before it failed."""
+    failures = (
+        (SessionCeilingError("ceiling"), ReasonCode.SESSION_CEILING),
+        (
+            SessionInfeasibleError(
+                "infeasible",
+                output=_output(feasible=False, reason="not feasible"),
+            ),
+            ReasonCode.SESSION_FAILED,
+        ),
+        (SessionDedupeError("dedupe"), ReasonCode.SESSION_FAILED),
+        (SessionBlockedError("blocked"), ReasonCode.SESSION_BLOCKED),
+        (SessionOutputError("output"), ReasonCode.SESSION_BLOCKED),
+    )
+    for index, (failure, reason) in enumerate(failures):
+        runner, store = _runner(
+            tmp_path / str(index),
+            FakeGitHubTransport(branch_shas={"candidate": HEAD_SHA}),
+            CallbackFailureOrchestrator(failure),
+        )
+        candidate = codeql_candidate(
+            candidate_id="codeql-0",
+            head_branch="candidate",
+            base_sha=BASE_SHA,
+        )
+
+        result = runner._run_session(candidate)  # noqa: SLF001 - focused lifecycle probe
+
+        assert result.reason is reason
+        assert result.session_id == "created-session"
+        assert store.latest()[candidate.candidate_id].session_id == "created-session"
+
+
+class NoSessionOrchestrator:
+    """Fail loudly if a previously settled candidate reaches dispatch."""
+
+    def run_candidate(self, *_args: object, **_kwargs: object) -> object:
+        raise AssertionError("settled candidate was redispatched")
+
+
+class SessionCallbackThenBlockedOrchestrator:
+    """Record session creation before returning a terminal session failure."""
+
+    def run_candidate(self, _candidate: object, _prompt: str, **kwargs: object) -> object:
+        callback = kwargs["session_created"]
+        assert callable(callback)
+        callback(
+            SessionAttempt(
+                "codeql-0",
+                1,
+                "created-session",
+                True,
+                RetryDecision.PROCEED,
+            )
+        )
+        raise SessionBlockedError("session blocked")
+
+
+def _persisted_awaiting(
+    runner: CandidateRunner,
+    candidate: Candidate,
+) -> None:
+    """Persist one PR awaiting a human disposition."""
+    runner.state_store.append(
+        candidate.model_copy(
+            update={
+                "state": CandidateState.AWAITING_HUMAN_MERGE,
+                "issue_number": 1,
+                "issue_url": "https://github.test/victorciao/superset/issues/1",
+                "pr_number": 2,
+                "pr_url": "https://github.test/victorciao/superset/pull/2",
+                "reason": ReasonCode.MANUAL_MERGE_REQUIRED,
+                "action": Action.OPEN_PR,
+            }
+        )
+    )
+
+
+def test_persisted_awaiting_human_merge_is_not_redispatched(tmp_path: Path) -> None:
+    """A persisted pending PR skips issue, branch, session and PR writes."""
+    transport = FakeGitHubTransport()
+    runner, _store = _runner(tmp_path, transport, NoSessionOrchestrator())
+    candidate = codeql_candidate(
+        action=Action.OPEN_PR,
+        state=CandidateState.SCORED,
+    )
+    _persisted_awaiting(runner, candidate)
+
+    result = runner.process(candidate)
+
+    assert result.state is CandidateState.AWAITING_HUMAN_MERGE
+    assert transport.writes == []
+
+
+def test_persisted_budget_overflow_deferred_candidate_is_reprocessed(tmp_path: Path) -> None:
+    """A deferred candidate resumes publication and dispatches a new session."""
+    transport = FakeGitHubTransport()
+    runner, store = _runner(
+        tmp_path,
+        transport,
+        SessionCallbackThenBlockedOrchestrator(),
+        marker_search=lambda _marker: None,
+    )
+    candidate = codeql_candidate(
+        action=Action.OPEN_PR,
+        state=CandidateState.SCORED,
+        tier=Tier.HIGH,
+        score=80.0,
+        risk=3,
+        gate_passed=True,
+    )
+    store.append(
+        candidate.model_copy(
+            update={
+                "state": CandidateState.DEFERRED,
+                "reason": ReasonCode.BUDGET_OVERFLOW,
+            }
+        )
+    )
+
+    result = runner.process(candidate)
+
+    assert result.state is CandidateState.TERMINAL
+    assert result.reason is ReasonCode.SESSION_BLOCKED
+    assert result.session_id == "created-session"
+    assert any(path.endswith("/issues") for path in transport.write_paths)
+    assert any(path.endswith("/git/refs") for path in transport.write_paths)
+
+
+def test_reconcile_observes_human_merged_pr(tmp_path: Path) -> None:
+    """A later run records an externally observed human merge."""
+    transport = FakeGitHubTransport(pr_merged_at="2026-09-01T00:00:00Z")
+    runner, _store = _runner(tmp_path, transport, NoSessionOrchestrator())
+    candidate = codeql_candidate(action=Action.OPEN_PR)
+    _persisted_awaiting(runner, candidate)
+
+    result = runner.process(candidate)
+
+    assert result.state is CandidateState.MERGED
+    assert result.merged_at == "2026-09-01T00:00:00Z"
+    assert result.merge_verified is True
+
+
+def test_reconcile_observes_human_closed_pr(tmp_path: Path) -> None:
+    """A later run records a human-closed PR as terminal."""
+    transport = FakeGitHubTransport(pr_state="closed")
+    runner, _store = _runner(tmp_path, transport, NoSessionOrchestrator())
+    candidate = codeql_candidate(action=Action.OPEN_PR)
+    _persisted_awaiting(runner, candidate)
+
+    result = runner.process(candidate)
+
+    assert result.state is CandidateState.TERMINAL
+    assert result.reason is ReasonCode.CLOSED_PULL_REQUEST
+
+
+def test_reconcile_leaves_open_pr_awaiting_human_merge(tmp_path: Path) -> None:
+    """An open PR remains pending and is not sent through the lifecycle again."""
+    transport = FakeGitHubTransport(pr_state="open")
+    runner, _store = _runner(tmp_path, transport, NoSessionOrchestrator())
+    candidate = codeql_candidate(action=Action.OPEN_PR)
+    _persisted_awaiting(runner, candidate)
+
+    result = runner.process(candidate)
+
+    assert result.state is CandidateState.AWAITING_HUMAN_MERGE

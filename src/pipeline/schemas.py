@@ -6,6 +6,12 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# Removed publication fields are accepted only while reading historical evidence; live models
+# and writers remain strict.
+REMOVED_LEGACY_CANDIDATE_KEYS = frozenset(
+    {"merge_mode", "auto_merge_requested", "auto_merge_eligible"}
+)
+
 
 class StrictModel(BaseModel):
     """Base model that rejects unknown fields and coercion."""
