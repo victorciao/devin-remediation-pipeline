@@ -58,6 +58,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          token: ${{ secrets.REMEDIATION_GITHUB_PAT }}
           fetch-depth: 0
       - name: Checkout Superset target
         uses: actions/checkout@v4
@@ -162,7 +163,6 @@ jobs:
             exit 0
           fi
           git commit -m "chore(observability): record run ${{ github.run_id }} and refresh RESULTS.md"
-          git remote set-url --push origin "https://x-access-token:${GITHUB_PAT_REMEDIATION}@github.com/${{ github.repository }}.git"
 
           for attempt in 1 2 3; do
             if ! git fetch origin main; then
@@ -179,5 +179,5 @@ jobs:
             fi
             sleep 5
           done
-          echo "Failed to publish remediation run history after 3 attempts."
+          echo "::error::Failed to publish remediation run history after 3 attempts."
           exit 0

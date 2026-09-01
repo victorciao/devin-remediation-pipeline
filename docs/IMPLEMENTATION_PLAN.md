@@ -175,6 +175,8 @@ Each run reconciles both artifacts against the fork before writing either. Dupli
 
 Before hosted execution, committed run directories under `history/` are restored into the live append-only state file in chronological order; publication exports only rows appended by the current run. Previously settled candidates are reconciled from that state and skipped, never redispatched. The issue body renders the fork's issue template heading set, the marker, the lane, the locator and the score with its factor breakdown; a medium-tier body adds why the candidate was not automated. Its title obeys the PR title regex.
 
+Run-history publication authenticates with `REMEDIATION_GITHUB_PAT` because the default workflow token is read-only; a publication failure annotates the run without failing remediation.
+
 The PR body renders Superset's `.github/PULL_REQUEST_TEMPLATE.md` heading set verbatim and in order — `SUMMARY`, `BEFORE/AFTER SCREENSHOTS OR ANIMATED GIF` (`n/a` for backend fixes), `TESTING INSTRUCTIONS`, `ADDITIONAL INFORMATION` with its checkbox block — plus an `EVIDENCE` section after `SUMMARY` stating the criterion and the
 commands the orchestrator ran with their outcomes, and a config-gated `AUTOMATION METADATA` section last. The body states that every commit carries the `Signed-off-by` trailer and that a human owns the merge; the pipeline never merges. A body failing section presence/order validation defers the candidate with
 `artifact_validation_failed` **before** any write; a security-lane body carries rule ID and file scope only, never exploit detail. The title must match the fork's `pr-lint` regex, pinned in `templates/superset/pr_title_regex.txt`: `^(build|chore|ci|docs|feat|fix|perf|refactor|style|test|other)(\(.+\))?(\!)?:\s.+`
