@@ -730,7 +730,6 @@ def test_an_identical_row_written_from_a_reparsed_copy_is_still_suppressed(
         {"pr_number": 2},
         {"pr_url": PR_URL},
         {"issue_url": ISSUE_URL},
-        {"auto_merge_requested": True},
         {"ci_evidence_mode": "github"},
         {"merge_verified": True},
     ],

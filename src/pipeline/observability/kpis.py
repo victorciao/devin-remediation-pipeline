@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TypeAlias
 
 from pipeline.config import Mode, PipelineConfig
-from pipeline.schemas import Candidate, CandidateState, EventRecord, Lane, MergeMode, ReasonCode
+from pipeline.schemas import Candidate, CandidateState, EventRecord, Lane, ReasonCode
 from pipeline.state import has_local_artifact
 
 
@@ -239,9 +239,7 @@ def compute_kpis(
         "merged_clean": merged_clean,
         "edited": edited,
         "rejected": rejected,
-        "merge_rate_alert": int(
-            bool(_auto_pr_events(events)) and merge_rate < config.merge_rate_floor
-        ),
+        "merge_rate_alert": int(bool(pr_events) and merge_rate < config.merge_rate_floor),
         "session_failure_alert": int(
             (session_failures / len(events) if events else 0.0) > config.session_failure_ceiling
         ),
@@ -249,10 +247,11 @@ def compute_kpis(
 
 
 def _merge_rate(events: list[EventRecord]) -> float:
-    """Compute merge rate over distinct auto-merge pull requests only."""
-    pr_events = _auto_pr_events(events)
+    """Compute observed human-merge rate over distinct pull requests."""
+    pr_events = _latest_pr_events(events)
     merged = sum(
-        event.merged_at is not None
+        event.terminal_outcome is CandidateState.MERGED
+        and event.merged_at is not None
         and event.merge_verified
         and event.reason is not ReasonCode.MERGED_EXTERNALLY_UNVERIFIED
         for event in pr_events
@@ -306,13 +305,6 @@ def _issue_counts_by_tier(
         key = tier or "unknown"
         result[key] = result.get(key, 0) + 1
     return result
-
-
-def _auto_pr_events(events: list[EventRecord]) -> list[EventRecord]:
-    """Return distinct candidate PRs whose merge ownership is automatic."""
-    return [
-        event for event in _latest_pr_events(events) if event.merge_mode is not MergeMode.MANUAL
-    ]
 
 
 def _criterion_satisfaction_by_lane(events: list[EventRecord]) -> dict[str, int]:

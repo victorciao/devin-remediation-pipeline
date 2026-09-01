@@ -2,8 +2,7 @@
 
 Each test pins a plan sentence that no existing test covers: discovery is fresh and never
 fixture-fed under LIVE, every run enumerates all three lanes, the LIVE preconditions abort
-rather than degrade, every §15 knob value in the plan is settable, and the merge-rate KPI is
-computed over auto-merge pull requests only.
+rather than degrade, and every §15 knob value in the plan is settable.
 """
 
 from __future__ import annotations
@@ -31,7 +30,6 @@ from pipeline.schemas import (
     CriterionEvidence,
     EventRecord,
     Lane,
-    MergeMode,
     Tier,
 )
 from tests.conftest import RUBRICS_PATH, TEMPLATES_DIR
@@ -191,15 +189,6 @@ def test_live_requires_a_non_empty_required_contexts_min() -> None:
         live_config(required_contexts_min=())
 
 
-def test_downgrading_evidence_to_local_keeps_auto_merge_off() -> None:
-    """§12/§15: local CI evidence is permanently ineligible for auto-merge."""
-    configured = config(ci_evidence_mode=CiEvidenceMode.ACTIONS, auto_merge_enabled=True)
-    downgraded = configured.model_copy(update={"ci_evidence_mode": CiEvidenceMode.LOCAL})
-    assert downgraded.auto_merge_enabled is False, (
-        "a preflight downgrade to local evidence left auto-merge enabled"
-    )
-
-
 # -- §14: KPI definitions ----------------------------------------------------------------
 
 
@@ -212,27 +201,6 @@ def _event(**fields: Any) -> EventRecord:  # noqa: ANN401
     }
     base.update(fields)
     return EventRecord(**base)
-
-
-def test_merge_rate_is_computed_over_auto_merge_pull_requests_only() -> None:
-    """§14 Layer 3: merge rate is merged over `merge_mode = auto`; manual PRs count separately."""
-    auto_merged = _event(
-        candidate_id="auto",
-        pr_url="https://github.test/pull/1",
-        merge_mode=MergeMode.AUTO,
-        merged_at="2026-01-01T00:00:00Z",
-        merge_verified=True,
-    )
-    manual_open = _event(
-        candidate_id="manual",
-        pr_url="https://github.test/pull/2",
-        merge_mode=MergeMode.MANUAL,
-        terminal_outcome=CandidateState.AWAITING_HUMAN_MERGE,
-    )
-    metrics = compute_kpis([], [auto_merged, manual_open], _baseline([]), config())
-    assert metrics["merge_rate"] == 1.0, (
-        "a manual pull request awaiting a human was counted against the auto-merge merge rate"
-    )
 
 
 def test_verification_pass_rate_is_per_dispatched_candidate() -> None:

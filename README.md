@@ -75,7 +75,7 @@ The target token must have the repository, issues/PR, Actions, and Code Scanning
 required by §3 0d. Issues, Actions history, Code Scanning, and token identity are blocking
 capability probes; an unmet probe is recorded as `capability_unavailable` or
 `token_capability_missing`, rather than becoming an empty lane. Actions history resolves
-`ci_evidence_mode`; local evidence hard-disables auto-merge.
+`ci_evidence_mode`; the pipeline never merges pull requests.
 The optional `session_snapshot_id` setting pins role sessions to a Devin snapshot
 prepared for the target repository; it is never hard-coded.
 
@@ -118,17 +118,14 @@ it did not demonstrate PR creation, merge behavior, or an independently verified
 | `max_sessions` | `8` | `>=1` | Per-run hard session ceiling; exceeding it aborts |
 | `session_timeout_s` | `5400.0` | `>0` | Bounds one Devin session |
 | `max_total_acu` | `500.0` | `>0` | Per-run hard ACU ceiling; exceeding it aborts |
-| `kpi_sink` | `local` | `local`, `gsheet` | `gsheet` is rejected in SIMULATE |
 | `alert_source` | `code_scanning_api` | `code_scanning_api`, `sarif_file` | LANE 1 reads the fork's alerts for `master` and requires the latest CodeQL analysis to sit on `base_sha`; `sarif_file` is the SIMULATE input |
 | `alert_fixture_path` | `fixtures/codeql_alerts.json` | Path | Captured CodeQL/SARIF input |
-| `lane1_alert_check` | `pr_ref_alerts` | `pr_ref_alerts`, `codeql_cli` | Selects the orchestrator-owned LANE 1 alert observation |
 | `alert_analysis_wait_s` | `2700.0` | `>0` | Bounds CodeQL analysis polling |
-| `ci_evidence_mode` | `local` | `actions`, `local` | LIVE may resolve this from Actions history; `local` forces auto-merge off, and stale `github` values are rejected |
+| `ci_evidence_mode` | `local` | `actions`, `local` | LIVE may resolve this from Actions history; evidence never authorizes an automated merge |
 | `suite_check_context` | `unit-tests-required` | Non-empty string | Named Actions check context used for suite evidence |
 | `ci_wait_timeout_s` | `5400` | `>0` | Bounds GitHub evidence waiting |
 | `required_contexts_min` | `pre-commit (current)` | Non-empty context names | Required completed Actions context for LIVE preflight |
 | `only_lanes` | `()` | Comma-separated `codeql`, `skipped_tests`, `deprecations` | Restricts dispatch eligibility without changing candidate discovery or reporting |
-| `auto_merge_enabled` | `false` | `true`, `false` | Never sufficient alone; forced off for local evidence |
 | `has_issues` | `true` | `true`, `false` | False aborts before writes unless degraded PR-comment sink is selected |
 | `issue_sink` | `issues` | `issues`, `pr_comment` | `pr_comment` marks artifacts/run degraded |
 | `marker_search_enabled` | `true` | `true`, `false` | Enables durable marker reconciliation |
@@ -148,7 +145,8 @@ it did not demonstrate PR creation, merge behavior, or an independently verified
 enumerated, gated, scored, and represented in the run report.
 Security issues are always detail-free. The single remediation session is responsible for
 implementation, while the orchestrator independently verifies the declared criterion,
-publishes artifacts, and evaluates CI evidence before merge.
+publishes artifacts, and evaluates CI evidence before handing the pull request to a human
+for merge.
 
 ## Docker and Compose smoke
 
@@ -210,7 +208,7 @@ opened a pull request, verified the criterion, observed authoritative required c
 settled at `awaiting_human_merge`.
 
 Merging is never performed by this system. A verified candidate settles at
-`awaiting_human_merge` for a human to merge, and auto-merge is disabled by design; a merge
+`awaiting_human_merge` for a human to merge; automated merging is not part of the system. A merge
 performed by automation is therefore absent from the evidence on purpose.
 
 ## Automated triggers and secrets

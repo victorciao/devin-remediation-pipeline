@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 
 from pipeline.config import CiEvidenceMode, Mode, PipelineConfig
 from pipeline.http_transport import HttpTransportError
-from pipeline.schemas import Candidate, CheckRunConclusion, MergeMode, ReasonCode, Tier
+from pipeline.schemas import Candidate, CheckRunConclusion, ReasonCode, Tier
 from pipeline.verify import SuiteResult
 
 ACCEPTED_CONCLUSIONS = frozenset({"success", "skipped", "neutral"})
@@ -57,7 +57,6 @@ class CiWaitResult:
 
     mode: CiEvidenceMode
     reason: ReasonCode | None
-    auto_merge_eligible: bool
     detail: str | None = None
     conclusions: tuple[CheckRunConclusion, ...] = ()
 
@@ -553,7 +552,6 @@ def wait_for_check_runs(
                 return CiWaitResult(
                     current_mode,
                     ReasonCode.CI_EVIDENCE_UNAVAILABLE,
-                    False,
                     str(exc),
                 )
         else:
@@ -576,14 +574,12 @@ def wait_for_check_runs(
             return CiWaitResult(
                 current_mode,
                 None,
-                config.auto_merge_enabled,
                 conclusions=evidence.conclusions,
             )
         if evidence.settled:
             return CiWaitResult(
                 current_mode,
                 evidence.reason,
-                False,
                 evidence.detail,
                 evidence.conclusions,
             )
@@ -591,7 +587,6 @@ def wait_for_check_runs(
             return CiWaitResult(
                 current_mode,
                 ReasonCode.CI_EVIDENCE_UNAVAILABLE,
-                False,
                 "awaiting_workflow_approval",
                 evidence.conclusions,
             )
@@ -606,14 +601,12 @@ def wait_for_check_runs(
                 return CiWaitResult(
                     current_mode,
                     ReasonCode.CI_WORKFLOWS_ABSENT,
-                    False,
                     "ci_workflows_absent",
                     evidence.conclusions,
                 )
             return CiWaitResult(
                 current_mode,
                 ReasonCode.CI_EVIDENCE_UNAVAILABLE,
-                False,
                 "awaiting_workflow_approval",
                 evidence.conclusions,
             )
@@ -626,7 +619,6 @@ def wait_for_check_runs(
     return CiWaitResult(
         current_mode,
         ReasonCode.CI_EVIDENCE_UNAVAILABLE,
-        False,
         None,
         evidence.conclusions,
     )
@@ -674,7 +666,6 @@ class ArtifactLinks:
     pr_url: str | None
     issue_number: int | None = None
     pr_number: int | None = None
-    auto_merge_requested: bool = False
     issue_adopted: bool = False
     pr_adopted: bool = False
 
@@ -987,20 +978,6 @@ class GitHubClient:
         self._ensured_labels[label] = True
         return True
 
-    def enable_auto_merge(self, number: int, *, ci_mode: CiEvidenceMode) -> None:
-        """Request auto-merge only after the caller has checked all gates."""
-        if (
-            not self._config.auto_merge_enabled
-            or self._config.ci_evidence_mode is not CiEvidenceMode.ACTIONS
-            or ci_mode is not CiEvidenceMode.ACTIONS
-        ):
-            raise ValueError("auto-merge requires enabled GitHub CI evidence")
-        self._write(
-            "post",
-            f"/repos/{self._config.target_owner}/{self._config.target_repo}/pulls/{number}/auto-merge",
-            {"merge_method": "squash"},
-        )
-
 
 def reconcile_issue(
     client: GitHubClient,
@@ -1062,25 +1039,6 @@ def reconcile_pull_request(
             raise ClosedPullRequestError(head, existing) from exc
         return existing.number, existing.url, True
     return number, url, False
-
-
-def auto_merge_eligible(
-    candidate: Candidate,
-    config: PipelineConfig,
-    ci_result: CiWaitResult | None,
-) -> bool:
-    """Decide auto-merge from `merge_mode`, configuration and CI evidence."""
-    return bool(
-        candidate.merge_mode is MergeMode.AUTO
-        and candidate.auto_merge_eligible
-        and config.auto_merge_enabled
-        and bool(config.required_contexts_min)
-        and ci_result is not None
-        and ci_result.mode is CiEvidenceMode.ACTIONS
-        and ci_result.auto_merge_eligible
-        and ci_result.reason is None
-        and (candidate.test_added is True or candidate.test_exempt_reason is not None)
-    )
 
 
 def publish_artifacts(
@@ -1156,20 +1114,16 @@ def publish_artifacts(
             after_pr_adopted(pr_number, pr_url)
     elif after_pr_created is not None:
         after_pr_created(pr_number, pr_url)
-    ci_result = ci_probe(pr_number)
+    ci_probe(pr_number)
     if preflight is not None:
         preflight()
     if after_ci is not None:
         after_ci(pr_number)
-    auto_merge_requested = auto_merge_eligible(candidate, client._config, ci_result)
-    if auto_merge_requested:
-        client.enable_auto_merge(pr_number, ci_mode=ci_result.mode)
     return ArtifactLinks(
         issue_url,
         pr_url,
         issue_number=issue_number,
         pr_number=pr_number,
-        auto_merge_requested=auto_merge_requested,
         issue_adopted=issue_adopted,
         pr_adopted=pr_adopted,
     )
@@ -1193,7 +1147,6 @@ __all__ = [
     "PreflightError",
     "REJECTED_CONCLUSIONS",
     "SimulationWriteError",
-    "auto_merge_eligible",
     "evaluate_check_runs",
     "publish_artifacts",
     "read_check_runs",

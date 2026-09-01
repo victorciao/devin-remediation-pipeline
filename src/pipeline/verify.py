@@ -12,7 +12,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
-from pipeline.config import CiEvidenceMode, Lane1AlertCheck, PipelineConfig
+from pipeline.config import CiEvidenceMode, PipelineConfig
 from pipeline.schemas import (
     Candidate,
     CriterionEvidence,
@@ -35,6 +35,7 @@ LANE3_CRITERION = (
     "The module:qualname no longer resolves at the candidate head, no internal caller or "
     "override surface references it, and the suite covering suite_scope passes there."
 )
+LANE1_ALERT_CHECK = "pr_ref_alerts"
 
 
 def declare_success_criterion(lane: Lane) -> str:
@@ -333,9 +334,7 @@ def verify_lane1(
     criterion = candidate.success_criterion or LANE1_CRITERION
     commands: list[str] = []
     observations: list[str] = []
-    alert_stage = (
-        "post_pr" if config.lane1_alert_check is Lane1AlertCheck.PR_REF_ALERTS else "pre_pr"
-    )
+    alert_stage = "post_pr"
     if stage != alert_stage:
         suite_failure = _suite_evidence(
             candidate,
@@ -351,8 +350,7 @@ def verify_lane1(
         if suite_failure is not None:
             return suite_failure
         observations.append(
-            f"alert absence is observed at the {alert_stage} stage under "
-            f"{config.lane1_alert_check.value}"
+            f"alert absence is observed at the {alert_stage} stage under {LANE1_ALERT_CHECK}"
         )
         return CriterionEvidence(
             criterion=criterion,
@@ -365,8 +363,7 @@ def verify_lane1(
         return _unobservable(
             criterion,
             commands,
-            f"alerts could not be read at the candidate head under "
-            f"{config.lane1_alert_check.value}",
+            f"alerts could not be read at the candidate head under {LANE1_ALERT_CHECK}",
         )
     observation = observers.probe_alerts(candidate, head_sha)
     commands.append(observation.command)
@@ -619,7 +616,7 @@ def verify_candidate(
 
 def post_pr_criterion_pending(candidate: Candidate, config: PipelineConfig) -> bool:
     """Return whether this candidate still owes post-PR criterion evidence."""
-    if candidate.lane is Lane.CODEQL and config.lane1_alert_check is Lane1AlertCheck.PR_REF_ALERTS:
+    if candidate.lane is Lane.CODEQL:
         return True
     return config.ci_evidence_mode is not CiEvidenceMode.LOCAL
 

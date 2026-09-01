@@ -54,7 +54,7 @@ RUBRICS_PATH = CONFIG_DIR / "rubrics.yaml"
 
 @pytest.fixture
 def simulate_config() -> PipelineConfig:
-    """The shipped defaults: SIMULATE mode, local CI evidence, auto-merge off."""
+    """The shipped defaults: SIMULATE mode with local CI evidence."""
     return PipelineConfig(rubrics_path=RUBRICS_PATH, templates_dir=TEMPLATES_DIR)
 
 

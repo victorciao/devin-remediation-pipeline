@@ -1,9 +1,4 @@
-"""§10 CI evidence resolution, §10.1's one-way upgrade, and §14.1's artifact ordering.
-
-The auto-merge conjunction is the most safety-relevant contract in the pipeline, so every
-non-`success` context state is asserted to fail closed *and* to leave `enable_auto_merge`
-uncalled — the absence of that write, not just a false flag, is the invariant.
-"""
+"""§10 CI evidence resolution and §14.1's artifact ordering."""
 
 from __future__ import annotations
 
@@ -39,7 +34,7 @@ from pipeline.github_client import (
     wait_for_named_suite,
 )
 from pipeline.http_transport import HttpTransportError
-from pipeline.schemas import CheckRunConclusion, MergeMode, ReasonCode, Tier
+from pipeline.schemas import CheckRunConclusion, ReasonCode, Tier
 from pipeline.verify import SuiteResult
 from tests.factories import codeql_candidate
 from tests.fakes import (
@@ -53,7 +48,6 @@ HELD_STATES = ("action_required", "awaiting_approval", "waiting")
 IN_FLIGHT_STATES = ("queued", "in_progress", "pending")
 FAILED_STATES = ("failure", "cancelled", "timed_out", "error")
 NON_SUCCESS_STATES = (*HELD_STATES, *IN_FLIGHT_STATES, *FAILED_STATES, "skipped", "neutral")
-AUTO_MERGE_PATH = "/repos/victorciao/superset/pulls/2/auto-merge"
 ISSUE_PATH = "/repos/victorciao/superset/issues"
 PULLS_PATH = "/repos/victorciao/superset/pulls"
 
@@ -69,12 +63,8 @@ def live_config(**fields: Any) -> PipelineConfig:  # noqa: ANN401
 
 
 def github_evidence_config(**fields: Any) -> PipelineConfig:  # noqa: ANN401
-    """A LIVE config where auto-merge is *permitted*, so only the gates can refuse it."""
-    return live_config(
-        ci_evidence_mode=CiEvidenceMode.ACTIONS,
-        auto_merge_enabled=True,
-        **fields,
-    )
+    """A LIVE config whose CI evidence comes from GitHub."""
+    return live_config(ci_evidence_mode=CiEvidenceMode.ACTIONS, **fields)
 
 
 def wait_config(**fields: Any) -> PipelineConfig:  # noqa: ANN401
@@ -171,15 +161,14 @@ def test_ci_wait_does_not_re_emit_a_transition_for_an_upgraded_run() -> None:
 
 
 def test_full_context_set_within_the_timeout_keeps_github_evidence() -> None:
-    """§10.1 — every required context reporting `success` in the window is auto-merge eligible."""
+    """§10.1 — every required context reporting `success` keeps GitHub evidence."""
     result = wait(
-        wait_config(ci_evidence_mode=CiEvidenceMode.ACTIONS, auto_merge_enabled=True),
+        wait_config(ci_evidence_mode=CiEvidenceMode.ACTIONS),
         statuses=all_contexts(),
     )
 
     assert result.mode is CiEvidenceMode.ACTIONS
     assert result.reason is None
-    assert result.auto_merge_eligible is True
 
 
 # -- §10.1 held vs in-flight CI ----------------------------------------------------------
@@ -198,7 +187,6 @@ def test_held_workflow_is_awaiting_approval_and_does_not_poll(state: str) -> Non
 
     assert result.reason is ReasonCode.CI_EVIDENCE_UNAVAILABLE
     assert result.detail == "awaiting_workflow_approval"
-    assert result.auto_merge_eligible is False
     assert clock.slept == []
 
 
@@ -219,7 +207,6 @@ def test_in_flight_ci_polls_until_the_deadline(state: str) -> None:
     assert clock.slept == [15.0, 15.0, 15.0, 15.0]
     assert result.reason is ReasonCode.CI_EVIDENCE_UNAVAILABLE
     assert result.detail is None
-    assert result.auto_merge_eligible is False
 
 
 @pytest.mark.parametrize("state", IN_FLIGHT_STATES)
@@ -249,7 +236,7 @@ def test_in_flight_ci_that_turns_green_is_eligible(state: str) -> None:
             return super().get(path)
 
     result = wait_for_check_runs(
-        wait_config(ci_evidence_mode=CiEvidenceMode.ACTIONS, auto_merge_enabled=True),
+        wait_config(ci_evidence_mode=CiEvidenceMode.ACTIONS),
         client=Flipping(),
         elapsed_s=0,
         sha=HEAD_SHA,
@@ -259,7 +246,6 @@ def test_in_flight_ci_that_turns_green_is_eligible(state: str) -> None:
 
     assert clock.slept == [15.0, 15.0]
     assert result.reason is None
-    assert result.auto_merge_eligible is True
 
 
 def test_check_run_status_is_used_when_no_conclusion_exists() -> None:
@@ -356,7 +342,6 @@ def test_check_read_transport_failure_is_evidence_unavailable() -> None:
     )
 
     assert result.reason is ReasonCode.CI_EVIDENCE_UNAVAILABLE
-    assert result.auto_merge_eligible is False
     assert "connection interrupted" in (result.detail or "")
 
 
@@ -576,7 +561,6 @@ def test_a_fork_with_no_workflow_run_at_all_reports_absent_workflows() -> None:
     assert clock.slept == [15.0]
     assert result.reason is ReasonCode.CI_WORKFLOWS_ABSENT
     assert result.detail == "ci_workflows_absent"
-    assert result.auto_merge_eligible is False
 
 
 def test_non_fork_pr_reporting_no_context_polls_to_the_deadline() -> None:
@@ -593,16 +577,15 @@ def test_non_fork_pr_reporting_no_context_polls_to_the_deadline() -> None:
 # -- §10.1 the timeout -------------------------------------------------------------------
 
 
-def test_ci_wait_timeout_records_unavailable_and_refuses_auto_merge() -> None:
-    """§10.1 (line 594) — on expiry the candidate is `ci_evidence_unavailable`, never eligible."""
+def test_ci_wait_timeout_records_unavailable() -> None:
+    """§10.1 (line 594) — on expiry the candidate is `ci_evidence_unavailable`."""
     result = wait(
-        wait_config(ci_evidence_mode=CiEvidenceMode.ACTIONS, auto_merge_enabled=True),
+        wait_config(ci_evidence_mode=CiEvidenceMode.ACTIONS),
         statuses=all_contexts("pending"),
         elapsed_s=5400,
     )
 
     assert result.reason is ReasonCode.CI_EVIDENCE_UNAVAILABLE
-    assert result.auto_merge_eligible is False
 
 
 def test_ci_wait_budget_is_consumed_by_elapsed_time() -> None:
@@ -639,7 +622,6 @@ def test_failed_required_context_is_ci_check_failed(state: str) -> None:
     result = wait(wait_config(), statuses={**all_contexts(), "test-sqlite": state})
 
     assert result.reason is ReasonCode.CI_CHECK_FAILED
-    assert result.auto_merge_eligible is False
 
 
 @pytest.mark.parametrize("state", NON_SUCCESS_STATES)
@@ -649,13 +631,11 @@ def test_every_non_success_state_on_every_context_fails_closed(context: str, sta
     result = wait(
         wait_config(
             ci_evidence_mode=CiEvidenceMode.ACTIONS,
-            auto_merge_enabled=True,
             ci_wait_timeout_s=1,
         ),
         statuses={**all_contexts(), context: state},
     )
 
-    assert result.auto_merge_eligible is False
     assert result.reason is not None
 
 
@@ -675,7 +655,7 @@ def publish(
     client = GitHubClient(resolved, transport=transport)
     fields = dict(candidate_fields or {})
     candidate = codeql_candidate(tier=Tier.HIGH, **fields)
-    probe_result = ci_result or CiWaitResult(CiEvidenceMode.LOCAL, None, False)
+    probe_result = ci_result or CiWaitResult(CiEvidenceMode.LOCAL, None)
     return publish_artifacts(
         client,
         candidate,
@@ -888,190 +868,13 @@ def test_preflight_rejects_without_master_python_analysis(analyses: object) -> N
         run_live_preflight(live_config(), transport)
 
 
-# -- §10.1/§13 the auto-merge conjunction ------------------------------------------------
-
-
 def github_ci(**fields: Any) -> CiWaitResult:  # noqa: ANN401
-    """A CI result that observed `github` evidence with every context green."""
+    """A CI result that observed GitHub evidence with every context green."""
     return CiWaitResult(
         fields.pop("mode", CiEvidenceMode.ACTIONS),
         fields.pop("reason", None),
-        fields.pop("auto_merge_eligible", True),
-        fields.pop("detail", None),
+        detail=fields.pop("detail", None),
     )
-
-
-def test_auto_merge_is_requested_when_every_condition_holds() -> None:
-    """§13 — `github` evidence, all contexts green, test evidence, and both knobs on."""
-    transport = FakeGitHubTransport()
-
-    links = publish(
-        transport,
-        config=github_evidence_config(),
-        candidate_fields={
-            "auto_merge_eligible": True,
-            "test_added": True,
-            "merge_mode": MergeMode.AUTO,
-        },
-        ci_result=github_ci(),
-    )
-
-    assert AUTO_MERGE_PATH in transport.write_paths
-    assert links.auto_merge_requested is True
-
-
-def test_an_approved_test_exemption_substitutes_for_a_new_test() -> None:
-    """§9 — a recorded exemption is the only substitute for test evidence."""
-    transport = FakeGitHubTransport()
-
-    links = publish(
-        transport,
-        config=github_evidence_config(),
-        candidate_fields={
-            "auto_merge_eligible": True,
-            "test_added": False,
-            "test_exempt_reason": ReasonCode.STALE_SKIP,
-            "merge_mode": MergeMode.AUTO,
-        },
-        ci_result=github_ci(),
-    )
-
-    assert links.auto_merge_requested is True
-
-
-def test_lane1_test_exemption_keeps_auto_merge_reachable() -> None:
-    """LANE 1 does not need a new test when its criterion is observed."""
-    transport = FakeGitHubTransport()
-
-    links = publish(
-        transport,
-        config=github_evidence_config(),
-        candidate_fields={
-            "auto_merge_eligible": True,
-            "test_added": None,
-            "test_exempt_reason": ReasonCode.TEST_NOT_REQUIRED,
-            "merge_mode": MergeMode.AUTO,
-        },
-        ci_result=github_ci(),
-    )
-
-    assert links.auto_merge_requested is True
-
-
-@pytest.mark.parametrize(
-    ("label", "candidate_fields", "ci_result"),
-    [
-        (
-            "local evidence",
-            {"auto_merge_eligible": True, "test_added": True},
-            github_ci(mode=CiEvidenceMode.LOCAL),
-        ),
-        (
-            "ci reason recorded",
-            {"auto_merge_eligible": True, "test_added": True},
-            github_ci(reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE, auto_merge_eligible=False),
-        ),
-        (
-            "ci check failed",
-            {"auto_merge_eligible": True, "test_added": True},
-            github_ci(reason=ReasonCode.CI_CHECK_FAILED, auto_merge_eligible=False),
-        ),
-        (
-            "wait refused eligibility",
-            {"auto_merge_eligible": True, "test_added": True},
-            github_ci(auto_merge_eligible=False),
-        ),
-        (
-            "no test evidence",
-            {"auto_merge_eligible": True, "test_added": None},
-            github_ci(),
-        ),
-        (
-            "candidate not eligible",
-            {"auto_merge_eligible": False, "test_added": True},
-            github_ci(),
-        ),
-        (
-            "candidate eligibility unresolved",
-            {"auto_merge_eligible": None, "test_added": True},
-            github_ci(),
-        ),
-    ],
-)
-def test_auto_merge_fails_closed_and_never_reaches_enable_auto_merge(
-    label: str,
-    candidate_fields: Mapping[str, Any],
-    ci_result: CiWaitResult,
-) -> None:
-    """§13 — the conjunction fails closed: no weaker evidence may reach `enable_auto_merge`."""
-    transport = FakeGitHubTransport()
-
-    links = publish(
-        transport,
-        config=github_evidence_config(),
-        candidate_fields=candidate_fields,
-        ci_result=ci_result,
-    )
-
-    assert AUTO_MERGE_PATH not in transport.write_paths, label
-    assert links.auto_merge_requested is False
-
-
-def test_auto_merge_knob_off_never_reaches_enable_auto_merge() -> None:
-    """§13 — `auto_merge_enabled = false` is a hard refusal at the publication edge."""
-    transport = FakeGitHubTransport()
-
-    links = publish(
-        transport,
-        config=live_config(ci_evidence_mode=CiEvidenceMode.ACTIONS),
-        candidate_fields={
-            "auto_merge_eligible": True,
-            "test_added": True,
-            "merge_mode": MergeMode.AUTO,
-        },
-        ci_result=github_ci(),
-    )
-
-    assert AUTO_MERGE_PATH not in transport.write_paths
-    assert links.auto_merge_requested is False
-
-
-def test_local_ci_evidence_forces_the_auto_merge_knob_off() -> None:
-    """§10.1 — `ci_evidence_mode = local` forces `auto_merge_enabled = false` at config level."""
-    config = live_config(ci_evidence_mode=CiEvidenceMode.LOCAL, auto_merge_enabled=True)
-
-    assert config.auto_merge_enabled is False
-
-
-def test_enable_auto_merge_rechecks_the_mode_at_the_client_edge() -> None:
-    """§13 — the client re-checks configuration and mode; weaker evidence raises before writing."""
-    transport = FakeGitHubTransport()
-    client = GitHubClient(github_evidence_config(), transport=transport)
-
-    with pytest.raises(ValueError):
-        client.enable_auto_merge(2, ci_mode=CiEvidenceMode.LOCAL)
-
-    assert transport.writes == []
-
-
-def test_enable_auto_merge_is_refused_when_the_knob_is_off() -> None:
-    """§13 — the knob is re-checked at the edge, not only by the caller."""
-    transport = FakeGitHubTransport()
-    client = GitHubClient(live_config(ci_evidence_mode=CiEvidenceMode.ACTIONS), transport=transport)
-
-    with pytest.raises(ValueError):
-        client.enable_auto_merge(2, ci_mode=CiEvidenceMode.ACTIONS)
-
-    assert transport.writes == []
-
-
-def test_enable_auto_merge_does_not_observe_a_merge_in_the_same_run() -> None:
-    """§11 — auto-merge is a *request*; the merge is reconciled by a later run's discovery."""
-    transport = FakeGitHubTransport()
-    client = GitHubClient(github_evidence_config(), transport=transport)
-
-    client.enable_auto_merge(2, ci_mode=CiEvidenceMode.ACTIONS)
-    assert transport.write_paths == [AUTO_MERGE_PATH]
 
 
 # -- provenance reads used by the CI probe -----------------------------------------------

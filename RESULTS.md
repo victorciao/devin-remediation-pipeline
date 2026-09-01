@@ -80,7 +80,7 @@ Candidates without an issue or a pull request: 29 (excluded from the table above
 - **Merged Clean:** 0
 - **Edited:** 0
 - **Rejected:** 0
-- **Merge Rate Alert:** 0
+- **Merge Rate Alert:** 1
 - **Session Failure Alert:** 0
 
 ## Burn-down by lane
@@ -95,4 +95,4 @@ Candidates without an issue or a pull request: 29 (excluded from the table above
 
 ## Merges
 
-- Candidates merged by automation: 0 (rows in state `merged` with a verified merge observation).
+- Candidates observed merged (a human merges; the pipeline never does): 0 (rows in state `merged` with a verified merge observation).

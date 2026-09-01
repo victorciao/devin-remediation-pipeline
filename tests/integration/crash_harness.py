@@ -58,9 +58,18 @@ def _mutation_number(rows: list[dict[str, object]], index: int) -> int:
 def _fixture_alert() -> Mapping[str, object]:
     """Select one high-scoring alert from the shipped fixture."""
     value = read_alert_fixture(FIXTURES_DIR / "codeql_alerts.json")
-    if not isinstance(value, list) or not isinstance(value[5], Mapping):
-        raise RuntimeError("the CodeQL fixture does not contain the crash-harness alert")
-    return value[5]
+    if isinstance(value, list):
+        for alert in value:
+            if not isinstance(alert, Mapping):
+                continue
+            rule = alert.get("rule")
+            if (
+                isinstance(rule, Mapping)
+                and rule.get("id") == "py/overly-large-range"
+                and alert.get("number") == 6
+            ):
+                return alert
+    raise RuntimeError("the CodeQL fixture does not contain alert py/overly-large-range number 6")
 
 
 def _branch_created(rows: list[dict[str, object]], prefix: str, branch: str) -> bool:
@@ -122,6 +131,7 @@ class DurableLedgerGitHubTransport(FakeGitHubTransport):
         return super().patch(path, payload)
 
     def put(self, path: str, payload: Mapping[str, object]) -> Mapping[str, object]:
+        """The base fake has no PUT operation to delegate to."""
         self._record("put", path, payload)
         return {"ok": True}
 
