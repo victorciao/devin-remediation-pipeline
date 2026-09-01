@@ -256,7 +256,7 @@ or a fork match — never by a state value alone. A per-candidate failure defers
 | `coverage_bar` | `0.80` | enforced by `[tool.coverage.report] fail_under = 80` over six pure-logic modules; those modules currently measure approximately 94% |
 
 Also configurable: target `owner/repo`, GitHub token, Devin API key, rubrics, templates. **SIMULATE** (default) needs **no credentials**, makes **no** network writes and creates no sessions: discovery from fixtures, gates, scoring, rendering, reporting; every artifact is marked `artifact_simulated = true` with `writes_suppressed
-= <n>`, and any attempted write raises. `docker compose run --rm pipeline` must complete a full SIMULATE run offline; the image needs no CodeQL toolchain, since the fork's workflow performs every scan.
+= <n>`, and any attempted write raises. `docker compose run --rm remediation` must complete a full SIMULATE run offline; the image needs no CodeQL toolchain, since the fork's workflow performs every scan.
 
 **LIVE preconditions**, all checked before the first write, each failure aborting before it: `mode = live` supplied explicitly; `github_token` and `devin_api_key` present; token identity and scopes recorded from `GET /user`; `GET /repos/{o}/{r}` reachable with push access; `codeql-analysis` enabled on the fork, with its latest
 `master` analysis sitting on `base_sha`; Actions enabled with ≥1 completed `pull_request` run; `required_contexts_min` non-empty; issue search reachable when medium-tier candidates are present.
