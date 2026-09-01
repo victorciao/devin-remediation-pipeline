@@ -186,7 +186,45 @@ def test_merge_rate_alert_is_suppressed_without_pr_events(
 
     rollup = compute_kpis([], events, {}, simulate_config)
 
-    assert rollup["merge_rate"] == 0.0
+    assert rollup["merge_rate"] is None
+    assert rollup[MERGE_RATE_ALERT] == 0
+
+
+def test_pending_human_merges_are_not_measurable(
+    simulate_config: PipelineConfig,
+) -> None:
+    """Pending human merges are not a failed disposition for the pipeline to alert on."""
+    events = [
+        event(
+            "pending",
+            terminal_outcome=CandidateState.AWAITING_HUMAN_MERGE,
+            pr_url=PR_URL,
+        )
+    ]
+
+    rollup = compute_kpis([], events, {}, simulate_config)
+
+    assert rollup["merge_rate"] is None
+    assert rollup[MERGE_RATE_ALERT] == 0
+
+
+def test_pending_human_merge_does_not_change_settled_merge_rate(
+    simulate_config: PipelineConfig,
+) -> None:
+    """A pending PR is excluded from the denominator until a human disposes of it."""
+    events = [
+        merged("merged"),
+        rejected("rejected"),
+        event(
+            "pending",
+            terminal_outcome=CandidateState.AWAITING_HUMAN_MERGE,
+            pr_url=PR_URL,
+        ),
+    ]
+
+    rollup = compute_kpis([], events, {}, simulate_config)
+
+    assert rollup["merge_rate"] == 0.5
     assert rollup[MERGE_RATE_ALERT] == 0
 
 

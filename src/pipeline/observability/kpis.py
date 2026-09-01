@@ -137,6 +137,7 @@ def compute_kpis(
     valid_rows = [value for value in burndown.values() if isinstance(value.denominator, int)]
     merge_rate = _merge_rate(events)
     pr_events = _latest_pr_events(events)
+    settled_pr_events = _settled_pr_events(events)
     merged_clean = sum(
         event.merged_at is not None
         and event.merge_verified
@@ -239,16 +240,20 @@ def compute_kpis(
         "merged_clean": merged_clean,
         "edited": edited,
         "rejected": rejected,
-        "merge_rate_alert": int(bool(pr_events) and merge_rate < config.merge_rate_floor),
+        "merge_rate_alert": int(
+            bool(settled_pr_events)
+            and merge_rate is not None
+            and merge_rate < config.merge_rate_floor
+        ),
         "session_failure_alert": int(
             (session_failures / len(events) if events else 0.0) > config.session_failure_ceiling
         ),
     }
 
 
-def _merge_rate(events: list[EventRecord]) -> float:
-    """Compute observed human-merge rate over distinct pull requests."""
-    pr_events = _latest_pr_events(events)
+def _merge_rate(events: list[EventRecord]) -> float | None:
+    """Compute observed human-merge rate over PRs with a human disposition."""
+    pr_events = _settled_pr_events(events)
     merged = sum(
         event.terminal_outcome is CandidateState.MERGED
         and event.merged_at is not None
@@ -256,7 +261,7 @@ def _merge_rate(events: list[EventRecord]) -> float:
         and event.reason is not ReasonCode.MERGED_EXTERNALLY_UNVERIFIED
         for event in pr_events
     )
-    return merged / len(pr_events) if pr_events else 0.0
+    return merged / len(pr_events) if pr_events else None
 
 
 def _latest_pr_events(events: list[EventRecord]) -> list[EventRecord]:
@@ -266,6 +271,15 @@ def _latest_pr_events(events: list[EventRecord]) -> list[EventRecord]:
         if event.pr_url is not None:
             latest[event.candidate_id] = event
     return list(latest.values())
+
+
+def _settled_pr_events(events: list[EventRecord]) -> list[EventRecord]:
+    """Exclude pending human merges because the pipeline never merges or fails them."""
+    return [
+        event
+        for event in _latest_pr_events(events)
+        if event.terminal_outcome is not CandidateState.AWAITING_HUMAN_MERGE
+    ]
 
 
 def _latest_issue_rows(

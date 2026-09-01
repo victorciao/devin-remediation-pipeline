@@ -76,11 +76,11 @@ Candidates without an issue or a pull request: 29 (excluded from the table above
 - **Issues Adopted By Tier:** high=2, medium=29
 - **High Issue Closure By Merged Pr:** 0
 - **Burn Down Denominators:** 50
-- **Merge Rate:** 0.0
+- **Merge Rate:** n/a
 - **Merged Clean:** 0
 - **Edited:** 0
 - **Rejected:** 0
-- **Merge Rate Alert:** 1
+- **Merge Rate Alert:** 0
 - **Session Failure Alert:** 0
 
 ## Burn-down by lane
