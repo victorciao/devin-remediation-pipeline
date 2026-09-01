@@ -84,7 +84,10 @@ def render_run_report(
     gated_count = sum(candidate.gate_passed is False for candidate in rows)
     unpublished_count = sum(candidate.state is CandidateState.DISPATCHING for candidate in rows)
     safety_undetermined_count = sum(
-        candidate.marker_search_outcome in {"failed", "orphaned", "unconfigured"}
+        (
+            candidate.marker_search_outcome in {"failed", "orphaned"}
+            or (mode is Mode.LIVE and candidate.marker_search_outcome == "unconfigured")
+        )
         and candidate.issue_url is None
         and candidate.pr_url is None
         for candidate in rows

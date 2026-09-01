@@ -173,7 +173,7 @@ Each run reconciles both artifacts against the fork before writing either. Dupli
   let a later run create a second issue. **This residual window is a known, accepted, bounded risk: the blast radius is one duplicate issue, never a duplicate PR and never a merge.** Resume searches the marker first, adopts a found issue (recording its number and URL), and creates one only when the search returns nothing; a
   search that errors or is unconfigured defers the candidate and writes nothing. No write-intent rows, no reservation leases.
 
-Before hosted execution, committed run directories under `history/` are restored into the live append-only state file in chronological order; publication exports only rows appended by the current run. Previously settled candidates are reconciled from that state and skipped, never redispatched. The issue body renders the fork's issue template heading set, the marker, the lane, the locator and the score with its factor breakdown; a medium-tier body adds why the candidate was not automated. Its title obeys the PR title regex.
+Before hosted execution, committed run directories under `history/` are restored into the live append-only state file in chronological order; seed keeps one last-write-wins row per candidate and publication exports by the seeded line offset, not by inferring `run_id`. Previously settled candidates are reconciled from that state and skipped, never redispatched. The issue body renders the fork's issue template heading set, the marker, the lane, the locator and the score with its factor breakdown; a medium-tier body adds why the candidate was not automated. Its title obeys the PR title regex.
 
 Run-history publication authenticates with `REMEDIATION_GITHUB_PAT` because the default workflow token is read-only; a publication failure annotates the run without failing remediation.
 
@@ -211,8 +211,8 @@ Every failure is terminal, leaves **at most one artifact** on the fork, and neve
 | A check run concludes `failure`/`cancelled`/`timed_out`, or `required_contexts_min` is absent or unsuccessful | `terminal/ci_check_failed` | PR URL as open-not-merged, with the offending check runs |
 | Check runs never settle within `ci_wait_timeout_s`, or the PR waits on workflow approval | `terminal/ci_evidence_unavailable` | PR URL as open-not-merged, with the unsettled check runs |
 | PR passes the post-PR gate and remains open | `awaiting_human_merge` / `manual_merge_required` | PR URL, gate result, merge owned by a human |
-| A persisted `awaiting_human_merge` PR is observed as merged | `merged` | externally observed `merged_at` and verified merge evidence |
-| A persisted `awaiting_human_merge` PR is observed closed without a merge | `terminal/closed_pull_request` | PR URL and close outcome |
+| A persisted `awaiting_human_merge` or terminal PR is observed as merged | `merged` | externally observed `merged_at` and verified merge evidence |
+| A persisted `awaiting_human_merge` or terminal PR is observed closed without a merge | `terminal/closed_pull_request` | PR URL and close outcome |
 | Issue marker search errors or is unconfigured | `deferred/marker_search_failed` / `deferred/marker_search_unconfigured` | not published this run; retried next run, no issue written |
 | High-tier candidate fails its criterion after its issue was written | the criterion's terminal reason, with `issue_url` retained | issue URL as open-unremediated; no PR |
 
@@ -220,7 +220,7 @@ Every failure is terminal, leaves **at most one artifact** on the fork, and neve
 match (recording `pr_number`, `pr_url`, `head_sha`) before doing anything else; no match means the write never landed and publication is retried. Because the branch name derives from `candidate_id` the query is exact, so at most one PR can ever exist per candidate. The issue write of either tier reconciles marker-first instead,
 and its accepted residual window is stated once in §11.
 
-State rows are append-only, last-write-wins per `candidate_id`; durable identities (`pr_url`, `pr_number`, `issue_url`, `issue_number`, `head_sha`, `merged_at`) are write-once-non-null and replacing a non-null value with `None` raises `StatePreservationError`. "Already published" is decided by artifact proof — a persisted number
+State rows are append-only, last-write-wins per `candidate_id`; durable identities (`pr_url`, `pr_number`, `issue_url`, `issue_number`, `head_sha`, `merged_at`) are write-once-non-null and replacing a non-null value with `None` raises `StatePreservationError`. Once an artifact-backed row is settled, later writes must remain settled and a merged row is final; a blocked write is caught and reported as a candidate deferral while the persisted settlement remains intact. "Already published" is decided by artifact proof — a persisted number
 or a fork match — never by a state value alone. A per-candidate failure defers or terminates that candidate only; the run continues to publication and reporting.
 
 ## 14. State and observability
@@ -236,7 +236,7 @@ or a fork match — never by a state value alone. A per-candidate failure defers
   for.
 - **Layer 3** `reports/kpis.md`: observed human-merge rate (verified externally merged PRs over published PRs); **verification pass rate = candidates whose declared criterion was satisfied / candidates dispatched**, reported overall and per lane since the criteria differ; backlog burn-down per lane against
   `fixtures/baseline.json` (`n/a` for a lane absent from `baseline_valid_lanes`); test-inclusion rate over the candidates whose criterion required a test; issues created and issues adopted, split by tier, with high-tier issues closed by their merged PR counted separately; session-failure rate; deferred-by-reason. Alerts when
-  merge rate `< merge_rate_floor = 0.50`, verification pass rate `< verification_pass_rate_floor = 0.80`, publication safety undetermined, or session-failure rate `> session_failure_ceiling = 0.30`. Verification pass rate uses dispatched candidates evidenced by persisted `head_branch`, and is reported overall and per lane.
+  merge rate `< merge_rate_floor = 0.50`, verification pass rate `< verification_pass_rate_floor = 0.80`, publication safety undetermined, or session-failure rate `> session_failure_ceiling = 0.30`. Verification pass rate uses dispatched candidates evidenced by persisted `head_branch` and the current run's event IDs, and is reported overall and per lane. SIMULATE preserves `unconfigured` marker outcomes because it does not perform a search; only LIVE `unconfigured` outcomes contribute to publication-safety uncertainty, while failed and orphaned outcomes count in every mode.
 
 ## 15. Configuration and modes
 

@@ -43,8 +43,8 @@ If the target checkout is absent, the entrypoint uses the baseline records for t
 test and deprecation lanes and still runs from the checked-in fixtures. SIMULATE creates no
 remote writes: the GitHub transport seam rejects mutation before a transport method can be
 called. It renders the artifacts that a live run would publish. SIMULATE labels session counts
-as `(simulated)` and prefixes alert lines with `SIMULATED`; verification and publication-safety
-alerts remain visible.
+as `(simulated)` and prefixes alert lines with `SIMULATED`; verification alerts remain visible,
+and publication-safety alerts cover failed or orphaned marker searches.
 
 Configuration precedence is configuration file, then `PIPELINE_*` environment variables,
 then command-line options. For example:
@@ -60,8 +60,8 @@ configuration errors, blocking capability preconditions, or hard session/cost ce
 ## LIVE
 
 LIVE is deliberately guarded. A constrained LIVE run against `victorciao/superset` created
-30 tracking issues, one remediation branch, and one Devin session; it settled its candidate
-without creating a pull request or merging anything. Runtime credentials must be supplied through the
+30 tracking issues, one remediation branch, and one Devin session; it left its candidate awaiting
+human merge with a pull request and did not merge anything. Runtime credentials must be supplied through the
 environment only; they are never accepted from a configuration file, Docker build argument,
 image layer, source file, or log:
 

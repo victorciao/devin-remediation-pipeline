@@ -355,11 +355,10 @@ def test_a_live_run_keeps_its_durable_state_in_its_own_file(aborted_run: Aborted
 
 
 def test_simulated_rows_are_invisible_to_a_live_run(tmp_path: Path) -> None:
-    """§14.1 — a simulated publication must never satisfy a LIVE dedupe check.
+    """§14.1 — simulated state is marked and isolated from LIVE state.
 
-    Both modes share one output directory in practice, and SIMULATE stamps publication states
-    on rows for which nothing exists on the remote; reading those rows in LIVE would skip the
-    very first write of every candidate the simulation had already "published".
+    SIMULATE does not perform marker searches, so its candidates remain unconfigured and are
+    not dispatched. Its state file is still separate and explicitly marked simulated.
     """
     output_dir = tmp_path / "out"
     entrypoint.run_once(
@@ -370,20 +369,15 @@ def test_simulated_rows_are_invisible_to_a_live_run(tmp_path: Path) -> None:
         base_sha="1" * 40,
     )
     simulated = read_rows(output_dir / "state" / SIMULATE_STATE_FILE)
-    dispatched_by_simulate = {
-        row["candidate_id"] for row in simulated if row["state"] == CandidateState.DISPATCHING.value
-    }
+    simulated_ids = {row["candidate_id"] for row in simulated}
 
     aborted = live_run(output_dir, tmp_path)
-    live_states = {row["candidate_id"]: row["state"] for row in aborted.rows()}
+    live_rows = aborted.rows()
 
-    assert dispatched_by_simulate != set()
+    assert simulated_ids
+    assert all(row["artifact_simulated"] is True for row in simulated)
     assert read_rows(output_dir / "state" / SIMULATE_STATE_FILE) == simulated
-    assert dispatched_by_simulate <= set(live_states)
-    assert all(
-        live_states[candidate_id] == CandidateState.DEFERRED.value
-        for candidate_id in dispatched_by_simulate
-    )
+    assert all(row["artifact_simulated"] is False for row in live_rows)
 
 
 def test_an_unconfigured_marker_search_completes_normally(tmp_path: Path) -> None:
@@ -407,7 +401,7 @@ def test_an_unconfigured_marker_search_completes_normally(tmp_path: Path) -> Non
     assert rows
     published = [row for row in rows if row["action"] != "log_only"]
     assert all(
-        row["marker_search_outcome"] == MarkerSearchOutcome.ABSENT.value for row in published
+        row["marker_search_outcome"] == MarkerSearchOutcome.UNCONFIGURED.value for row in published
     )
     assert all(row["marker_search_outcome"] is None for row in rows if row["action"] == "log_only")
     assert "Publication safety undetermined: 0" in next(

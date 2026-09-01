@@ -21,6 +21,13 @@ DURABLE_IDENTITY_FIELDS = (
     "head_sha",
     "merged_at",
 )
+SETTLED_STATES = frozenset(
+    {
+        CandidateState.MERGED,
+        CandidateState.AWAITING_HUMAN_MERGE,
+        CandidateState.TERMINAL,
+    }
+)
 
 
 class ResumeAction(str, Enum):
@@ -384,6 +391,15 @@ class CandidateStateStore:
             for field in DURABLE_IDENTITY_FIELDS:
                 if previous_row.get(field) is not None and current_row.get(field) is None:
                     raise StatePreservationError(f"state append discarded persisted {field}")
+            if latest.state in SETTLED_STATES and has_local_artifact(latest):
+                if candidate.state not in SETTLED_STATES or (
+                    latest.state is CandidateState.MERGED
+                    and candidate.state is not CandidateState.MERGED
+                ):
+                    raise StatePreservationError(
+                        f"state append attempted transition "
+                        f"{latest.state.value} -> {candidate.state.value}"
+                    )
         if latest is not None and latest.model_dump(mode="json") == candidate.model_dump(
             mode="json"
         ):
@@ -444,6 +460,7 @@ class CandidateStateStore:
 __all__ = [
     "CandidateStateStore",
     "DURABLE_IDENTITY_FIELDS",
+    "SETTLED_STATES",
     "ResumeAction",
     "ResumeDecision",
     "StatePreservationError",

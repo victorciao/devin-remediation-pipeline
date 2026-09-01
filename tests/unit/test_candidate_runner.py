@@ -10,6 +10,7 @@ from pydantic import SecretStr
 from pipeline.__main__ import CandidateRunner, LiveTarget
 from pipeline.config import Mode, PipelineConfig
 from pipeline.github_client import GitHubClient
+from pipeline.http_transport import HttpTransportError
 from pipeline.schemas import Action, Candidate, CandidateState, ReasonCode, RetryDecision, Tier
 from pipeline.session_client import (
     FixOutput,
@@ -205,6 +206,15 @@ class NoSessionOrchestrator:
         raise AssertionError("settled candidate was redispatched")
 
 
+class UnreadablePullRequestTransport(FakeGitHubTransport):
+    """Fail the lifecycle read for the persisted pull request."""
+
+    def get(self, path: str) -> object:
+        if path.endswith("/pulls/2"):
+            raise HttpTransportError("temporary GitHub failure", status_code=503)
+        return super().get(path)
+
+
 class SessionCallbackThenBlockedOrchestrator:
     """Record session creation before returning a terminal session failure."""
 
@@ -331,3 +341,41 @@ def test_reconcile_leaves_open_pr_awaiting_human_merge(tmp_path: Path) -> None:
     result = runner.process(candidate)
 
     assert result.state is CandidateState.AWAITING_HUMAN_MERGE
+
+
+def test_reconcile_observes_open_pr_for_terminal_candidate(tmp_path: Path) -> None:
+    """A terminal candidate with an open PR is still checked for human disposition."""
+    transport = FakeGitHubTransport(pr_state="open")
+    runner, store = _runner(tmp_path, transport, NoSessionOrchestrator())
+    candidate = codeql_candidate(action=Action.OPEN_PR)
+    store.append(
+        candidate.model_copy(
+            update={
+                "state": CandidateState.TERMINAL,
+                "issue_number": 1,
+                "issue_url": "https://github.test/victorciao/superset/issues/1",
+                "pr_number": 2,
+                "pr_url": "https://github.test/victorciao/superset/pull/2",
+                "reason": ReasonCode.SESSION_FAILED,
+                "action": Action.OPEN_PR,
+            }
+        )
+    )
+
+    result = runner.process(candidate)
+
+    assert result.state is CandidateState.TERMINAL
+    assert any(path.endswith("/pulls/2") for path in transport.reads)
+
+
+def test_unreadable_persisted_pr_does_not_change_settlement(tmp_path: Path) -> None:
+    """A transient PR read failure leaves a settled candidate awaiting disposition."""
+    transport = UnreadablePullRequestTransport()
+    runner, _store = _runner(tmp_path, transport, NoSessionOrchestrator())
+    candidate = codeql_candidate(action=Action.OPEN_PR)
+    _persisted_awaiting(runner, candidate)
+
+    result = runner.process(candidate)
+
+    assert result.state is CandidateState.AWAITING_HUMAN_MERGE
+    assert any("pull request observation unavailable" in note for note in runner.notes)

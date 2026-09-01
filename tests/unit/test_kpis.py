@@ -325,8 +325,16 @@ def test_verification_pass_rate_uses_dispatched_candidates_and_reports_lanes(
     """§11 — persisted branch evidence supplies the candidate denominator per lane."""
     satisfied = CriterionEvidence(criterion="criterion", satisfied=True)
     candidates = [
-        codeql_candidate(candidate_id="codeql-dispatched", head_branch="devin/codeql"),
-        lane2_candidate(candidate_id="lane2-dispatched", head_branch="devin/lane2"),
+        codeql_candidate(
+            candidate_id="codeql-dispatched",
+            head_branch="devin/codeql",
+            run_id="run-1",
+        ),
+        lane2_candidate(
+            candidate_id="lane2-dispatched",
+            head_branch="devin/lane2",
+            run_id="run-1",
+        ),
     ]
     events = [
         event(
@@ -377,6 +385,18 @@ def test_publication_safety_alert_tracks_undetermined_candidates(
 
     assert rollup["publication_safety_undetermined"] == expected_alert
     assert rollup[PUBLICATION_SAFETY_ALERT] == expected_alert
+
+
+def test_simulate_unconfigured_marker_search_is_not_safety_failure(
+    simulate_config: PipelineConfig,
+) -> None:
+    """SIMULATE records an unconfigured search without claiming uncertainty."""
+    candidate = codeql_candidate(marker_search_outcome="unconfigured")
+
+    rollup = compute_kpis([candidate], [], {}, simulate_config)
+
+    assert rollup["publication_safety_undetermined"] == 0
+    assert rollup[PUBLICATION_SAFETY_ALERT] == 0
 
 
 def test_suppressed_rows_count_only_in_the_denominator(

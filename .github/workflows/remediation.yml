@@ -58,7 +58,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          token: ${{ secrets.REMEDIATION_GITHUB_PAT }}
+          token: ${{ secrets.REMEDIATION_GITHUB_PAT || github.token }}
           fetch-depth: 0
       - name: Checkout Superset target
         uses: actions/checkout@v4
@@ -128,7 +128,7 @@ jobs:
             echo "No remediation state JSONL found; skipping run-history publication."
             exit 0
           fi
-          export_file="remediation-output/state/candidates-live-export.jsonl"
+          export_file="remediation-output/candidates-live-export.jsonl"
           python -m pipeline.history export \
             --state "$state_file" \
             --seed-meta "$state_file.seed.json" \

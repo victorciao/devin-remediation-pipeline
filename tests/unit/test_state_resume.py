@@ -15,6 +15,7 @@ from pipeline.state import (
     MarkerArtifact,
     MarkerSearchOutcome,
     ResumeAction,
+    StatePreservationError,
     build_marker_index,
     decide_resume,
     github_marker_search,
@@ -784,6 +785,42 @@ def test_suppression_does_not_weaken_the_artifact_reservation(tmp_path: Path) ->
     assert store.append_if_new_artifact(candidate) is False
     assert store.append_if_new_artifact(candidate.model_copy(update={"pr_url": PR_URL})) is False
     assert len(store.rows()) == 1
+
+
+@pytest.mark.parametrize(
+    "states",
+    [
+        [CandidateState.TERMINAL, CandidateState.AWAITING_HUMAN_MERGE],
+        [CandidateState.AWAITING_HUMAN_MERGE, CandidateState.TERMINAL],
+    ],
+)
+def test_artifact_backed_settlement_is_preserved_across_arbitrary_appends(
+    tmp_path: Path,
+    states: list[CandidateState],
+) -> None:
+    """A settled artifact row cannot be moved back into resumable lifecycle states."""
+    store = store_for(tmp_path)
+    current = persisted(
+        CandidateState.AWAITING_HUMAN_MERGE,
+        pr_number=2,
+        pr_url=PR_URL,
+        issue_number=1,
+        issue_url=ISSUE_URL,
+    )
+    store.append(current)
+
+    for state in states:
+        current = current.model_copy(update={"state": state})
+        store.append(current)
+
+    for state in (CandidateState.DEFERRED, CandidateState.PR_CREATED):
+        with pytest.raises(StatePreservationError, match="attempted transition"):
+            store.append(current.model_copy(update={"state": state}))
+        latest = store.resume(current.candidate_id)
+        assert latest is not None
+        assert latest.pr_url == PR_URL
+        assert latest.pr_number == 2
+        assert latest.issue_url == ISSUE_URL
 
 
 # -- durable identity ----------------------------------------------------------------------

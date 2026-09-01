@@ -113,7 +113,7 @@ def compute_kpis(
         for candidate_id, rows in by_candidate.items()
         if any(event.session_id is not None for event in rows)
     }
-    dispatched_ids = _dispatched_candidate_ids(candidates, session_ids)
+    dispatched_ids = _dispatched_candidate_ids(candidates, session_ids, events)
     verification_passes = sum(
         any(
             event.criterion_evidence is not None and event.criterion_evidence.satisfied is True
@@ -188,7 +188,10 @@ def compute_kpis(
                 marker_outcomes.get(candidate.marker_search_outcome, 0) + 1
             )
     safety_undetermined = sum(
-        candidate.marker_search_outcome in {"failed", "orphaned", "unconfigured"}
+        (
+            candidate.marker_search_outcome in {"failed", "orphaned"}
+            or (config.mode is Mode.LIVE and candidate.marker_search_outcome == "unconfigured")
+        )
         and not has_local_artifact(candidate)
         for candidate in candidates
     )
@@ -285,10 +288,14 @@ def _latest_pr_events(events: list[EventRecord]) -> list[EventRecord]:
 def _dispatched_candidate_ids(
     candidates: list[Candidate],
     session_ids: set[str],
+    events: list[EventRecord],
 ) -> set[str]:
-    """Return candidates evidenced as dispatched by a branch or session."""
+    """Return candidates dispatched in the runs represented by the events."""
+    event_run_ids = {event.run_id for event in events}
     return {
-        candidate.candidate_id for candidate in candidates if candidate.head_branch is not None
+        candidate.candidate_id
+        for candidate in candidates
+        if candidate.head_branch is not None and candidate.run_id in event_run_ids
     } | session_ids
 
 

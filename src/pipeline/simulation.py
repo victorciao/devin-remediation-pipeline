@@ -10,7 +10,12 @@ from pipeline.observability.events import EventLog, append_candidate_events
 from pipeline.observability.kpis import write_kpi_report
 from pipeline.observability.report import write_run_report
 from pipeline.schemas import Action, Candidate, Lane, RunEventRecord
-from pipeline.state import CandidateStateStore
+from pipeline.state import (
+    SETTLED_STATES,
+    CandidateStateStore,
+    StatePreservationError,
+    has_local_artifact,
+)
 from pipeline.templates.render import (
     render_issue_body,
     render_pr_body,
@@ -44,11 +49,25 @@ def render_run_artifacts(
         artifact_simulated=config.mode is Mode.SIMULATE,
     )
     rendered_candidates = [
-        candidate.model_copy(update={"artifact_simulated": config.mode is Mode.SIMULATE})
+        candidate.model_copy(
+            update={
+                "artifact_simulated": config.mode is Mode.SIMULATE,
+                "run_id": run_id,
+            }
+        )
         for candidate in candidates
     ]
     for candidate in rendered_candidates:
-        store.append(candidate)
+        try:
+            store.append(candidate)
+        except StatePreservationError:
+            latest = store.latest().get(candidate.candidate_id)
+            if (
+                latest is None
+                or latest.state not in SETTLED_STATES
+                or not has_local_artifact(latest)
+            ):
+                raise
 
     fixes = fix_outputs or {}
     pr_template = (config.templates_dir / "superset/PULL_REQUEST_TEMPLATE.md").read_text(

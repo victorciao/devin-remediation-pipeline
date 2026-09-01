@@ -84,10 +84,12 @@ from pipeline.session_client import (
 from pipeline.simulation import simulate_run
 from pipeline.simulation_fixtures import simulated_observers
 from pipeline.state import (
+    SETTLED_STATES,
     CandidateStateStore,
     MarkerSearchOutcome,
     ResumeAction,
     StatePreservationError,
+    has_local_artifact,
 )
 from pipeline.templates.render import (
     ArtifactValidationError,
@@ -209,11 +211,27 @@ class CandidateRunner:
             if self._settled(opened):
                 return opened
             return self._settle_merge(opened)
+        except StatePreservationError as exc:
+            latest = self.state_store.resume(candidate.candidate_id)
+            preserves_settlement = (
+                latest is not None and latest.state in SETTLED_STATES and has_local_artifact(latest)
+            )
+            if preserves_settlement:
+                self.notes.append(
+                    f"{candidate.candidate_id}: settled state preserved; write deferred"
+                )
+                return candidate.model_copy(
+                    update={
+                        "state": CandidateState.DEFERRED,
+                        "reason": ReasonCode.CAPABILITY_UNAVAILABLE,
+                        "reason_detail": str(exc),
+                    }
+                )
+            raise
         except (
             ArtifactUnavailableError,
             GitHubResponseError,
             HttpTransportError,
-            StatePreservationError,
             OSError,
         ) as exc:
             self.notes.append(f"{candidate.candidate_id}: capability unavailable, deferred")
@@ -232,8 +250,6 @@ class CandidateRunner:
     def _reconcile(self, candidate: Candidate) -> Candidate:
         """Adopt persisted and fork-side artifact identity before any write."""
         outcome = self.state_store.marker_search_outcome(candidate.candidate_id)
-        if outcome is MarkerSearchOutcome.UNCONFIGURED and self.config.mode is not Mode.LIVE:
-            outcome = MarkerSearchOutcome.ABSENT
         candidate = candidate.model_copy(update={"marker_search_outcome": outcome.value})
         update: dict[str, object] = {"base_sha": candidate.base_sha or self.base_sha}
         persisted = self.state_store.resume(candidate.candidate_id)
@@ -257,10 +273,16 @@ class CandidateRunner:
         if (
             self.live is not None
             and persisted is not None
-            and persisted.state is CandidateState.AWAITING_HUMAN_MERGE
+            and persisted.state in {CandidateState.AWAITING_HUMAN_MERGE, CandidateState.TERMINAL}
             and persisted.pr_number is not None
         ):
-            match = self.live.client.pull_request(persisted.pr_number)
+            try:
+                match = self.live.client.pull_request(persisted.pr_number)
+            except (GitHubResponseError, HttpTransportError) as exc:
+                match = None
+                self.notes.append(
+                    f"{candidate.candidate_id}: pull request observation unavailable: {exc}"
+                )
             if match is not None and match.merged_at is not None:
                 observed_update = {
                     **update,
@@ -1007,6 +1029,7 @@ def _normalize(
     candidates: Sequence[Candidate],
     *,
     state_store: CandidateStateStore,
+    run_id: str | None = None,
 ) -> list[Candidate]:
     """Adopt persisted identity and link drifted LANE 1 alerts before gating."""
     prior_rows = state_store.latest()
@@ -1018,7 +1041,10 @@ def _normalize(
                 prior if prior.pr_url is not None or prior.issue_url is not None else candidate
             )
             continue
-        current = candidate
+        if run_id is not None:
+            current = candidate.model_copy(update={"run_id": run_id})
+        else:
+            current = candidate
         if candidate.lane is Lane.CODEQL:
             drifted = state_store.drift_match(candidate, current_scan=candidates)
             if drifted is not None and drifted.superseded_by is None:
@@ -1164,15 +1190,8 @@ def run_once(
             notes=notes,
         ),
         state_store=state_store,
+        run_id=run_id,
     )
-    if config.mode is Mode.SIMULATE:
-        candidates = [
-            # Normalize unconfigured markers for candidates bypassing _reconcile.
-            candidate.model_copy(update={"marker_search_outcome": MarkerSearchOutcome.ABSENT.value})
-            if candidate.marker_search_outcome == MarkerSearchOutcome.UNCONFIGURED.value
-            else candidate
-            for candidate in candidates
-        ]
     dispatched = _select(candidates, config)
 
     live: LiveTarget | None = None
