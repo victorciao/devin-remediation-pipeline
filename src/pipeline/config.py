@@ -87,7 +87,6 @@ class PipelineConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True)
 
     mode: Mode = Mode.SIMULATE
-    coverage_bar: float = Field(default=0.80, ge=0.0, le=1.0, strict=True)
     budget_N: int = Field(default=DEFAULT_BUDGET_N, ge=1, le=BUDGET_HARD_MAX, strict=True)
     score_cap: float = Field(default=200, gt=0, strict=True)
     tier_high_min: float = Field(default=60, gt=0, strict=True)
@@ -331,7 +330,6 @@ def _parse_cli(args: Sequence[str]) -> tuple[dict[str, object], bool]:
         }:
             values[normalized_key] = _parse_int(normalized_key, raw_value)
         elif normalized_key in {
-            "coverage_bar",
             "merge_rate_floor",
             "verification_pass_rate_floor",
             "session_failure_ceiling",
@@ -355,7 +353,6 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
     if "GITHUB_PAT_REMEDIATION" in env:
         values["github_token"] = SecretStr(env["GITHUB_PAT_REMEDIATION"])
     field_names = {
-        "COVERAGE_BAR": "coverage_bar",
         "BUDGET_N": "budget_N",
         "SCORE_CAP": "score_cap",
         "TIER_HIGH_MIN": "tier_high_min",
@@ -408,7 +405,6 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
         }:
             values[field_name] = _parse_int(field_name, raw_value)
         elif name in {
-            "COVERAGE_BAR",
             "SCORE_CAP",
             "TIER_HIGH_MIN",
             "TIER_MEDIUM_MIN",

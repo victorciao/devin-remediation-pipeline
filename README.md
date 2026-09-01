@@ -111,43 +111,42 @@ causes a non-zero abort before the relevant work.
 
 ## Configuration reference (§13)
 
-| Name | Default | Range / allowed values | Safety behavior |
-|---|---:|---|---|
-| `mode` | `simulate` | `simulate`, `live` | `live` is explicit and credential-gated; unset values default to simulate |
-| `coverage_bar` | `0.80` | `0.0..1.0` | Coverage threshold used by review policy |
-| `budget_N` | `5` | `1..25` (`BUDGET_HARD_MAX=25`) | Dispatch overflow is deferred; values above 25 are clamped and recorded as `guardrail_clamped` |
-| `score_cap` | `200` | `>0` | Caps calculated scores |
-| `tier_high_min` | `60` | `> tier_medium_min` | High-tier PR routing threshold |
-| `tier_medium_min` | `20` | `>0` | Medium-tier issue routing threshold |
-| `eol_major_lag` | `2` | `>=1` | Major-version age required for EOL |
-| `merge_rate_floor` | `0.50` | `0.0..1.0` | KPI alert threshold |
-| `verification_pass_rate_floor` | `0.80` | `0.0..1.0` | KPI alert threshold |
-| `session_failure_ceiling` | `0.30` | `0.0..1.0` | KPI alert threshold and run safety signal |
-| `verification_pass_rate_alert` | derived | `0` or `1` | Alerts when verification pass rate is below its floor |
-| `publication_safety_alert` | derived | `0` or `1` | Alerts when publication safety is undetermined |
-| `max_sessions` | `8` | `>=1` | Per-run hard session ceiling; exceeding it aborts |
-| `session_timeout_s` | `5400.0` | `>0` | Bounds one Devin session |
-| `max_total_acu` | `500.0` | `>0` | Per-run hard ACU ceiling; exceeding it aborts |
-| `alert_source` | `code_scanning_api` | `code_scanning_api`, `sarif_file` | LANE 1 reads the fork's alerts for `master` and requires the latest CodeQL analysis to sit on `base_sha`; `sarif_file` is the SIMULATE input |
-| `alert_fixture_path` | `fixtures/codeql_alerts.json` | Path | Captured CodeQL/SARIF input |
-| `alert_analysis_wait_s` | `2700.0` | `>0` | Bounds CodeQL analysis polling |
-| `ci_evidence_mode` | `local` | `actions`, `local` | LIVE may resolve this from Actions history; evidence never authorizes an automated merge |
-| `suite_check_context` | `unit-tests-required` | Non-empty string | Named Actions check context used for suite evidence |
-| `ci_wait_timeout_s` | `5400` | `>0` | Bounds GitHub evidence waiting |
-| `required_contexts_min` | `pre-commit (current)` | Non-empty context names | Required completed Actions context for LIVE preflight |
-| `only_lanes` | `()` | Comma-separated `codeql`, `skipped_tests`, `deprecations` | Restricts dispatch eligibility without changing candidate discovery or reporting |
-| `has_issues` | `true` | `true`, `false` | False aborts before writes unless degraded PR-comment sink is selected |
-| `issue_sink` | `issues` | `issues`, `pr_comment` | `pr_comment` marks artifacts/run degraded |
-| `marker_search_enabled` | `true` | `true`, `false` | Enables durable marker reconciliation |
-| `version_source` | `.github/ISSUE_TEMPLATE/bug-report.yml` | Repo-relative path | No concrete release is a startup error |
-| `lane2_class_breadth_max` | `5` | `>=1` | Wider skipped classes fail automatability |
-| `target_owner` | `victorciao` | Non-empty string | GitHub target owner |
-| `target_repo` | `superset` | Non-empty string | GitHub target repository |
-| `rubrics_path` | `config/rubrics.yaml` | Path | Observable rubric tables |
-| `templates_dir` | `templates` | Path | Vendored issue/PR templates |
-| `session_snapshot_id` | unset | Optional string | Devin snapshot for target-repository role sessions |
-| `github_token` | unset | Runtime secret | Environment-only; required by LIVE |
-| `devin_api_key` | unset | Runtime secret | Environment-only; required by LIVE |
+| Name | What it controls | Default | Range / allowed values | Safety behavior |
+|---|---|---:|---|---|
+| `mode` | Selects SIMULATE or LIVE execution | `simulate` | `simulate`, `live` | `live` is explicit and credential-gated; unset values default to simulate |
+| `budget_N` | Caps high-tier Devin dispatches per run, highest score first | `5` | `1..25` (`BUDGET_HARD_MAX=25`) | Dispatch overflow is deferred; values above 25 are clamped and recorded as `guardrail_clamped` |
+| `score_cap` | Caps each calculated candidate score | `200` | `>0` | Caps calculated scores |
+| `tier_high_min` | Sets the score cutoff for high-tier routing | `60` | `> tier_medium_min` | High-tier PR routing threshold |
+| `tier_medium_min` | Sets the score cutoff for medium-tier routing | `20` | `>0` | Medium-tier issue routing threshold |
+| `eol_major_lag` | Sets the major-version lag required to classify EOL | `2` | `>=1` | Major-version age required for EOL |
+| `merge_rate_floor` | Sets the merge-rate KPI alert floor | `0.50` | `0.0..1.0` | KPI alert threshold |
+| `verification_pass_rate_floor` | Sets the verification pass-rate KPI alert floor | `0.80` | `0.0..1.0` | KPI alert threshold |
+| `session_failure_ceiling` | Sets the session-failure KPI alert ceiling | `0.30` | `0.0..1.0` | KPI alert threshold and run safety signal |
+| `verification_pass_rate_alert` | Reports the derived verification-rate alert | derived | `0` or `1` | Alerts when verification pass rate is below its floor |
+| `publication_safety_alert` | Reports the derived publication-safety alert | derived | `0` or `1` | Alerts when publication safety is undetermined |
+| `max_sessions` | Caps Devin sessions created in one run | `8` | `>=1` | Per-run hard session ceiling; exceeding it aborts |
+| `session_timeout_s` | Bounds the duration of one Devin session | `5400.0` | `>0` | Bounds one Devin session |
+| `max_total_acu` | Caps cumulative Devin ACU in one run | `500.0` | `>0` | Per-run hard ACU ceiling; exceeding it aborts |
+| `alert_source` | Selects CodeQL API or SARIF alert input | `code_scanning_api` | `code_scanning_api`, `sarif_file` | LANE 1 reads the fork's alerts for `master` and requires the latest CodeQL analysis to sit on `base_sha`; `sarif_file` is the SIMULATE input |
+| `alert_fixture_path` | Locates the captured CodeQL/SARIF input | `fixtures/codeql_alerts.json` | Path | Captured CodeQL/SARIF input |
+| `alert_analysis_wait_s` | Bounds CodeQL analysis polling | `2700.0` | `>0` | Bounds CodeQL analysis polling |
+| `ci_evidence_mode` | Selects local or Actions criterion evidence | `local` | `actions`, `local` | LIVE may resolve this from Actions history; evidence never authorizes an automated merge |
+| `suite_check_context` | Names the suite check used for evidence | `unit-tests-required` | Non-empty string | Named Actions check context used for suite evidence |
+| `ci_wait_timeout_s` | Bounds GitHub evidence polling | `5400` | `>0` | Bounds GitHub evidence waiting |
+| `required_contexts_min` | Specifies required completed contexts | `pre-commit (current)` | Non-empty context names | Required completed Actions context for LIVE preflight |
+| `only_lanes` | Restricts high-tier dispatch to selected lanes | `()` | Comma-separated `codeql`, `skipped_tests`, `deprecations` | Restricts dispatch eligibility without changing candidate discovery or reporting |
+| `has_issues` | Records whether issue publication is available | `true` | `true`, `false` | False aborts before writes unless degraded PR-comment sink is selected |
+| `issue_sink` | Unconsumed by the pipeline; no runtime purpose | `issues` | `issues`, `pr_comment` | No runtime effect |
+| `marker_search_enabled` | Enables marker reconciliation searches | `true` | `true`, `false` | Enables durable marker reconciliation |
+| `version_source` | Locates the repository's release declaration | `.github/ISSUE_TEMPLATE/bug-report.yml` | Repo-relative path | No concrete release is a startup error |
+| `lane2_class_breadth_max` | Caps skipped-test class breadth | `5` | `>=1` | Wider skipped classes fail automatability |
+| `target_owner` | Selects the GitHub target owner | `victorciao` | Non-empty string | GitHub target owner |
+| `target_repo` | Selects the GitHub target repository | `superset` | Non-empty string | GitHub target repository |
+| `rubrics_path` | Locates observable rubric tables | `config/rubrics.yaml` | Path | Observable rubric tables |
+| `templates_dir` | Locates vendored issue and PR templates | `templates` | Path | Vendored issue/PR templates |
+| `session_snapshot_id` | Selects the Devin target-repository snapshot | unset | Optional string | Devin snapshot for target-repository role sessions |
+| `github_token` | Supplies the GitHub API credential | unset | Runtime secret | Environment-only; required by LIVE |
+| `devin_api_key` | Supplies the Devin API credential | unset | Runtime secret | Environment-only; required by LIVE |
 
 `SECURITY_ISSUE_MODE=generic_tracking` and `BUDGET_HARD_MAX=25` are constants, not knobs.
 `only_lanes` accepts a comma-separated lane list from `--only-lanes=...` or

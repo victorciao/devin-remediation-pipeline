@@ -18,10 +18,8 @@ from pipeline.config import (
 from pipeline.schemas import Lane, ReasonCode
 
 
-def test_coverage_bar_default_meets_the_eighty_percent_floor(
-    simulate_config: PipelineConfig,
-) -> None:
-    assert simulate_config.coverage_bar >= 0.80
+def test_unit_test_coverage_floor_is_not_a_pipeline_setting() -> None:
+    assert "coverage" not in PipelineConfig.model_fields
 
 
 def test_verification_pass_rate_floor_is_configurable() -> None:

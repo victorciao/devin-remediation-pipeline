@@ -136,7 +136,28 @@ def test_seed_skips_simulated_rows_and_quarantines_malformed_rows(
     assert output.read_text() == ""
     assert output.with_name(output.name + ".corrupt").read_text() == "{bad json\n"
     assert not state.with_suffix(state.suffix + ".corrupt").exists()
-    assert "skipped 1" in capsys.readouterr().out
+    summary = capsys.readouterr().out
+    assert "skipped runs 0" in summary
+    assert "skipped simulated rows 1" in summary
+
+
+def test_seed_reports_unreadable_runs_and_simulated_rows_separately(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Seed distinguishes unreadable run directories from simulated rows."""
+    history_dir = tmp_path / "history"
+    (history_dir / "20260101T000000Z-unreadable").mkdir(parents=True)
+    simulated = codeql_candidate(candidate_id="simulated", artifact_simulated=True).model_dump(
+        mode="json"
+    )
+    write_run(history_dir / "20260102T000000Z-simulated", [simulated])
+
+    output = tmp_path / "state.jsonl"
+    assert seed(history_dir, output) == []
+
+    summary = capsys.readouterr().out
+    assert "skipped runs 1" in summary
+    assert "skipped simulated rows 1" in summary
 
 
 def test_export_rejects_state_shorter_than_seeded_prefix(tmp_path: Path) -> None:

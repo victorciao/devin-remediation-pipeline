@@ -255,7 +255,7 @@ or a fork match — never by a state value alone. A per-candidate failure defers
 | `session_timeout_s` / `max_acu_limit` / `max_total_acu` | `5400` / per-session / `500` | — |
 | `merge_rate_floor` / `verification_pass_rate_floor` / `session_failure_ceiling` | `0.50` / `0.80` / `0.30` | KPI thresholds are always written to local artifacts |
 | `verification_pass_rate_alert` / `publication_safety_alert` | derived | Alert when verification pass rate is below its floor or publication safety is undetermined |
-| `coverage_bar` | `0.80` | enforced by `[tool.coverage.report] fail_under = 80` over six pure-logic modules; those modules currently measure approximately 94% |
+| Unit-test coverage floor | `80%` | This repository's own unit-test coverage floor is `[tool.coverage.report] fail_under = 80` in `pyproject.toml`, enforced by `pytest --cov` in CI over the six pure-logic modules, currently approximately 94%; it is not a configurable pipeline setting |
 
 Also configurable: target `owner/repo`, GitHub token, Devin API key, rubrics, templates. **SIMULATE** (default) needs **no credentials**, makes **no** network writes and creates no sessions: discovery from fixtures, gates, scoring, rendering, reporting; every artifact is marked `artifact_simulated = true` with `writes_suppressed
 = <n>`, and any attempted write raises. `docker compose run --rm remediation` must complete a full SIMULATE run offline; the image needs no CodeQL toolchain, since the fork's workflow performs every scan.

@@ -68,7 +68,8 @@ def seed(history_dir: Path, output: Path) -> list[str]:
     latest: dict[str, Candidate] = {}
     run_ids: list[str] = []
     quarantined = 0
-    skipped = 0
+    skipped_runs = 0
+    skipped_simulated = 0
     preserved = 0
     quarantine = output.with_name(output.name + ".corrupt")
     for run_dir in run_dirs:
@@ -76,13 +77,13 @@ def seed(history_dir: Path, output: Path) -> list[str]:
             source = state_path(run_dir)
         except ResultsInputError as exc:
             print(f"warning: skipping {run_dir}: {exc}")
-            skipped += 1
+            skipped_runs += 1
             continue
         rows, row_quarantine = _read_candidates(source, quarantine=quarantine)
         quarantined += row_quarantine
         for candidate in rows:
             if candidate.artifact_simulated:
-                skipped += 1
+                skipped_simulated += 1
                 continue
             previous = latest.get(candidate.candidate_id)
             if previous is not None and settlement_violation(previous, candidate) is not None:
@@ -115,7 +116,8 @@ def seed(history_dir: Path, output: Path) -> list[str]:
     )
     print(
         f"seeded {len(latest)} rows from {len(run_ids)} run ids into {output}"
-        f" (quarantined {quarantined}, skipped {skipped})"
+        f" (quarantined {quarantined}, skipped runs {skipped_runs},"
+        f" skipped simulated rows {skipped_simulated})"
     )
     print(f"preserved {preserved} settled rows")
     return run_ids
