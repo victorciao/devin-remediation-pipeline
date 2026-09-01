@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from pipeline.config import CiEvidenceMode, Lane1AlertCheck, Mode, PipelineConfig
+from pipeline.config import CiEvidenceMode, Mode, PipelineConfig
 from pipeline.observers import LocalCheckout
 from pipeline.schemas import ExpectedFailure, Lane, RetryDecision
 from pipeline.session_client import FixOutput, SessionAttempt, SessionRun, SessionSnapshot
@@ -96,10 +96,7 @@ def test_lane1_suite_green_under_actions_mode_is_observed_before_it_is_satisfied
         base_sha="a" * 40,
         head_sha="b" * 40,
         observers=Observers(probe_alerts=probe_alerts, run_suite=run_suite),
-        config=config(
-            ci_evidence_mode=CiEvidenceMode.ACTIONS,
-            lane1_alert_check=Lane1AlertCheck.PR_REF_ALERTS,
-        ),
+        config=config(ci_evidence_mode=CiEvidenceMode.ACTIONS),
         stage="post_pr",
     )
     if evidence.satisfied is True:

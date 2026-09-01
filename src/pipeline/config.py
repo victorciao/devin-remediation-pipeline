@@ -9,7 +9,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from enum import Enum
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import yaml
 from pydantic import (
@@ -60,25 +60,11 @@ class Mode(str, Enum):
     LIVE = "live"
 
 
-class KpiSink(str, Enum):
-    """KPI sink values."""
-
-    LOCAL = "local"
-    GSHEET = "gsheet"
-
-
 class AlertSource(str, Enum):
     """LANE 1 alert source values."""
 
     CODE_SCANNING_API = "code_scanning_api"
     SARIF_FILE = "sarif_file"
-
-
-class Lane1AlertCheck(str, Enum):
-    """How LANE 1 alert absence is observed at the candidate head."""
-
-    PR_REF_ALERTS = "pr_ref_alerts"
-    CODEQL_CLI = "codeql_cli"
 
 
 class CiEvidenceMode(str, Enum):
@@ -108,14 +94,13 @@ class PipelineConfig(BaseModel):
     tier_medium_min: float = Field(default=20, gt=0, strict=True)
     eol_major_lag: int = Field(default=2, ge=1, strict=True)
     merge_rate_floor: float = Field(default=0.50, ge=0.0, le=1.0, strict=True)
+    verification_pass_rate_floor: float = Field(default=0.80, ge=0.0, le=1.0, strict=True)
     session_failure_ceiling: float = Field(default=0.30, ge=0.0, le=1.0, strict=True)
     max_sessions: int = Field(default=DEFAULT_BUDGET_N + 3, ge=1, strict=True)
     session_timeout_s: float = Field(default=DEFAULT_SESSION_TIMEOUT_S, gt=0, strict=True)
     max_total_acu: float = Field(default=500.0, gt=0, strict=True)
-    kpi_sink: KpiSink = KpiSink.LOCAL
     alert_source: AlertSource = AlertSource.CODE_SCANNING_API
     alert_fixture_path: Path = Path("fixtures/codeql_alerts.json")
-    lane1_alert_check: Lane1AlertCheck = Lane1AlertCheck.PR_REF_ALERTS
     alert_analysis_wait_s: float = Field(default=DEFAULT_ALERT_ANALYSIS_WAIT_S, gt=0, strict=True)
     ci_evidence_mode: CiEvidenceMode = CiEvidenceMode.LOCAL
     suite_check_context: str = Field(default="unit-tests-required", min_length=1, strict=True)
@@ -128,7 +113,6 @@ class PipelineConfig(BaseModel):
     ci_wait_timeout_s: int = Field(default=5400, gt=0, strict=True)
     required_contexts_min: tuple[str, ...] = DEFAULT_REQUIRED_CONTEXTS_MIN
     only_lanes: tuple[Lane, ...] = ()
-    auto_merge_enabled: bool = False
     has_issues: bool = True
     issue_sink: IssueSink = IssueSink.ISSUES
     marker_search_enabled: bool = True
@@ -164,18 +148,6 @@ class PipelineConfig(BaseModel):
         except ValidationError as exc:
             raise ConfigError(str(exc)) from exc
 
-    def model_copy(
-        self,
-        *,
-        update: Mapping[str, Any] | None = None,
-        deep: bool = False,
-    ) -> PipelineConfig:
-        """Preserve the local-evidence auto-merge invariant on copies."""
-        copied = super().model_copy(update=update, deep=deep)
-        if copied.ci_evidence_mode is CiEvidenceMode.LOCAL or not copied.required_contexts_min:
-            object.__setattr__(copied, "auto_merge_enabled", False)
-        return copied
-
     @field_validator("mode", mode="before")
     @classmethod
     def normalize_mode(cls, value: object) -> Mode:
@@ -190,11 +162,9 @@ class PipelineConfig(BaseModel):
         return Mode(normalized)
 
     @field_validator(
-        "kpi_sink",
         "alert_source",
         "ci_evidence_mode",
         "issue_sink",
-        "lane1_alert_check",
         mode="before",
     )
     @classmethod
@@ -203,14 +173,10 @@ class PipelineConfig(BaseModel):
         if not isinstance(value, str):
             return value
         normalized = value.strip().lower()
-        if info.field_name == "kpi_sink":
-            return KpiSink(normalized)
         if info.field_name == "alert_source":
             return AlertSource(normalized)
         if info.field_name == "ci_evidence_mode":
             return CiEvidenceMode(normalized)
-        if info.field_name == "lane1_alert_check":
-            return Lane1AlertCheck(normalized)
         return IssueSink(normalized)
 
     @field_validator("required_contexts_min", "local_item_scope", mode="before")
@@ -279,28 +245,9 @@ class PipelineConfig(BaseModel):
         resolved["max_sessions"] = budget + 3
         return resolved
 
-    @model_validator(mode="before")
-    @classmethod
-    def disable_local_auto_merge(cls, value: object) -> object:
-        """Make local CI evidence permanently ineligible for auto-merge."""
-        if not isinstance(value, dict):
-            return value
-        local_evidence = value.get("ci_evidence_mode") in {
-            CiEvidenceMode.LOCAL,
-            CiEvidenceMode.LOCAL.value,
-        }
-        empty_contexts = "required_contexts_min" in value and not value["required_contexts_min"]
-        if local_evidence or empty_contexts:
-            resolved = dict(value)
-            resolved["auto_merge_enabled"] = False
-            return resolved
-        return value
-
     @model_validator(mode="after")
     def validate_cross_field_rules(self) -> PipelineConfig:
         """Re-assert cross-field safety rules on construction and assignment."""
-        if self.kpi_sink == KpiSink.GSHEET and self.mode == Mode.SIMULATE:
-            raise ConfigError("kpi_sink=gsheet is invalid while mode=simulate")
         if self.tier_high_min <= self.tier_medium_min:
             raise ConfigError("tier_high_min must be greater than tier_medium_min")
         if self.mode == Mode.LIVE and (self.github_token is None or self.devin_api_key is None):
@@ -309,8 +256,6 @@ class PipelineConfig(BaseModel):
             raise ConfigError("mode=live requires non-empty required_contexts_min")
         if self.max_sessions < self.budget_N:
             raise ConfigError(f"max_sessions={self.max_sessions} is below budget_N={self.budget_N}")
-        if not self.required_contexts_min and self.auto_merge_enabled:
-            object.__setattr__(self, "auto_merge_enabled", False)
         return self
 
     @model_validator(mode="wrap")
@@ -388,13 +333,14 @@ def _parse_cli(args: Sequence[str]) -> tuple[dict[str, object], bool]:
         elif normalized_key in {
             "coverage_bar",
             "merge_rate_floor",
+            "verification_pass_rate_floor",
             "session_failure_ceiling",
             "max_total_acu",
             "session_timeout_s",
             "alert_analysis_wait_s",
         }:
             values[normalized_key] = _parse_float(normalized_key, raw_value)
-        elif normalized_key in {"auto_merge_enabled", "has_issues", "marker_search_enabled"}:
+        elif normalized_key in {"has_issues", "marker_search_enabled"}:
             values[normalized_key] = _parse_bool(raw_value)
         else:
             values[normalized_key] = raw_value
@@ -416,19 +362,17 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
         "TIER_MEDIUM_MIN": "tier_medium_min",
         "EOL_MAJOR_LAG": "eol_major_lag",
         "MERGE_RATE_FLOOR": "merge_rate_floor",
+        "VERIFICATION_PASS_RATE_FLOOR": "verification_pass_rate_floor",
         "SESSION_FAILURE_CEILING": "session_failure_ceiling",
-        "AUTO_MERGE_ENABLED": "auto_merge_enabled",
         "HAS_ISSUES": "has_issues",
         "MARKER_SEARCH_ENABLED": "marker_search_enabled",
         "REQUIRED_CONTEXTS_MIN": "required_contexts_min",
-        "LANE1_ALERT_CHECK": "lane1_alert_check",
         "ALERT_ANALYSIS_WAIT_S": "alert_analysis_wait_s",
         "SESSION_TIMEOUT_S": "session_timeout_s",
         "CI_WAIT_TIMEOUT_S": "ci_wait_timeout_s",
         "LANE2_CLASS_BREADTH_MAX": "lane2_class_breadth_max",
         "MAX_SESSIONS": "max_sessions",
         "MAX_TOTAL_ACU": "max_total_acu",
-        "KPI_SINK": "kpi_sink",
         "ALERT_SOURCE": "alert_source",
         "ALERT_FIXTURE_PATH": "alert_fixture_path",
         "CI_EVIDENCE_MODE": "ci_evidence_mode",
@@ -469,13 +413,14 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
             "TIER_HIGH_MIN",
             "TIER_MEDIUM_MIN",
             "MERGE_RATE_FLOOR",
+            "VERIFICATION_PASS_RATE_FLOOR",
             "SESSION_FAILURE_CEILING",
             "MAX_TOTAL_ACU",
             "SESSION_TIMEOUT_S",
             "ALERT_ANALYSIS_WAIT_S",
         }:
             values[field_name] = _parse_float(field_name, raw_value)
-        elif name in {"AUTO_MERGE_ENABLED", "HAS_ISSUES", "MARKER_SEARCH_ENABLED"}:
+        elif name in {"HAS_ISSUES", "MARKER_SEARCH_ENABLED"}:
             values[field_name] = _parse_bool(raw_value)
         else:
             values[field_name] = (

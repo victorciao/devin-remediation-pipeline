@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from pipeline.config import SECURITY_ISSUE_MODE
-from pipeline.schemas import Candidate, Lane, MergeMode
+from pipeline.schemas import Candidate, Lane
 
 
 class ArtifactValidationError(ValueError):
@@ -134,8 +134,7 @@ def render_pr_body(
         "",
         "Every commit in this pull request carries the `Signed-off-by` trailer.",
     ]
-    if candidate.merge_mode is MergeMode.MANUAL:
-        summary.append("A human owns the merge of this pull request; the pipeline never merges it.")
+    summary.append("A human owns the merge of this pull request; the pipeline never merges it.")
     if issue_number is not None:
         summary.extend(["", f"Closes #{issue_number}"])
     prefix = template.split("### SUMMARY", 1)[0].rstrip()

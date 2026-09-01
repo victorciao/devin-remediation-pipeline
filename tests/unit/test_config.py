@@ -10,9 +10,7 @@ from pydantic import SecretStr
 
 from pipeline.config import (
     BUDGET_HARD_MAX,
-    CiEvidenceMode,
     ConfigError,
-    KpiSink,
     Mode,
     PipelineConfig,
     load_config,
@@ -24,6 +22,21 @@ def test_coverage_bar_default_meets_the_eighty_percent_floor(
     simulate_config: PipelineConfig,
 ) -> None:
     assert simulate_config.coverage_bar >= 0.80
+
+
+def test_verification_pass_rate_floor_is_configurable() -> None:
+    """The verification KPI floor follows the normal CLI and environment precedence."""
+    assert PipelineConfig().verification_pass_rate_floor == 0.80
+    assert (
+        load_config(cli_args=["--verification-pass-rate-floor=0.75"]).verification_pass_rate_floor
+        == 0.75
+    )
+    assert (
+        load_config(
+            env={"PIPELINE_VERIFICATION_PASS_RATE_FLOOR": "0.65"}
+        ).verification_pass_rate_floor
+        == 0.65
+    )
 
 
 @pytest.mark.parametrize("raw", ["", "   ", "LIVE-ish", "dry-run", None])
@@ -46,15 +59,6 @@ def test_mode_live_is_honoured_when_explicit() -> None:
 
     with pytest.raises(ConfigError):
         load_config(env={"PIPELINE_MODE": "live"})
-
-
-def test_gsheet_sink_rejected_in_simulate() -> None:
-    """§13/§17 — a remote KPI sink in SIMULATE is a configuration error."""
-    with pytest.raises(ConfigError):
-        load_config(env={"PIPELINE_KPI_SINK": "gsheet", "PIPELINE_MODE": "simulate"})
-
-    with pytest.raises(ConfigError):
-        PipelineConfig(kpi_sink=KpiSink.GSHEET, mode=Mode.SIMULATE)
 
 
 def test_budget_above_hard_max_is_clamped_and_logged(
@@ -117,16 +121,6 @@ def test_secrets_never_appear_in_repr_or_str() -> None:
         assert api_key not in rendering
 
 
-def test_local_ci_evidence_hard_disables_auto_merge_on_every_path() -> None:
-    """§10.1 — forced `false`, not merely defaulted."""
-    assert (
-        PipelineConfig(
-            ci_evidence_mode=CiEvidenceMode.LOCAL, auto_merge_enabled=True
-        ).auto_merge_enabled
-        is False
-    )
-
-
 def test_suite_check_context_is_environment_configurable() -> None:
     """The named Actions suite context can be configured for the target fork."""
     config = load_config(env={"PIPELINE_SUITE_CHECK_CONTEXT": "pre-commit checks"})
@@ -140,12 +134,6 @@ def test_suite_check_context_is_environment_configurable() -> None:
     )
     assert integration.local_item_scope == ("tests/unit_tests/", "tests/smoke/")
     assert integration.integration_suite_check_context == "test-postgres-required"
-    assert (
-        load_config(
-            env={"PIPELINE_CI_EVIDENCE_MODE": "local", "PIPELINE_AUTO_MERGE_ENABLED": "true"}
-        ).auto_merge_enabled
-        is False
-    )
 
 
 def test_dispatch_scope_defaults_empty_and_accepts_cli_and_environment() -> None:

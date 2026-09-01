@@ -9,17 +9,21 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pipeline.config import PipelineConfig
-from pipeline.observability.events import EventLog
 from pipeline.observability.kpis import (
     KpiValue,
     NotApplicable,
     compute_burndown,
     compute_kpis,
 )
-from pipeline.schemas import Candidate, CandidateState, EventRecord, MergeMode
+from pipeline.schemas import Candidate, CandidateState, EventRecord
 
 _SHORT_ID_LENGTH = 12
 _KPI_SECTION_KEYS = ("deferred_by_reason",)
+# Removed publication fields are accepted only while reading historical evidence so seeded
+# pre-removal runs remain renderable; writers and live state reads stay strict.
+_REMOVED_LEGACY_CANDIDATE_KEYS = frozenset(
+    {"merge_mode", "auto_merge_requested", "auto_merge_eligible"}
+)
 LIFECYCLE_PROGRESS: dict[CandidateState, int] = {
     CandidateState.ENUMERATED: 0,
     CandidateState.GATED: 1,
@@ -61,6 +65,32 @@ class RunArtifacts:
         return tuple(seen)
 
 
+def _read_historical_events(path: Path) -> list[EventRecord]:
+    """Read historical events while stripping fields removed from live contracts."""
+    if not path.exists():
+        return []
+    events: list[EventRecord] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        payload = json.loads(line)
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("event_type") in {
+            "run_capabilities",
+            "ci_mode_transition",
+            "marker_search_failure",
+        }:
+            continue
+        payload = {
+            key: value
+            for key, value in payload.items()
+            if key not in _REMOVED_LEGACY_CANDIDATE_KEYS
+        }
+        events.append(EventRecord.model_validate(payload, strict=False))
+    return events
+
+
 def state_path(run_dir: Path) -> Path:
     """Return the one state JSONL file a run directory persisted."""
     state_dir = run_dir / "state"
@@ -79,9 +109,16 @@ def read_run(run_dir: Path) -> RunArtifacts:
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
-        candidate = Candidate.model_validate(json.loads(line), strict=False)
+        payload = json.loads(line)
+        if isinstance(payload, dict):
+            payload = {
+                key: value
+                for key, value in payload.items()
+                if key not in _REMOVED_LEGACY_CANDIDATE_KEYS
+            }
+        candidate = Candidate.model_validate(payload, strict=False)
         latest[candidate.candidate_id] = candidate
-    events = EventLog(run_dir / "reports" / "events.jsonl").read()
+    events = _read_historical_events(run_dir / "reports" / "events.jsonl")
     return RunArtifacts(
         run_dir=run_dir,
         state_path=path,
@@ -248,7 +285,6 @@ def render_results(
         candidate
         for candidate in ordered
         if candidate.state is CandidateState.MERGED
-        and candidate.merge_mode is MergeMode.AUTO
         and candidate.merged_at is not None
         and candidate.merge_verified
     ]
@@ -257,8 +293,9 @@ def render_results(
             "",
             "## Merges",
             "",
-            f"- Candidates merged by automation: {len(merged)} (rows in state `merged` "
-            "with a verified merge observation).",
+            f"- Candidates observed merged (a human merges; the pipeline never does): "
+            f"{len(merged)} "
+            "(rows in state `merged` with a verified merge observation).",
             "",
         ]
     )

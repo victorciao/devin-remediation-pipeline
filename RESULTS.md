@@ -76,11 +76,13 @@ Candidates without an issue or a pull request: 29 (excluded from the table above
 - **Issues Adopted By Tier:** high=2, medium=29
 - **High Issue Closure By Merged Pr:** 0
 - **Burn Down Denominators:** 50
-- **Merge Rate:** 0.0
+- **Merge Rate:** n/a
 - **Merged Clean:** 0
 - **Edited:** 0
 - **Rejected:** 0
 - **Merge Rate Alert:** 0
+- **Verification Pass Rate Alert:** 0
+- **Publication Safety Alert:** 0
 - **Session Failure Alert:** 0
 
 ## Burn-down by lane
@@ -95,4 +97,4 @@ Candidates without an issue or a pull request: 29 (excluded from the table above
 
 ## Merges
 
-- Candidates merged by automation: 0 (rows in state `merged` with a verified merge observation).
+- Candidates observed merged (a human merges; the pipeline never does): 0 (rows in state `merged` with a verified merge observation).

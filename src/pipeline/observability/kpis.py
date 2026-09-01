@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TypeAlias
 
 from pipeline.config import Mode, PipelineConfig
-from pipeline.schemas import Candidate, CandidateState, EventRecord, Lane, MergeMode, ReasonCode
+from pipeline.schemas import Candidate, CandidateState, EventRecord, Lane, ReasonCode
 from pipeline.state import has_local_artifact
 
 
@@ -137,6 +137,7 @@ def compute_kpis(
     valid_rows = [value for value in burndown.values() if isinstance(value.denominator, int)]
     merge_rate = _merge_rate(events)
     pr_events = _latest_pr_events(events)
+    settled_pr_events = _settled_pr_events(events)
     merged_clean = sum(
         event.merged_at is not None
         and event.merge_verified
@@ -191,6 +192,7 @@ def compute_kpis(
         and not has_local_artifact(candidate)
         for candidate in candidates
     )
+    verification_pass_rate = verification_passes / len(session_ids) if session_ids else None
     terminal_states = {
         CandidateState.TERMINAL,
         CandidateState.MERGED,
@@ -209,7 +211,7 @@ def compute_kpis(
             candidate.state is CandidateState.DISPATCHING for candidate in candidates
         ),
         "publication_safety_undetermined": safety_undetermined,
-        "verification_pass_rate": (verification_passes / len(session_ids) if session_ids else None),
+        "verification_pass_rate": verification_pass_rate,
         "stale_skip_count": stale_skips,
         "test_inclusion_rate": (
             sum(
@@ -240,24 +242,32 @@ def compute_kpis(
         "edited": edited,
         "rejected": rejected,
         "merge_rate_alert": int(
-            bool(_auto_pr_events(events)) and merge_rate < config.merge_rate_floor
+            bool(settled_pr_events)
+            and merge_rate is not None
+            and merge_rate < config.merge_rate_floor
         ),
+        "verification_pass_rate_alert": int(
+            verification_pass_rate is not None
+            and verification_pass_rate < config.verification_pass_rate_floor
+        ),
+        "publication_safety_alert": int(safety_undetermined > 0),
         "session_failure_alert": int(
             (session_failures / len(events) if events else 0.0) > config.session_failure_ceiling
         ),
     }
 
 
-def _merge_rate(events: list[EventRecord]) -> float:
-    """Compute merge rate over distinct auto-merge pull requests only."""
-    pr_events = _auto_pr_events(events)
+def _merge_rate(events: list[EventRecord]) -> float | None:
+    """Compute observed human-merge rate over PRs with a human disposition."""
+    pr_events = _settled_pr_events(events)
     merged = sum(
-        event.merged_at is not None
+        event.terminal_outcome is CandidateState.MERGED
+        and event.merged_at is not None
         and event.merge_verified
         and event.reason is not ReasonCode.MERGED_EXTERNALLY_UNVERIFIED
         for event in pr_events
     )
-    return merged / len(pr_events) if pr_events else 0.0
+    return merged / len(pr_events) if pr_events else None
 
 
 def _latest_pr_events(events: list[EventRecord]) -> list[EventRecord]:
@@ -267,6 +277,15 @@ def _latest_pr_events(events: list[EventRecord]) -> list[EventRecord]:
         if event.pr_url is not None:
             latest[event.candidate_id] = event
     return list(latest.values())
+
+
+def _settled_pr_events(events: list[EventRecord]) -> list[EventRecord]:
+    """Exclude pending human merges because the pipeline never merges or fails them."""
+    return [
+        event
+        for event in _latest_pr_events(events)
+        if event.terminal_outcome is not CandidateState.AWAITING_HUMAN_MERGE
+    ]
 
 
 def _latest_issue_rows(
@@ -306,13 +325,6 @@ def _issue_counts_by_tier(
         key = tier or "unknown"
         result[key] = result.get(key, 0) + 1
     return result
-
-
-def _auto_pr_events(events: list[EventRecord]) -> list[EventRecord]:
-    """Return distinct candidate PRs whose merge ownership is automatic."""
-    return [
-        event for event in _latest_pr_events(events) if event.merge_mode is not MergeMode.MANUAL
-    ]
 
 
 def _criterion_satisfaction_by_lane(events: list[EventRecord]) -> dict[str, int]:

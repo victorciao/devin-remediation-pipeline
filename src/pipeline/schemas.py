@@ -185,13 +185,6 @@ class RedBaselineResult(StrictModel):
     expected_failure: ExpectedFailure | None = None
 
 
-class MergeMode(str, Enum):
-    """Who owns the merge of a high-tier candidate's pull request."""
-
-    AUTO = "auto"
-    MANUAL = "manual"
-
-
 class CheckRunConclusion(StrictModel):
     """One check run observed on a pull-request head."""
 
@@ -293,7 +286,6 @@ class Candidate(StrictModel):
     issue_adopted: bool = False
     merged_at: str | None = None
     merge_verified: bool = False
-    auto_merge_requested: bool = False
     ci_evidence_mode: str | None = None
     issue_number: int | None = Field(default=None, ge=1)
     pr_number: int | None = Field(default=None, ge=1)
@@ -301,11 +293,9 @@ class Candidate(StrictModel):
     head_sha: str | None = None
     artifact_simulated: bool = False
     marker_search_outcome: str | None = None
-    auto_merge_eligible: bool | None = None
     labels: list[str] = Field(default_factory=list)
     success_criterion: str | None = None
     criterion_evidence: CriterionEvidence | None = None
-    merge_mode: MergeMode | None = None
     suite_scope: list[str] = Field(default_factory=list)
     check_run_conclusions: list[CheckRunConclusion] = Field(default_factory=list)
     session_id: str | None = None
@@ -342,7 +332,6 @@ class EventRecord(StrictModel):
     factor_rows: dict[str, str] = Field(default_factory=dict)
     tier: Tier | None = None
     action: Action | None = None
-    merge_mode: MergeMode | None = None
     session_id: str | None = None
     session_attempts: int = Field(default=0, ge=0)
     success_criterion: str | None = None
@@ -356,7 +345,6 @@ class EventRecord(StrictModel):
     pr_number: int | None = Field(default=None, ge=1)
     merged_at: str | None = None
     merge_verified: bool = False
-    auto_merge_requested: bool = False
     ci_evidence_mode: str | None = None
     test_added: bool | None = None
     test_nodeid: str | None = None

@@ -91,9 +91,6 @@ def render_run_artifacts(
                 "writes_suppressed": config.mode is Mode.SIMULATE,
                 "artifact_simulated": config.mode is Mode.SIMULATE,
                 "ci_evidence_mode": config.ci_evidence_mode.value,
-                "merge_mode": (
-                    candidate.merge_mode.value if candidate.merge_mode is not None else "n/a"
-                ),
                 "diff_range": (f"{candidate.base_sha or 'n/a'}..{candidate.head_sha or 'n/a'}"),
             }
             if fix_output is not None:

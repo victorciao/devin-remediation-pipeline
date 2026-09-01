@@ -2,14 +2,13 @@
 
 from collections.abc import Sequence
 
-from pipeline.config import CiEvidenceMode, PipelineConfig
+from pipeline.config import PipelineConfig
 from pipeline.schemas import (
     NEEDS_HUMAN_REVIEW_LABEL,
     Action,
     Candidate,
     CandidateState,
     GateName,
-    MergeMode,
     ReasonCode,
     Tier,
 )
@@ -101,7 +100,6 @@ def _blocked_child(candidate: Candidate) -> Candidate:
             "failed_gate": GateName.AUTOMATABILITY,
             "reason": ReasonCode.BLOCKED_BY_ENCLOSING_SKIP,
             "labels": _with_label(candidate, NEEDS_HUMAN_REVIEW_LABEL),
-            "auto_merge_eligible": False,
         }
     )
 
@@ -112,7 +110,6 @@ def _suppressed_child(candidate: Candidate) -> Candidate:
             "action": Action.DEFERRED,
             "state": CandidateState.SUPPRESSED_BY_CONTAINMENT,
             "reason": ReasonCode.SUPPRESSED_BY_CONTAINMENT,
-            "auto_merge_eligible": False,
         }
     )
 
@@ -128,7 +125,6 @@ def _gated_out(candidate: Candidate) -> Candidate:
                 "action": Action.HUMAN_REVIEW,
                 "state": CandidateState.GATED,
                 "reason": reason,
-                "auto_merge_eligible": False,
                 "labels": _with_label(candidate, NEEDS_HUMAN_REVIEW_LABEL),
             }
         )
@@ -139,7 +135,6 @@ def _gated_out(candidate: Candidate) -> Candidate:
             "action": Action.LOG_ONLY,
             "state": CandidateState.TERMINAL,
             "reason": reason,
-            "auto_merge_eligible": False,
         }
     )
 
@@ -197,7 +192,6 @@ def dispatch_candidates(candidates: Sequence[Candidate], config: PipelineConfig)
                     "tier": tier,
                     "action": Action.LOG_ONLY,
                     "state": CandidateState.TERMINAL,
-                    "auto_merge_eligible": False,
                 }
             )
             continue
@@ -208,7 +202,6 @@ def dispatch_candidates(candidates: Sequence[Candidate], config: PipelineConfig)
                     "action": Action.DEFERRED,
                     "state": CandidateState.DEFERRED,
                     "reason": ReasonCode.OUT_OF_DISPATCH_SCOPE,
-                    "auto_merge_eligible": False,
                 }
             )
             continue
@@ -219,7 +212,6 @@ def dispatch_candidates(candidates: Sequence[Candidate], config: PipelineConfig)
                     "action": Action.DEFERRED,
                     "state": CandidateState.DEFERRED,
                     "reason": ReasonCode.BUDGET_OVERFLOW,
-                    "auto_merge_eligible": False,
                 }
             )
             continue
@@ -227,22 +219,11 @@ def dispatch_candidates(candidates: Sequence[Candidate], config: PipelineConfig)
         labels = list(candidate.labels)
         if tier is Tier.HIGH and candidate.risk >= 3:
             labels = _with_label(candidate, NEEDS_HUMAN_REVIEW_LABEL)
-        auto_merge = (
-            tier is Tier.HIGH
-            and candidate.risk <= 2
-            and config.auto_merge_enabled
-            and config.ci_evidence_mode is not CiEvidenceMode.LOCAL
-            and bool(config.required_contexts_min)
-            and candidate.action is not Action.HUMAN_REVIEW
-            and candidate.state is not CandidateState.TERMINAL
-        )
         decisions[candidate.candidate_id] = candidate.model_copy(
             update={
                 "tier": tier,
                 "action": Action.OPEN_PR if tier is Tier.HIGH else Action.OPEN_ISSUE,
                 "state": CandidateState.DISPATCHING,
-                "auto_merge_eligible": auto_merge,
-                "merge_mode": MergeMode.AUTO if auto_merge else MergeMode.MANUAL,
                 "labels": labels,
             }
         )

@@ -47,7 +47,6 @@ from pipeline.github_client import (
     LivePreflight,
     MergedPullRequestError,
     PreflightError,
-    auto_merge_eligible,
     reconcile_issue,
     reconcile_pull_request,
     run_live_preflight,
@@ -66,7 +65,6 @@ from pipeline.schemas import (
     CandidateState,
     DefinitionKind,
     Lane,
-    MergeMode,
     ReasonCode,
     RunEventRecord,
     Tier,
@@ -172,7 +170,6 @@ class CandidateRunner:
             state=CandidateState.TERMINAL,
             reason=reason,
             reason_detail=detail,
-            auto_merge_eligible=False,
         )
 
     def _deferred(
@@ -186,7 +183,6 @@ class CandidateRunner:
             state=CandidateState.DEFERRED,
             reason=reason,
             reason_detail=detail,
-            auto_merge_eligible=False,
         )
 
     # -- lifecycle -------------------------------------------------------
@@ -496,9 +492,6 @@ class CandidateRunner:
             "writes_suppressed": self.config.mode is Mode.SIMULATE,
             "artifact_simulated": self.config.mode is Mode.SIMULATE,
             "ci_evidence_mode": self.config.ci_evidence_mode.value,
-            "merge_mode": (
-                candidate.merge_mode.value if candidate.merge_mode is not None else "n/a"
-            ),
             "session_id": candidate.session_id or "n/a",
             "session_verify_command": str(fix_output.get("verify_command", "n/a")),
             "diff_range": f"{candidate.base_sha or 'n/a'}..{candidate.head_sha or 'n/a'}",
@@ -670,35 +663,10 @@ class CandidateRunner:
                 ci_result.detail,
             )
         candidate = candidate.model_copy(update=update)
-        if self.live is not None and auto_merge_eligible(candidate, self.config, ci_result):
-            self.live.client.enable_auto_merge(
-                candidate.pr_number or 0,
-                ci_mode=self.ci_mode,
-            )
-            merged = self.live.client.pull_request(candidate.pr_number or 0)
-            if merged is not None and merged.merged_at is not None:
-                return self._persist(
-                    candidate,
-                    state=CandidateState.MERGED,
-                    merged_at=merged.merged_at,
-                    merge_verified=True,
-                    auto_merge_requested=True,
-                )
-            return self._persist(
-                candidate,
-                state=CandidateState.AWAITING_HUMAN_MERGE,
-                reason=ReasonCode.CI_EVIDENCE_UNAVAILABLE,
-                reason_detail="auto-merge was requested but the fork has not merged it yet",
-                auto_merge_requested=True,
-            )
         return self._persist(
             candidate,
             state=CandidateState.AWAITING_HUMAN_MERGE,
-            reason=(
-                ReasonCode.MANUAL_MERGE_REQUIRED
-                if candidate.merge_mode is MergeMode.MANUAL
-                else None
-            ),
+            reason=ReasonCode.MANUAL_MERGE_REQUIRED,
         )
 
 
@@ -1067,9 +1035,7 @@ def run_once(
     run_id = uuid.uuid4().hex
     baseline = _load_baseline(baseline_path)
     if config.mode is Mode.SIMULATE and config.ci_evidence_mode is not CiEvidenceMode.LOCAL:
-        config = config.model_copy(
-            update={"ci_evidence_mode": CiEvidenceMode.LOCAL, "auto_merge_enabled": False}
-        )
+        config = config.model_copy(update={"ci_evidence_mode": CiEvidenceMode.LOCAL})
     target_exists = repo_path.exists()
     notes: list[str] = []
     run_events: list[RunEventRecord] = []

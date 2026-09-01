@@ -1,4 +1,4 @@
-"""§6/§7 dispatch: tier actions, the per-run budget, auto-merge gating and dual artifacts."""
+"""§6/§7 dispatch: tier actions, the per-run budget and dual artifacts."""
 
 from __future__ import annotations
 
@@ -99,22 +99,20 @@ def artifact_client(config: PipelineConfig, transport: ArtifactTransport) -> Git
 
 
 def local_ci_probe(_pr_number: int) -> CiWaitResult:
-    """§10.1 — observed local evidence: publication proceeds, auto-merge cannot."""
-    return CiWaitResult(CiEvidenceMode.LOCAL, None, False)
+    """§10.1 — observed local evidence for publication."""
+    return CiWaitResult(CiEvidenceMode.LOCAL, None)
 
 
 def green_github_ci_probe(_pr_number: int) -> CiWaitResult:
-    """§10.1 — every required context reported `success` under `github` evidence."""
-    return CiWaitResult(CiEvidenceMode.ACTIONS, None, True)
+    """§10.1 — every required context reported `success` under GitHub evidence."""
+    return CiWaitResult(CiEvidenceMode.ACTIONS, None)
 
 
 def github_config(
     **overrides: Any,  # noqa: ANN401
 ) -> PipelineConfig:
-    """A config whose CI evidence comes from GitHub, so auto-merge is permitted at all."""
-    return pipeline_config(
-        ci_evidence_mode=CiEvidenceMode.ACTIONS, auto_merge_enabled=True, **overrides
-    )
+    """A config whose CI evidence comes from GitHub."""
+    return pipeline_config(ci_evidence_mode=CiEvidenceMode.ACTIONS, **overrides)
 
 
 def high_candidate(
@@ -279,7 +277,6 @@ def test_human_routed_reasons_open_a_human_review_row(
     assert decision.action is Action.HUMAN_REVIEW
     assert decision.reason is reason
     assert NEEDS_HUMAN_REVIEW_LABEL in decision.labels
-    assert decision.auto_merge_eligible is False
 
 
 def test_internal_caller_is_human_routed_not_dropped(simulate_config: PipelineConfig) -> None:
@@ -383,31 +380,6 @@ def test_stale_skip_is_exempt_from_the_red_to_green_requirement(
     decision = dispatch_candidates([candidate], simulate_config)[0]
 
     assert decision.action is Action.OPEN_PR
-    assert decision.auto_merge_eligible is not None
-
-
-# -- auto-merge gating -------------------------------------------------------------------
-
-
-def test_high_risk_candidate_is_labelled_and_never_auto_merged() -> None:
-    """§6 — high score with `risk >= 3` opens a PR labeled `needs-human-review`."""
-    config = github_config()
-
-    decision = dispatch_candidates([high_candidate(risk=4)], config)[0]
-
-    assert decision.action is Action.OPEN_PR
-    assert decision.auto_merge_eligible is False
-    assert NEEDS_HUMAN_REVIEW_LABEL in decision.labels
-
-
-def test_local_ci_mode_forces_auto_merge_off() -> None:
-    """§10/§17 — local evidence disables auto-merge at config level and at dispatch level."""
-    config = pipeline_config(ci_evidence_mode=CiEvidenceMode.LOCAL, auto_merge_enabled=True)
-
-    decision = dispatch_candidates([high_candidate(risk=1)], config)[0]
-
-    assert config.auto_merge_enabled is False
-    assert decision.auto_merge_eligible is False
 
 
 # -- §7 preflight and dual artifacts -----------------------------------------------------

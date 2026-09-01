@@ -22,6 +22,7 @@ from pipeline.schemas import (
     BaselineStatus,
     Candidate,
     CandidateState,
+    CriterionEvidence,
     EventRecord,
     Lane,
     ReasonCode,
@@ -36,6 +37,8 @@ ISSUE_URL = "https://github.test/victorciao/superset/issues/1"
 PR_URL = "https://github.test/victorciao/superset/pull/2"
 MERGE_RATE_ALERT = "merge_rate_alert"
 SESSION_FAILURE_ALERT = "session_failure_alert"
+VERIFICATION_PASS_RATE_ALERT = "verification_pass_rate_alert"
+PUBLICATION_SAFETY_ALERT = "publication_safety_alert"
 
 
 def event(
@@ -186,7 +189,45 @@ def test_merge_rate_alert_is_suppressed_without_pr_events(
 
     rollup = compute_kpis([], events, {}, simulate_config)
 
-    assert rollup["merge_rate"] == 0.0
+    assert rollup["merge_rate"] is None
+    assert rollup[MERGE_RATE_ALERT] == 0
+
+
+def test_pending_human_merges_are_not_measurable(
+    simulate_config: PipelineConfig,
+) -> None:
+    """Pending human merges are not a failed disposition for the pipeline to alert on."""
+    events = [
+        event(
+            "pending",
+            terminal_outcome=CandidateState.AWAITING_HUMAN_MERGE,
+            pr_url=PR_URL,
+        )
+    ]
+
+    rollup = compute_kpis([], events, {}, simulate_config)
+
+    assert rollup["merge_rate"] is None
+    assert rollup[MERGE_RATE_ALERT] == 0
+
+
+def test_pending_human_merge_does_not_change_settled_merge_rate(
+    simulate_config: PipelineConfig,
+) -> None:
+    """A pending PR is excluded from the denominator until a human disposes of it."""
+    events = [
+        merged("merged"),
+        rejected("rejected"),
+        event(
+            "pending",
+            terminal_outcome=CandidateState.AWAITING_HUMAN_MERGE,
+            pr_url=PR_URL,
+        ),
+    ]
+
+    rollup = compute_kpis([], events, {}, simulate_config)
+
+    assert rollup["merge_rate"] == 0.5
     assert rollup[MERGE_RATE_ALERT] == 0
 
 
@@ -238,6 +279,63 @@ def test_session_failure_at_the_ceiling_does_not_alert(simulate_config: Pipeline
     assert isinstance(rate, float)
     assert abs(rate - 0.30) < 1e-9
     assert rollup[SESSION_FAILURE_ALERT] == 0
+
+
+def test_verification_pass_rate_below_floor_alerts(simulate_config: PipelineConfig) -> None:
+    """§11 — a verification pass rate below 0.80 raises the alert."""
+    satisfied = CriterionEvidence(criterion="criterion", satisfied=True)
+    events = [
+        event("passed", session_id="session-passed", criterion_evidence=satisfied),
+        event("failed", session_id="session-failed"),
+    ]
+
+    rollup = compute_kpis([], events, {}, simulate_config)
+
+    assert rollup["verification_pass_rate"] == 0.5
+    assert rollup[VERIFICATION_PASS_RATE_ALERT] == 1
+
+
+def test_verification_pass_rate_at_floor_does_not_alert() -> None:
+    """§11 — the verification alert is `< floor`, so exactly 0.80 is quiet."""
+    config = PipelineConfig(verification_pass_rate_floor=0.80)
+    satisfied = CriterionEvidence(criterion="criterion", satisfied=True)
+    events = [
+        event(f"passed-{index}", session_id=f"session-passed-{index}", criterion_evidence=satisfied)
+        for index in range(4)
+    ]
+    events.append(event("failed", session_id="session-failed"))
+
+    rollup = compute_kpis([], events, {}, config)
+
+    assert rollup["verification_pass_rate"] == 0.8
+    assert rollup[VERIFICATION_PASS_RATE_ALERT] == 0
+
+
+def test_verification_pass_rate_none_does_not_alert(simulate_config: PipelineConfig) -> None:
+    """§11 — no sessions means verification pass rate is not measurable."""
+    rollup = compute_kpis([], [], {}, simulate_config)
+
+    assert rollup["verification_pass_rate"] is None
+    assert rollup[VERIFICATION_PASS_RATE_ALERT] == 0
+
+
+@pytest.mark.parametrize(
+    ("safety_candidates", "expected_alert"),
+    [
+        ([], 0),
+        ([codeql_candidate(marker_search_outcome="failed")], 1),
+    ],
+)
+def test_publication_safety_alert_tracks_undetermined_candidates(
+    safety_candidates: list[Candidate],
+    expected_alert: int,
+    simulate_config: PipelineConfig,
+) -> None:
+    """§11 — any candidate without provable single-write safety raises the alert."""
+    rollup = compute_kpis(safety_candidates, [], {}, simulate_config)
+
+    assert rollup["publication_safety_undetermined"] == expected_alert
+    assert rollup[PUBLICATION_SAFETY_ALERT] == expected_alert
 
 
 def test_suppressed_rows_count_only_in_the_denominator(

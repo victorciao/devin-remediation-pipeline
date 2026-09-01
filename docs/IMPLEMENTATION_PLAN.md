@@ -37,14 +37,14 @@ nothing in `src/` implements it, and it does not run per candidate.
 
 ## 4. Runtime architecture
 
-The **orchestrator** (this program) owns everything except the fix: discovery, gates, scoring, branch creation, launching the session, verifying the lane's success criterion, PR creation, CI watching, merging, state, KPIs, resume. The **session** writes the fix and its evidence on the candidate branch. **Nothing a session
+The **orchestrator** (this program) owns everything except the fix: discovery, gates, scoring, branch creation, launching the session, verifying the lane's success criterion, PR creation, CI watching, state, KPIs, resume. The **session** writes the fix and its evidence on the candidate branch. **Nothing a session
 reports about its own results is ever evidence; only what the orchestrator observes by executing commands or reading the fork counts.** A dispatched candidate gets exactly one session that does the whole job — feasibility, fix, test, run, push, report — with no per-candidate roles, no review loop and no mid-session follow-up
 message.
 
 - `lanes/` — `codeql.py`, `skipped_tests.py`, `deprecations.py` enumerate candidates and declare each one's success criterion.
-- `gate.py`, `score.py`, `dispatch.py` — gates, deterministic score, tier, per-run budget, merge mode.
+- `gate.py`, `score.py`, `dispatch.py` — gates, deterministic score, tier and per-run budget.
 - `session_client.py` — creates and polls exactly one Devin session per dispatched candidate; `verify.py` — evaluates that candidate's declared success criterion (§10) from the orchestrator's own execution.
-- `github_client.py` — branch, PR, issue, labels, check-run polling, merge; `templates/render.py` — PR and issue title/body rendering and validation.
+- `github_client.py` — branch, PR, issue, labels and check-run polling; `templates/render.py` — PR and issue title/body rendering and validation.
 - `state.py` — append-only `state/candidates.jsonl`, write-once identities, resume; `observability/` — event log, run report, KPI rollup.
 
 ## 5. What triggers a run
@@ -64,14 +64,14 @@ All three are LIVE entry points. SIMULATE is invoked as `docker compose run --rm
 |---|---|---|---|---|
 | `enumerated` | a lane emits it, criterion declared | gate | none | no |
 | `gated` | all gates passed | score | none | no |
-| `scored` | tier and merge mode assigned | high tier: publish the tracking issue, then dispatch, if within `budget_N`; medium tier: publish an issue; low tier: report | none | no |
+| `scored` | tier assigned | high tier: publish the tracking issue, then dispatch, if within `budget_N`; medium tier: publish an issue; low tier: report | none | no |
 | `issue_created` | issue exists (created or marker-adopted) and its number is recorded | high tier: create the branch and dispatch; medium tier: record KPIs | issue | medium tier: **yes** |
 | `dispatching` | branch created, session launched | poll the session | issue + branch | no |
 | `session_done` | session terminal with required output | evaluate the criterion's pre-PR evidence (§10) | issue + branch | no |
 | `verified` | pre-PR evidence satisfied and recorded | render + create the PR, `Closes #<issue_number>` | issue + branch | no |
 | `pr_created` | PR exists and its number is recorded | watch the head's check runs and settle any post-PR criterion (§12) | issue + PR | no |
-| `awaiting_human_merge` | `merge_mode = manual`, §12 gate green | leave open, report it | PR | **yes** |
-| `merged` | `merge_mode = auto`, §12 gate green, merge succeeded | record KPIs | PR | **yes** |
+| `awaiting_human_merge` | §12 gate green and PR remains open | leave open, report it; a human owns merging | PR | **yes** |
+| `merged` | an external human merge is observed and verified | record KPIs | PR | **yes** |
 | `terminal` | any §13 failure | record reason; never merge | ≤1 issue, ≤1 PR | **yes** |
 | `deferred` | budget overflow, session ceiling, transport error | retry next run | ≤1 PR | no |
 
@@ -102,7 +102,7 @@ only the SIMULATE input and the burn-down denominator, never live input.
 
 A gate failure is dropped or terminal-`human_routed`; it never produces a GitHub write. Recurrence is neither a gate nor a score input.
 
-## 8. Scoring, tiers and merge mode
+## 8. Scoring and tiers
 
 ```
 score = min( business_impact × verifiability × automatability × signal_quality / max(risk, 1),
@@ -113,8 +113,7 @@ Each factor is a 1–5 rubric row from `config/rubrics.yaml`, one table per lane
 / caller-and-override count.
 
 - `risk` floored at 1, composite capped at `score_cap = 200`. `tier_high_min = 60`, `tier_medium_min = 20`; example: `4×4×4×4 / 2 = 128` → high.
-- **High** → dispatch a session and open a PR. The row carries `merge_mode`: `auto` when `risk <= 2` and `auto_merge_enabled` — the pipeline merges once the §12 gate holds; `manual` when `risk >= 3` — the PR is opened, the contexts are still watched and recorded, and the candidate settles `awaiting_human_merge` /
-  `manual_merge_required`. **The pipeline never merges a `manual` candidate.**
+- **High** → dispatch a session and open a PR. The PR's contexts and criterion are still watched and recorded, then the candidate settles `awaiting_human_merge` / `manual_merge_required`; the pipeline never merges pull requests.
 - **Medium** → publish a tracking issue (§11): no session, no branch, no PR, no merge. An issue never gates anything and never blocks a PR candidate. **Low** → reported only.
 - `budget_N = 5` PRs per run; overflow is `deferred/budget_overflow`, retried next run. Issues are not charged against `budget_N`.
 
@@ -142,24 +141,23 @@ Required `structured_output_schema`:
 ## 10. Verification: per-lane success criteria
 
 Every candidate carries a **success criterion** declared by its lane at enumeration. The orchestrator always evaluates it from its own observation — the session's account is never the evidence — and *where* it is evaluated follows the evidence source. **Pre-PR**, in a local checkout, when the evidence is obtainable there: LANE
-2's red-at-base/green-at-head, LANE 3's symbol and caller re-check, suite-green under `ci_evidence_mode = local`, and LANE 1 under `codeql_cli`. **Post-PR**, from the fork, when the evidence exists only on the PR ref: LANE 1 under `pr_ref_alerts`, and suite-green under `ci_evidence_mode = actions`. A post-PR criterion gates the
-**merge**, never the PR: a candidate whose alert is still present at head holds an open PR and settles `terminal/alert_still_present` unmerged, and expiry of `alert_analysis_wait_s` settles `terminal/criterion_not_met` unmerged — never merged, never silently passed. The criterion and its observed outcome go to the state row and
+2's red-at-base/green-at-head, LANE 3's symbol and caller re-check, and suite-green under `ci_evidence_mode = local`. **Post-PR**, from the fork, when the evidence exists only on the PR ref: LANE 1 under `pr_ref_alerts`, and suite-green under `ci_evidence_mode = actions`. A post-PR criterion is recorded on the PR head: a candidate whose alert is still present at head holds an open PR and settles `terminal/alert_still_present`, and expiry of `alert_analysis_wait_s` settles `terminal/criterion_not_met` — never silently passed. The criterion and its observed outcome go to the state row and
 the event log.
 
 **LANE 2 — the test's skip marker is absent at the candidate head and the suite covering the test passes there.**
 
 Integration candidates are unobservable locally because Superset's integration suite requires a provisioned metadata database, Redis, and Celery, so the suite clause is read from the fork's authoritative `test-postgres-required` CI check at the PR head. The accepted limitation is that this CI check is suite-level: it proves the suite containing the re-enabled test passes, not that specific nodeid in isolation. The marker-absence clause rules out a trivially green skipped test. Unit-test candidates remain locally observable where configured; Actions-mode integration candidates defer their pre-PR suite evidence until the PR head.
 
-**LANE 1 — the alert is gone at head and nothing regressed.** The normal path is `lane1_alert_check = pr_ref_alerts`: the fork's `codeql-analysis` runs on `pull_request`, so alert absence at the candidate head is read from the alerts for the PR ref once that analysis completes, bounded by `alert_analysis_wait_s`; expiry settles
-`terminal/criterion_not_met`, never a pass. `codeql_cli` runs CodeQL over the touched paths locally instead, for when alerts cannot be read from the fork. Either way the alert's `stable_locator` must be absent → otherwise `terminal/alert_still_present`. The suite covering `suite_scope` must pass at head → otherwise
+**LANE 1 — the alert is gone at head and nothing regressed.** The fixed path is `pr_ref_alerts`: the fork's `codeql-analysis` runs on `pull_request`, so alert absence at the candidate head is read from the alerts for the PR ref once that analysis completes, bounded by `alert_analysis_wait_s`; expiry settles
+`terminal/criterion_not_met`, never a pass. The alert's `stable_locator` must be absent → otherwise `terminal/alert_still_present`. The suite covering `suite_scope` must pass at head → otherwise
 `terminal/suite_regressed`. A regression test is required when the alert class admits one; when it does not — `py/overly-large-range` is such a class — `test_nodeid` is null, the row records why, and alert-absence plus suite-green is the whole criterion. Discovery reads the analysis at `base_sha` and verification reads the
 analysis at the candidate head; the orchestrator reads both itself and never accepts the session's account of either. Under `pr_ref_alerts` the candidate therefore reaches a PR on the strength of the session's fix plus suite-green, with alert-absence confirmed afterwards — a deliberate consequence of GitHub owning the scan, and
-it costs nothing that matters because no merge happens without that confirmation.
+it costs nothing that matters because a human owns the merge after that confirmation.
 
 **LANE 3 — the symbol is gone and nothing references it.** At head the `module:qualname` must no longer resolve and the gate's `no_internal_callers_and_no_override_surface` check, re-run at head, must hold → otherwise `terminal/symbol_still_referenced`. The suite covering `suite_scope` must pass at head → otherwise
 `terminal/suite_regressed`. No new test is required; a deletion's evidence is that nothing broke.
 
-Suite-green evidence comes from the orchestrator's own run when `ci_evidence_mode = local`, or from the fork's `Python-Unit` context on the PR head when `ci_evidence_mode = actions` — in which case the criterion is completed after the PR exists and gates the merge, never the PR. Any criterion the orchestrator cannot observe at
+Suite-green evidence comes from the orchestrator's own run when `ci_evidence_mode = local`, or from the fork's `Python-Unit` context on the PR head when `ci_evidence_mode = actions` — in which case the criterion is completed after the PR exists. Any criterion the orchestrator cannot observe at
 all settles `terminal/criterion_not_met` with what was attempted.
 
 ## 11. Publication
@@ -178,7 +176,7 @@ Each run reconciles both artifacts against the fork before writing either. Dupli
 The issue body renders the fork's issue template heading set, the marker, the lane, the locator and the score with its factor breakdown; a medium-tier body adds why the candidate was not automated. Its title obeys the PR title regex.
 
 The PR body renders Superset's `.github/PULL_REQUEST_TEMPLATE.md` heading set verbatim and in order — `SUMMARY`, `BEFORE/AFTER SCREENSHOTS OR ANIMATED GIF` (`n/a` for backend fixes), `TESTING INSTRUCTIONS`, `ADDITIONAL INFORMATION` with its checkbox block — plus an `EVIDENCE` section after `SUMMARY` stating the criterion and the
-commands the orchestrator ran with their outcomes, and a config-gated `AUTOMATION METADATA` section last. The body states that every commit carries the `Signed-off-by` trailer, and for `merge_mode = manual` that a human owns the merge. A body failing section presence/order validation defers the candidate with
+commands the orchestrator ran with their outcomes, and a config-gated `AUTOMATION METADATA` section last. The body states that every commit carries the `Signed-off-by` trailer and that a human owns the merge; the pipeline never merges. A body failing section presence/order validation defers the candidate with
 `artifact_validation_failed` **before** any write; a security-lane body carries rule ID and file scope only, never exploit detail. The title must match the fork's `pr-lint` regex, pinned in `templates/superset/pr_title_regex.txt`: `^(build|chore|ci|docs|feat|fix|perf|refactor|style|test|other)(\(.+\))?(\!)?:\s.+`
 
 ## 12. Merge gate
@@ -187,12 +185,12 @@ The gate is the fork's own CI, read from the **check runs on the PR head**. Supe
 
 1. Poll the head's check runs until none is `queued` or `in_progress`, bounded by `ci_wait_timeout_s` (default `5400`); expiry is `ci_evidence_unavailable`.
 2. Every check run that reached a conclusion must be `success`. `skipped` and `neutral` are permitted and are named as such on the row and in the report. Any `failure`, `cancelled` or `timed_out` is `ci_check_failed`.
-3. Every context in `required_contexts_min` must be **present and successful** on the head, so an empty or all-skipped check list can never read as green. `pre-commit checks` is the expected member; the value is measured from a probe PR on the fork, and an empty value forces `auto_merge_enabled = false`.
+3. Every context in `required_contexts_min` must be **present and successful** on the head, so an empty or all-skipped check list can never read as green. `pre-commit checks` is the expected member; the value is measured from a probe PR on the fork.
 4. A PR held in pending workflow approval is `ci_evidence_unavailable`.
 5. Any post-PR criterion (§10) must be satisfied on the head, alongside the conclusion rule. `terminal/alert_still_present` and `alert_analysis_wait_s` expiry (`terminal/criterion_not_met`) block the merge exactly as `ci_evidence_unavailable` does.
 
 `docker`, `showtime-trigger` and `check-python-deps` need real repository secrets and are never members of `required_contexts_min`; if they run and conclude `failure` they are a genuine `ci_check_failed`. Nothing merges on `ci_evidence_unavailable`, `ci_check_failed` or an unsatisfied post-PR criterion. There is **no**
-merge-time re-run of the suite — CI covers that. The pipeline merges only when `merge_mode = auto`, `auto_merge_enabled` and this gate all hold; the merge is then re-read from the fork and `merged_at` recorded.
+merge-time re-run of the suite — CI covers that. The pipeline never merges; once this gate and the post-PR criteria hold, the candidate settles `awaiting_human_merge` and an external human merge may later be recorded as observed evidence.
 
 ## 13. Failure and recovery
 
@@ -210,7 +208,7 @@ Every failure is terminal, leaves **at most one artifact** on the fork, and neve
 | Criterion cannot be observed at all | `terminal/criterion_not_met` | the criterion and what was attempted; no PR |
 | A check run concludes `failure`/`cancelled`/`timed_out`, or `required_contexts_min` is absent or unsuccessful | `terminal/ci_check_failed` | PR URL as open-not-merged, with the offending check runs |
 | Check runs never settle within `ci_wait_timeout_s`, or the PR waits on workflow approval | `terminal/ci_evidence_unavailable` | PR URL as open-not-merged, with the unsettled check runs |
-| `merge_mode = manual` | `awaiting_human_merge` / `manual_merge_required` | PR URL, gate result, merge owned by a human |
+| PR passes the post-PR gate and remains open | `awaiting_human_merge` / `manual_merge_required` | PR URL, gate result, merge owned by a human |
 | Issue marker search errors or is unconfigured | `deferred/marker_search_failed` / `deferred/marker_search_unconfigured` | not published this run; retried next run, no issue written |
 | High-tier candidate fails its criterion after its issue was written | the criterion's terminal reason, with `issue_url` retained | issue URL as open-unremediated; no PR |
 
@@ -223,16 +221,15 @@ or a fork match — never by a state value alone. A per-candidate failure defers
 
 ## 14. State and observability
 
-- `state/candidates.jsonl` is the dedupe/resume source of truth. `candidate_id = sha256(lane | repo | stable_locator)`, where `stable_locator` is `rule_id + file_path + normalized_symbol + position_digest` (LANE 1; **never** `alert.number`), the collectable nodeid (LANE 2), or `module:qualname` (LANE 3). `position_digest =
-  sha256("{start_line}:{start_column}-{end_line}:{end_column}")[:12]`: four live `py/overly-large-range` alerts share one line of `add_chart_to_existing_dashboard.py` and differ only by column, so without it they collapse into one candidate.
+- `state/candidates.jsonl` is the dedupe/resume source of truth. For LANE 1, `candidate_id = sha256(lane | repo | rule_id | path | normalized_symbol)`; the identity scheme is `rule_id|path|normalized_symbol`, while `position_digest` remains metadata for drift evidence only. A position-based identity previously produced two candidates for one defect, represented by fork PRs #38 and #40, so positions must not define identity. LANE 2 uses the collectable nodeid and LANE 3 uses `module:qualname`.
 - **Drift** — an edit above an alert shifts its digest, so before dispatching a LANE 1 candidate the orchestrator attempts a drift match against state: the weak key `(rule_id, file_path, normalized_symbol)` must have multiplicity 1 among current alerts *and* among active (not `superseded_by`) rows, and the persisted
   `region_digest` or `symbol_relative_offset` must agree. A hit links the rows (`supersedes` / `superseded_by`) and suppresses re-dispatch; neither condition is configurable. Because LANE 1 reads a fresh analysis every run, positions move between analyses and drift matching is load-bearing rather than an edge case: it is what
   stops a known alert being re-dispatched under a new `candidate_id`.
-- **Layer 1** JSONL event log per candidate: `run_id`, lane, `candidate_id`, gate results and failed gate, score with factor breakdown, tier, `merge_mode`, `session_id`, the declared criterion and its observed evidence, `test_nodeid`/`test_paths`/`suite_scope`, PR or issue URL and number, every check run's name and conclusion,
+- **Layer 1** JSONL event log per candidate: `run_id`, lane, `candidate_id`, gate results and failed gate, score with factor breakdown, tier, `session_id`, the declared criterion and its observed evidence, `test_nodeid`/`test_paths`/`suite_scope`, PR or issue URL and number, every check run's name and conclusion,
   terminal state and reason, both artifact identities where a high-tier candidate has an issue and a PR, LANE 2 breadth fields, `related_candidate_id`.
 - **Layer 2** `reports/run-<run_id>.md`: candidates seen, gated out with reasons, scored, dispatched, deferred, every terminal candidate with its reason, PR and issue links, merge results, `skipped`/`neutral` check runs named, and every `awaiting_human_merge` PR called out as awaiting a human. No candidate may be unaccounted
   for.
-- **Layer 3** `reports/kpis.md`: PR merge rate (merged over `merge_mode = auto` PRs) with manual PRs counted separately; **verification pass rate = candidates whose declared criterion was satisfied / candidates dispatched**, reported overall and per lane since the criteria differ; backlog burn-down per lane against
+- **Layer 3** `reports/kpis.md`: observed human-merge rate (verified externally merged PRs over published PRs); **verification pass rate = candidates whose declared criterion was satisfied / candidates dispatched**, reported overall and per lane since the criteria differ; backlog burn-down per lane against
   `fixtures/baseline.json` (`n/a` for a lane absent from `baseline_valid_lanes`); test-inclusion rate over the candidates whose criterion required a test; issues created and issues adopted, split by tier, with high-tier issues closed by their merged PR counted separately; session-failure rate; deferred-by-reason. Alerts when
   merge rate `< merge_rate_floor = 0.50` or session-failure rate `> session_failure_ceiling = 0.30`.
 
@@ -247,13 +244,13 @@ or a fork match — never by a state value alone. A per-candidate failure defers
 | `eol_major_lag` / `version_source` | `2` / `.github/ISSUE_TEMPLATE/bug-report.yml` | drift-tested; no concrete release → startup error |
 | `lane2_class_breadth_max` | `5` | **safety-relevant** — §7 breadth ceiling |
 | `alert_source` / `alert_fixture_path` | `code_scanning_api` / `fixtures/codeql_alerts.json` | §7 — `code_scanning_api` reads the fork's alerts for `master` and requires the latest analysis to sit on `base_sha`; a mismatch or missing analysis is a startup error under LIVE; `sarif_file` is the SIMULATE input |
-| `lane1_alert_check` / `alert_analysis_wait_s` / `ci_evidence_mode` | `pr_ref_alerts` / `2700` / `local` | §10 — how alert absence and suite-green are observed. `pr_ref_alerts` reads the alerts for the PR ref once the fork's `codeql-analysis` has analysed that head, bounded by the wait; expiry settles `terminal/criterion_not_met`. `codeql_cli` runs CodeQL locally over the touched paths |
-| `required_contexts_min` / `ci_wait_timeout_s` | probe-measured (`pre-commit checks`) / `5400` | **safety-relevant** — §12; must be present and successful on the head; empty forces `auto_merge_enabled = false`; expiry → `ci_evidence_unavailable` |
+| `alert_analysis_wait_s` / `ci_evidence_mode` | `2700` / `local` | §10 — `pr_ref_alerts` reads alerts for the PR ref once the fork's `codeql-analysis` has analysed that head, bounded by the wait; expiry settles `terminal/criterion_not_met` |
+| `required_contexts_min` / `ci_wait_timeout_s` | probe-measured (`pre-commit checks`) / `5400` | **safety-relevant** — §12; must be present and successful on the head; expiry → `ci_evidence_unavailable` |
 | `issue_sink` / `has_issues` / `marker_search_enabled` | `issues` / probed / `true` | **safety-relevant** — issue publication for both tiers; issues disabled on the fork or search unavailable → defer, never write, and a high-tier candidate is deferred before its session is created |
-| `auto_merge_enabled` | `false` | **safety-relevant** — never sufficient alone: `merge_mode = auto` and the §12 gate must also hold |
 | `session_timeout_s` / `max_acu_limit` / `max_total_acu` | `5400` / per-session / `500` | — |
-| `merge_rate_floor` / `session_failure_ceiling` / `kpi_sink` | `0.50` / `0.30` / `local` | `gsheet` under `simulate` is a startup error |
-| `coverage_bar` | `0.80` | enforced over `gate.py`, `score.py`, `dispatch.py`, `dedupe.py`, `templates/render.py`, `observability/kpis.py` |
+| `merge_rate_floor` / `verification_pass_rate_floor` / `session_failure_ceiling` | `0.50` / `0.80` / `0.30` | KPI thresholds are always written to local artifacts |
+| `verification_pass_rate_alert` / `publication_safety_alert` | derived | Alert when verification pass rate is below its floor or publication safety is undetermined |
+| `coverage_bar` | `0.80` | enforced by `[tool.coverage.report] fail_under = 80` over six pure-logic modules; those modules currently measure approximately 94% |
 
 Also configurable: target `owner/repo`, GitHub token, Devin API key, rubrics, templates. **SIMULATE** (default) needs **no credentials**, makes **no** network writes and creates no sessions: discovery from fixtures, gates, scoring, rendering, reporting; every artifact is marked `artifact_simulated = true` with `writes_suppressed
 = <n>`, and any attempted write raises. `docker compose run --rm pipeline` must complete a full SIMULATE run offline; the image needs no CodeQL toolchain, since the fork's workflow performs every scan.
@@ -265,10 +262,10 @@ Also configurable: target `owner/repo`, GitHub token, Devin API key, rubrics, te
 
 1. Strip the §18 dead modules, symbols and config keys; keep the suite importable.
 2. `session_client.py`: one runtime role — create, poll to terminal, validate the §9 schema, attempt/retry assertion, session ceiling. Add `prompts.render_fix_prompt` building the §9 prompt, criterion included, from a `Candidate`.
-3. Publication order for high tier: `create_issue` at dispatch, then the PR with `Closes #<issue_number>`; both reconciled against the fork first (§11), no third write. Lanes declare a `success_criterion` per candidate; `schemas.py` carries it plus `merge_mode`, `suite_scope` and the observed evidence.
+3. Publication order for high tier: `create_issue` at dispatch, then the PR with `Closes #<issue_number>`; both reconciled against the fork first (§11), no third write. Lanes declare a `success_criterion` per candidate; `schemas.py` carries it plus `suite_scope` and the observed evidence.
 4. `lanes/codeql.py`: `alert_source = code_scanning_api` as the default — alerts for `master` plus the `GET /code-scanning/analyses` check that the latest analysis sits on `base_sha`, a startup error otherwise; `sarif_file` kept as the SIMULATE input.
 5. Add `verify.py` — one evaluator per lane criterion (§10): LANE 2 red-at-base/green-at-head with per-item vectors, LANE 1 alert re-check plus suite, LANE 3 symbol and caller re-check plus suite; each returns evidence or a terminal reason.
-6. `github_client.py`: `pull_request_for_head` as the PR dedupe path; marker search plus `create_issue` for both tiers; check-run polling and the §12 rule; merge only for `merge_mode = auto`. `templates/render.py`: PR body/title with `EVIDENCE`, issue body/title with the marker.
+6. `github_client.py`: `pull_request_for_head` as the PR dedupe path; marker search plus `create_issue` for both tiers; check-run polling and the §12 rule. `templates/render.py`: PR body/title with `EVIDENCE`, issue body/title with the marker.
 7. `state.py`: the §6 state set, `issue_created` on the high-tier path as well, `awaiting_human_merge`, resume-from-fork reconciliation of the PR write and marker-first reconciliation of the issue write.
 8. `__main__.py`: the linear §6 pipeline, per-candidate error scoping, one publication path. Update `observability/` to the §14 fields, KPIs and alerts.
 9. Update `tests/` to this contract and add the §17 fault-injection test.
@@ -282,15 +279,24 @@ Also configurable: target `owner/repo`, GitHub token, Devin API key, rubrics, te
 This is the acceptance gate for declaring the system working end to end, and its contents are fixed in advance: "finite" means only that no criterion may be added to it mid-flight, so reaching it cannot be deferred by widening it. It says nothing about code review. §3 is untouched and still binding: every task, including the
 ones that make up this gate, ships only on convergence plus green CI on this repo, and a blocking or major finding against code still in flight is resolved before that code ships. A finding that arrives after the gate has been met is a listed follow-up (§17.2) rather than a reason to reopen the gate.
 
-- One real Python candidate goes discovery → tracking issue → session → orchestrator-verified criterion → PR closing that issue → CI green → merged on `victorciao/superset`, with issue URL, PR URL, merge commit and `session_id` recorded on its state row and in `RESULTS.md`, and the issue closed by the merge.
-- Crash recovery is proven by **fault injection**, not inspection: the process is `SIGKILL`ed immediately before and immediately after the PR-creating write, each run is resumed to completion, and afterwards **exactly one PR exists for that candidate** on the fork.
+- One real Python candidate goes discovery → tracking issue → session → orchestrator-verified criterion → PR closing that issue → CI green → `awaiting_human_merge` on `victorciao/superset`; the pipeline never merges, and any later human merge is recorded only as externally observed evidence with issue URL, PR URL, merge commit and `session_id` on its state row and in `RESULTS.md`.
+- Crash recovery is proven by **real OS-process fault injection** in `tests/integration/test_crash_recovery_fault_injection.py`, not inspection: the process is `SIGKILL`ed immediately before and immediately after the PR-creating write, each run is resumed to completion, and afterwards **exactly one PR exists for that candidate** on the fork.
 - A full SIMULATE run completes with no credentials and no writes, and under `docker compose`. Every §15 knob is settable without code edits; the README documents defaults and safety classes.
-- `tests/`, `ruff` and `mypy --strict` are green, pure-logic coverage `>= coverage_bar`; the run report accounts for every candidate and the KPI rollup agrees with the fork re-read after the run.
+- `tests/`, `ruff` and `mypy --strict` are green; `[tool.coverage.report] fail_under = 80` enforces pure-logic coverage, currently approximately 94% across the six covered modules; the run report accounts for every candidate and the KPI rollup agrees with the fork re-read after the run.
 
-### 17.2 Follow-on pass — required for completeness, does not gate §17.1
+### 17.2 Future improvements — not yet implemented
 
-- The remaining two lane criteria are each exercised end to end at least once, in LIVE or against a fixture fork, with their evidence in the run report.
-- One medium-tier candidate publishes exactly one issue whose marker is found on re-run.
+- Concurrent Devin sessions. Today `settled = [runner.process(candidate) for candidate in dispatched]` is strictly serial; parallelizing would overlap per-candidate CI waits and introduce ACU-ceiling accounting races, requiring a runner-loop redesign.
+- Live session-ceiling evidence. Configuration rejects `max_sessions < budget_N`, so `SESSION_CEILING` cannot be provoked by sizing alone; it can only be reached through a session retry (`_MAX_SESSION_ATTEMPTS = 2`) or the ACU ceiling. At defaults, `max_sessions = budget_N + 3 = 8`, and eight serial 90-minute sessions exceed GitHub's hard six-hour job cap. The workflow's `timeout-minutes: 350` bounds the job but does not solve the underlying runtime cost; the real levers are `session_timeout_s` and the session ceiling itself.
+- LIVE mode inside the container. Only SIMULATE is containerized today; live credential and checkout handling requires a separate deployment contract.
+- A scheduled SIMULATE smoke run. The pipeline supports manual/local SIMULATE execution, but scheduling it requires CI ownership, artifact retention and failure-notification policy.
+- End-to-end evidence for the remaining two lane criteria and a medium-tier marker-adoption rerun. These need a fixture fork or live target state that supplies the corresponding external CI and GitHub observations.
+
+### 17.3 Intentionally excluded decisions
+
+- Auto-merge is removed; the pipeline never merges pull requests.
+- The GSheet KPI sink is removed; KPIs are always written locally.
+- The CodeQL CLI alert-check path is removed; LANE 1 uses PR-reference alert evidence.
 
 ## 18. Deletion list for the implementer
 
@@ -302,6 +308,6 @@ ones that make up this gate, ships only on convergence plus green CI on this rep
 - `github_client.py`: `patch_issue`, `comment_pr`, `publish_degraded`, the PR-comment and issue-patch branches of `publish_artifacts`, and the hard-coded `REQUIRED_CONTEXTS` tuple (replaced by `required_contexts_min` in config plus the §12 check-run rule). **Keep** `create_issue` and `pull_request_for_head`.
 - `state.py`: the reservation fields and branches in `append_if_new_artifact`. **Keep** `MarkerSearchOutcome`, `MarkerArtifact`, `github_marker_search`, `marker_artifact`, `marker_exists`, `marker_search_unavailable`, `marker_search_orphaned`, `marker_search_outcome` — §11's issue dedupe is built on them; drop only `marker_search_orphaned`'s degraded-artifact handling.
 - `schemas.py` enums: `CandidateState.ISSUE_PATCHED`/`COMMENT_CREATED`/`CONVERGED`; `Action.REVIEWER_ONLY_DIFF`; `ReasonCode.DISAGREEMENT_UNRESOLVED`/`DIFF_REVIEW_INCOMPLETE`/`IMPLEMENTER_TEST_EDIT`/`ROLE_COLLISION`/`PHASE_B_CORRELATION_UNAVAILABLE`/`RESERVATION_HELD`/`ARTIFACT_DEGRADED`/`ARTIFACT_ORPHANED`/`BRANCH_NOT_ADVANCED`/`ROLE_COMMIT_MISSING`. **Keep** `CandidateState.ISSUE_CREATED`, `Action.OPEN_ISSUE`, `ReasonCode.MARKER_SEARCH_FAILED`/`MARKER_SEARCH_UNCONFIGURED`.
-- `schemas.py` `Candidate`/`EventRecord` fields: `comment_url`, `artifact_degraded`, `planner_session_id`, `implementer_session_id`, `reviewer_session_id`, `planner_criteria`, `reviewer_criterion_ids`, `role_attempt_evidence`, `diff_reviewed`, `reviewed_head_sha`, `iterations`, `disagreement_summary`, `phase_b_protocol_violation`, `reserved_at`, `reserved_by_run_id`, `unresolved_major`; **keep** `issue_url`, `issue_number`, `marker_search_outcome`; add `success_criterion`, `criterion_evidence`, `merge_mode`, `suite_scope`, `check_run_conclusions`.
-- `config.py`: `iteration_cap`, `reservation_lease_s`, `DEFAULT_ITERATION_CAP`, `DEFAULT_MAX_SESSIONS` (`max_sessions` keeps its own meaning, §15; `budget_N` default becomes `5`); **keep** `issue_sink`/`IssueSink` and `has_issues`; add `required_contexts_min`, `lane1_alert_check`, `marker_search_enabled`, `alert_analysis_wait_s`, and the `code_scanning_api` member of `alert_source`.
+- `schemas.py` `Candidate`/`EventRecord` fields: `comment_url`, `artifact_degraded`, `planner_session_id`, `implementer_session_id`, `reviewer_session_id`, `planner_criteria`, `reviewer_criterion_ids`, `role_attempt_evidence`, `diff_reviewed`, `reviewed_head_sha`, `iterations`, `disagreement_summary`, `phase_b_protocol_violation`, `reserved_at`, `reserved_by_run_id`, `unresolved_major`; **keep** `issue_url`, `issue_number`, `marker_search_outcome`; add `success_criterion`, `criterion_evidence`, `suite_scope`, `check_run_conclusions`, `merged_at`, `merge_verified`.
+- `config.py`: `iteration_cap`, `reservation_lease_s`, `DEFAULT_ITERATION_CAP`, `DEFAULT_MAX_SESSIONS` (`max_sessions` keeps its own meaning, §15; `budget_N` default becomes `5`); **keep** `issue_sink`/`IssueSink` and `has_issues`; add `required_contexts_min`, `marker_search_enabled`, `alert_analysis_wait_s`, and the `code_scanning_api` member of `alert_source`.
 - `observability/kpis.py`: `_criterion_coverage` plus the criterion-coverage, `disagreement_unresolved`, sessions-per-role and implementer-test-edit KPIs; the verification KPI becomes per-lane criterion satisfaction, and issue counts are reported separately from PR merge rate.
