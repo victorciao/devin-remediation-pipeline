@@ -1,26 +1,74 @@
 # Devin remediation pipeline
 
-This repository contains an event-driven remediation pipeline for Apache Superset. It checks
-three independently auditable lanes—CodeQL alerts, unconditional skipped tests, and end-of-life
-deprecations—then applies consistent safety, dispatch, review, artifact, and reporting rules.
+This program finds long-standing problems in a fork of
+[Apache Superset](https://github.com/apache/superset) and gets Devin to fix them, one problem
+per Devin session. It looks for three kinds of problem:
 
-The target checkout is Apache Superset at the revision captured by `fixtures/baseline.json`.
-SIMULATE does not modify that checkout.
+* **Security alerts** that GitHub's CodeQL scanner reports on the repository.
+* **Disabled tests** — tests switched off permanently with `@pytest.mark.skip`, which no longer
+  protect anything.
+* **Deprecated code** — calls to APIs the project already announced it would remove, where the
+  announced removal version has passed.
 
-The source of truth for behavior and requirements is
-[`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md). This README is an operator
-guide, not a replacement for that plan.
+For each problem it finds, the program:
+
+1. Decides whether the problem is safe to fix automatically at all, and drops it if not.
+2. Scores what is left, so the most valuable problems are handled first.
+3. Opens a tracking issue for it on the fork.
+4. For the highest-scoring problems, starts a Devin session with a single, checkable success
+   condition — for example, "this specific test passes without being skipped".
+5. Checks that condition itself, against the code Devin actually pushed, rather than believing
+   the session's own report.
+6. Opens a pull request and waits for the fork's own CI to pass on it.
+7. Stops there. **The program never merges anything**; a human reviews and merges.
+
+Every run writes down what it did, so a run that is interrupted can be started again without
+creating a second issue, branch, session, or pull request for the same problem.
+
+The detailed requirements and design are in
+[`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md); this README covers running the
+program and reading its output.
+
+## Two ways to run it: SIMULATE and LIVE
+
+**SIMULATE** is the default and needs no credentials. It reads code and recorded data from your
+own machine, writes nothing to GitHub, and creates no Devin sessions. It still produces the full
+set of reports, so you can see which problems were found, how they were scored, and what would
+have been done about them. Use it to try the program out, to check a configuration change, or in
+CI.
+
+**LIVE** needs a GitHub token and a Devin API key, and really does the work: it creates issues,
+branches, Devin sessions, and pull requests on the fork. Use it when you want the fixes made.
+
+Finding and scoring problems works identically in both; the only difference is whether anything
+is created outside your machine.
+
+## Words used in this README
+
+* **Candidate** — one problem the program found, tracked individually from discovery to a merged
+  fix.
+* **Lane** — one of the three kinds of problem above. Their names in commands and reports are
+  `codeql`, `skipped_tests`, and `deprecations`.
+* **Run** — one invocation of the program. Each run gets its own identifier and writes its
+  reports to its own directory.
+* **Target checkout** — a local clone of the fork. The program reads its source code to find
+  disabled tests and deprecated calls.
+* **Baseline** ([`fixtures/baseline.json`](fixtures/baseline.json)) — a stored inventory of every
+  problem present in the fork at one fixed commit, recorded before any of this program existed
+  (see [the discovery report](docs/PHASE0_DISCOVERY.md)). Reports use it to say how much of the
+  original backlog has been cleared, and SIMULATE reads it instead of calling GitHub.
 
 ## Prerequisites
 
-Use Python 3.11+, git, Docker with the Compose v2 plugin (`docker compose`), and a POSIX
-shell. Windows users should use WSL2: these commands use POSIX `VAR=value cmd`, `export`,
-`.venv/bin/...`, and `id -u` syntax.
+Python 3.11+, git, Docker with the Compose v2 plugin (`docker compose`), and a POSIX shell.
+On Windows, use WSL2: the commands below use POSIX syntax (`VAR=value cmd`, `export`,
+`.venv/bin/...`, `id -u`).
 
 ## Setup
 
-Python 3.11 may be named `python3` on some systems. Set the target checkout once, pinned to
-the `head_sha` in `fixtures/baseline.json`, then install the package and development tools:
+Clone the fork and install this program. Check the clone out at the same commit the baseline was
+recorded at, so that counts in the reports line up with it. On some systems Python 3.11 is
+installed as `python3` rather than `python3.11`.
 
 ```bash
 export SUPERSET_CHECKOUT="$HOME/src/superset"
@@ -30,14 +78,9 @@ python3.11 -m venv .venv  # or: python3 -m venv .venv
 .venv/bin/python -m pip install '.[dev]'
 ```
 
-The package has no required network service for SIMULATE. The checked-in CodeQL fixture and
-the fixed snapshot of the fork's CodeQL alerts, skipped tests, and EOL deprecations taken
-before any pipeline code ran ([discovery](docs/PHASE0_DISCOVERY.md)) are used for the
-credential-free path and its burn-down denominators.
+## Running in SIMULATE
 
-## Credential-free SIMULATE
-
-Every invocation defaults to SIMULATE. Run the complete local pipeline with:
+This is the whole program, end to end, on your machine:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m pipeline \
@@ -47,26 +90,30 @@ PYTHONPATH=src .venv/bin/python -m pipeline \
   --alert-source sarif_file
 ```
 
-If the target checkout is absent, the pipeline falls back to baseline records for the skipped-test
-and deprecation lanes. The run still works, but it is degraded. SIMULATE makes no remote writes;
-it produces the local artifacts a LIVE run would publish, labels session counts as simulated, and
-keeps verification and publication-safety alerts visible.
+It writes its reports under the output directory (see
+[Output files](#output-files)) and leaves the target checkout untouched.
 
-Configuration precedence is configuration file, then `PIPELINE_*` environment variables,
-then command-line options. For example:
+If you skip the clone and leave out `--repo-path`, the program still runs, but it cannot read any
+source code: instead of finding disabled tests and deprecated calls itself, it lists the ones
+recorded in the baseline. The reports say so. Anything that changed in the fork since the
+baseline commit will be missing, so clone the fork if you want a true picture.
+
+Settings can come from a configuration file, from `PIPELINE_*` environment variables, or from
+command-line options, in that order of increasing precedence — so a command-line option always
+wins. For example, to raise how many problems get a Devin session in one run:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m pipeline \
   --mode=simulate --budget-N=5 --output-dir ./run-output
 ```
 
-Each run receives a fresh identifier. The command returns a non-zero exit code for configuration
-errors, blocking capability preconditions, or hard session and cost ceilings.
+The program exits with a non-zero status if the configuration is invalid, if something it needs
+is unavailable, or if a run hits one of its session or cost limits.
 
-## LIVE
+## Running in LIVE
 
-LIVE is deliberately guarded. Supply runtime credentials through the environment only. They are
-never accepted from a configuration file, Docker build argument, image layer, source file, or log.
+LIVE is deliberately hard to start by accident. Credentials are read from the environment only —
+never from a configuration file, a Docker build argument, an image layer, a source file, or a log.
 
 ```bash
 export DEVIN_API_KEY='...'
@@ -150,15 +197,16 @@ relevant work.
 `only_lanes` accepts a comma-separated lane list from `--only-lanes=...` or
 `PIPELINE_ONLY_LANES`; it restricts dispatch eligibility only, so other lanes remain
 enumerated, gated, scored, and represented in the run report.
-Security issues are always detail-free. The system verifies the declared criterion and CI
-evidence before handing a pull request to a human for merge.
+Security tracking issues do not describe the vulnerability or how to exploit it. They contain
+only a summary, affected scope, status, verification, and rule ID. The system checks the stated
+success condition and CI evidence before handing a pull request to a human for review.
 
-## Docker and Compose smoke
+## Running with Docker Compose
 
-The image uses Python 3.11, copies only the package and `config/`, `templates/`, and
-`fixtures/`, and runs as a non-root user. Compose mounts `$SUPERSET_CHECKOUT` read-only at
-`/target-repo`; the container uses that mounted path for `--repo-path`. Bind-mounted
-`./docker-output` (relative to the repository root) must be writable by the container user:
+Docker Compose runs the program in the same SIMULATE mode without network access. It mounts
+`$SUPERSET_CHECKOUT` read-only at `/target-repo` and writes the results to `./docker-output`,
+relative to this repository. The command passes your user and group IDs so those result files
+are writable by your account:
 
 ```bash
 mkdir -p docker-output
@@ -166,36 +214,39 @@ PIPELINE_UID="$(id -u)" PIPELINE_GID="$(id -g)" \
   SUPERSET_CHECKOUT="$SUPERSET_CHECKOUT" docker compose run --rm remediation
 ```
 
-Compose uses `network_mode: none`, mounts `./docker-output` at `/output`, and mounts the
-target checkout read-only. LIVE credentials, if ever used by an embedding deployment, are
-runtime environment values and are not Docker build inputs.
+The container has no network access and cannot change the target checkout. LIVE credentials, if
+ever used by an embedding deployment, are runtime environment values and are not Docker build
+inputs.
 
-## Observability and artifacts
+## Output files
 
-The output directory contains:
+After a run, the output directory contains:
 
-* `state/candidates.jsonl` — lifecycle state used for resuming work and avoiding duplicates.
-* `reports/events.jsonl` — the event log with gate, dispatch, session, review, artifact, and
-  terminal evidence.
-* `reports/run-<run_id>.md` — the per-run summary with candidate outcomes and artifact links.
-* `reports/kpis.md` — the KPI rollup and threshold alerts.
-* `reports/issues/<candidate_id>.md` — rendered issue bodies.
-* `reports/prs/<candidate_id>.md` — rendered pull-request bodies.
+* `state/candidates.jsonl` — saved state used to resume work and avoid duplicate work.
+* `reports/events.jsonl` — an event log showing checks, sessions, reviews, artifacts, and
+  final outcomes.
+* `reports/run-<run_id>.md` — a summary of one run, with problem outcomes and artifact links.
+* `reports/kpis.md` — measured rates and threshold alerts.
+* `reports/issues/<candidate_id>.md` — issue text for each tracked problem.
+* `reports/prs/<candidate_id>.md` — pull-request text for each proposed fix.
 
-The fixed snapshot of the fork's CodeQL alerts, skipped tests, and EOL deprecations taken before
-any pipeline code ran is used for burn-down denominators. If a lane has no usable baseline data,
-the report shows `n/a` rather than zero.
+The baseline records the problems found before this program ran. Reports compare the current
+results with that starting list. If a kind of problem has no usable baseline record, the report
+shows `n/a` rather than zero.
 
 ## Verification status
 
-Verified in this workstream: package import, static checks, baseline reproduction against the
-captured Superset revision (identical except `captured_at`), and a credential-free SIMULATE run
-per lane in Docker, each reaching its designed outcome at the default threshold (`codeql`
-81/high and `deprecations` 200/high run the full simulated loop; `skipped_tests` is medium and
-therefore issue-only).
+The following checks have been completed:
 
-All three lanes have also completed LIVE against the Superset fork, with independent criterion
-verification at the pull request head rather than trust in the session's own report:
+* The package imports and static checks pass.
+* The baseline reproduces the captured Superset revision, except for `captured_at`.
+* A credential-free SIMULATE run in Docker completes for each problem type. At the default
+  threshold, `codeql` scores 81/high and `deprecations` scores 200/high and runs the full
+  simulated loop; `skipped_tests` is medium and produces an issue only.
+
+All three problem types have also completed LIVE against the Superset fork. The program checked
+each success condition against the code at the pull-request head, independently of the Devin
+session's report:
 
 * `codeql` — issue [#44](https://github.com/victorciao/superset/issues/44), pull request
   [#45](https://github.com/victorciao/superset/pull/45), merged.
@@ -204,16 +255,15 @@ verification at the pull request head rather than trust in the session's own rep
 * `deprecations` — issue [#30](https://github.com/victorciao/superset/issues/30), pull request
   [#46](https://github.com/victorciao/superset/pull/46).
 
-The event-driven path is verified end to end on hosted runners: a merge to the fork's `master`
-produced a CodeQL completion, the fork's dispatch workflow sent `codeql-scan-completed`, and the
-resulting `repository_dispatch` run adopted 30 existing issues by marker without creating
-duplicates, created one session, pushed one branch with the remediation pull request token,
-opened a pull request, verified the criterion, observed authoritative required checks, and
-settled at `awaiting_human_merge`.
+The event-driven path was also verified end to end on hosted runners. A merge to the fork's
+`master` completed CodeQL, and the fork's workflow sent `codeql-scan-completed` to this
+repository. The resulting run found 30 existing tracking issues by their stored markers instead
+of creating duplicates, created one session, pushed one branch with the pull-request token,
+opened a pull request, checked its success condition, observed the required checks, and left the
+candidate awaiting a human merge (`awaiting_human_merge`).
 
-Merging is never performed by this system. A verified candidate settles at
-`awaiting_human_merge` for a human to merge; automated merging is not part of the system. A merge
-performed by automation is therefore absent from the evidence on purpose.
+The program never merges pull requests. A successful candidate remains open for a human to
+review and merge; any later merge is recorded as evidence from outside the program.
 
 ## Automated triggers and secrets
 
@@ -245,7 +295,7 @@ The workflow runs every Monday at 03:17 UTC (`17 3 * * 1`).
 
 ### Local CLI
 
-For a local LIVE run, use the instructions in [LIVE](#live).
+For a local LIVE run, use the instructions in [Running in LIVE](#running-in-live).
 
 Run artifacts are uploaded under `remediation-<run_id>`. A successful publication also commits
 the run directory under `history/` and refreshes `RESULTS.md`; publication failures are
