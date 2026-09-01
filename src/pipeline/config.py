@@ -75,7 +75,7 @@ class CiEvidenceMode(str, Enum):
 
 
 class PipelineConfig(BaseModel):
-    """The §13 configuration surface with its shipped defaults."""
+    """The pipeline configuration model with its shipped defaults."""
 
     model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True)
 
