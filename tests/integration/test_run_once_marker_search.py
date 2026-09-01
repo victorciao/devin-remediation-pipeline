@@ -402,6 +402,7 @@ def test_settled_skip_is_excluded_from_run_verification_denominator(
         pr_number=2,
         pr_url="https://github.test/pull/2",
         head_branch="devin/remediation/settled",
+        session_id="previous-session",
     )
     state_path = output_dir / "state" / SIMULATE_STATE_FILE
     state_path.parent.mkdir(parents=True)

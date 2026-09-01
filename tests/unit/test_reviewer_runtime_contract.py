@@ -33,6 +33,7 @@ from pipeline.schemas import (
     Tier,
 )
 from tests.conftest import RUBRICS_PATH, TEMPLATES_DIR
+from tests.factories import codeql_candidate
 from tests.fakes import FakeGitHubTransport
 
 
@@ -211,7 +212,8 @@ def test_verification_pass_rate_is_per_dispatched_candidate() -> None:
         _event(candidate_id="cand", session_id="s1"),
         _event(candidate_id="cand", session_id="s1", pr_url="https://github.test/pull/1"),
     ]
-    metrics = compute_kpis([], events, _baseline([]), config())
+    candidates = [codeql_candidate(candidate_id="cand", run_id="run", session_id="s1")]
+    metrics = compute_kpis(candidates, events, _baseline([]), config())
     assert metrics["verification_pass_rate"] == 1.0, (
         "the pass rate counted state rows instead of dispatched candidates"
     )

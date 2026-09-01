@@ -38,7 +38,6 @@ def test_seed_collapses_candidates_and_strips_removed_keys(tmp_path: Path) -> No
     assert [row["candidate_id"] for row in rows] == ["older", "newer"]
     assert "auto_merge_requested" not in rows[0]
     assert json.loads(output.with_name(output.name + ".seed.json").read_text()) == {
-        "run_ids": ["run-old", "run-new"],
         "seeded_rows": 2,
     }
 
@@ -58,24 +57,50 @@ def test_export_writes_only_rows_from_current_run(tmp_path: Path) -> None:
     assert [row["candidate_id"] for row in rows] == ["current"]
 
 
-def test_seed_uses_last_row_per_candidate_in_chronological_runs(tmp_path: Path) -> None:
-    """Seed preserves the same last-write-wins semantics as the live state store."""
-    first = codeql_candidate(candidate_id="same", run_id="run-one").model_dump(mode="json")
+def test_seed_writes_one_row_per_line_for_multiline_state(tmp_path: Path) -> None:
+    """Seed output remains JSONL when more than one candidate is present."""
+    first = codeql_candidate(candidate_id="first", run_id="run-one").model_dump(mode="json")
+    second = codeql_candidate(candidate_id="second", run_id="run-two").model_dump(mode="json")
+    history_dir = tmp_path / "history"
+    write_run(history_dir / "20260101T000000Z-one", [first, second])
+
+    output = tmp_path / "state.jsonl"
+    seed(history_dir, output)
+
+    rows = output.read_text(encoding="utf-8").splitlines()
+    assert len(rows) == 2
+    assert [json.loads(line)["candidate_id"] for line in rows] == ["first", "second"]
+
+
+def test_seed_preserves_settled_row_over_later_weaker_row(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Seed applies the settlement rule when a later row weakens a settled PR."""
+    first = codeql_candidate(
+        candidate_id="same",
+        run_id="run-one",
+        state=CandidateState.AWAITING_HUMAN_MERGE,
+        pr_number=2,
+        pr_url="https://github.test/pull/2",
+    ).model_dump(mode="json")
     second = codeql_candidate(
         candidate_id="same",
         run_id="run-two",
         reason=ReasonCode.BUDGET_OVERFLOW,
+        state=CandidateState.DEFERRED,
     ).model_dump(mode="json")
     history_dir = tmp_path / "history"
     write_run(history_dir / "20260101T000000Z-one", [first])
     write_run(history_dir / "20260102T000000Z-two", [second])
 
     output = tmp_path / "state.jsonl"
-    assert seed(history_dir, output) == ["run-one", "run-two"]
+    assert seed(history_dir, output) == ["run-one"]
 
     rows = [json.loads(line) for line in output.read_text().splitlines()]
     assert len(rows) == 1
-    assert rows[0]["run_id"] == "run-two"
+    assert rows[0]["state"] == "awaiting_human_merge"
+    assert rows[0]["pr_url"] == "https://github.test/pull/2"
+    assert "preserved 1 settled rows" in capsys.readouterr().out
 
 
 def test_seed_accepts_historical_row_without_run_id(tmp_path: Path) -> None:
@@ -86,14 +111,16 @@ def test_seed_accepts_historical_row_without_run_id(tmp_path: Path) -> None:
 
     output = tmp_path / "state.jsonl"
     assert seed(history_dir, output) == []
-    assert json.loads(output.read_text(encoding="utf-8"))["candidate_id"] == "no-run-id"
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines() if line]
+    assert rows[0]["candidate_id"] == "no-run-id"
     assert json.loads(output.with_name(output.name + ".seed.json").read_text()) == {
-        "run_ids": [],
-        "seeded_rows": 1,
+        "seeded_rows": 1
     }
 
 
-def test_seed_skips_simulated_rows_and_quarantines_malformed_rows(tmp_path: Path) -> None:
+def test_seed_skips_simulated_rows_and_quarantines_malformed_rows(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     """Simulation identity cannot enter LIVE state, and bad history is quarantined."""
     simulated = codeql_candidate(candidate_id="simulated", artifact_simulated=True).model_dump(
         mode="json"
@@ -109,6 +136,7 @@ def test_seed_skips_simulated_rows_and_quarantines_malformed_rows(tmp_path: Path
     assert output.read_text() == ""
     assert output.with_name(output.name + ".corrupt").read_text() == "{bad json\n"
     assert not state.with_suffix(state.suffix + ".corrupt").exists()
+    assert "skipped 1" in capsys.readouterr().out
 
 
 def test_export_rejects_state_shorter_than_seeded_prefix(tmp_path: Path) -> None:
@@ -166,12 +194,12 @@ def test_seed_export_reseed_round_trip_preserves_live_identity(tmp_path: Path) -
     assert preserved["pr_url"] == "https://github.test/pull/2"
 
 
-def test_export_treats_missing_seed_metadata_as_empty(tmp_path: Path) -> None:
-    """A missing seed sidecar leaves every valid state row eligible for export."""
+def test_export_rejects_missing_seed_metadata(tmp_path: Path) -> None:
+    """A missing seed sidecar is corruption rather than an empty seed."""
     current = codeql_candidate(candidate_id="current", run_id="run-current").model_dump(mode="json")
     state = tmp_path / "state.jsonl"
     state.write_text(json.dumps(current) + "\n", encoding="utf-8")
 
     output = tmp_path / "export.jsonl"
-    assert export_rows(state, tmp_path / "missing.seed.json", output) == 0
-    assert output.read_text(encoding="utf-8").count('"candidate_id"') == 1
+    with pytest.raises(RuntimeError, match="missing seed metadata"):
+        export_rows(state, tmp_path / "missing.seed.json", output)

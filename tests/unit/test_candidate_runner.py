@@ -318,6 +318,57 @@ def test_reconcile_observes_human_merged_pr(tmp_path: Path) -> None:
     assert result.merge_verified is True
 
 
+def test_reconcile_observes_human_merged_terminal_pr(tmp_path: Path) -> None:
+    """A terminal PR can later become merged through human observation."""
+    transport = FakeGitHubTransport(pr_merged_at="2026-09-01T00:00:00Z")
+    runner, store = _runner(tmp_path, transport, NoSessionOrchestrator())
+    candidate = codeql_candidate(action=Action.OPEN_PR)
+    store.append(
+        candidate.model_copy(
+            update={
+                "state": CandidateState.TERMINAL,
+                "issue_number": 1,
+                "issue_url": "https://github.test/victorciao/superset/issues/1",
+                "pr_number": 2,
+                "pr_url": "https://github.test/victorciao/superset/pull/2",
+                "reason": ReasonCode.SESSION_FAILED,
+                "action": Action.OPEN_PR,
+            }
+        )
+    )
+
+    result = runner.process(candidate)
+
+    assert result.state is CandidateState.MERGED
+    assert result.merge_verified is True
+    assert any(path.endswith("/pulls/2") for path in transport.reads)
+
+
+def test_merged_candidate_is_final_and_preserves_merge_evidence(tmp_path: Path) -> None:
+    """A persisted merged row is not re-observed or weakened by reconciliation."""
+    transport = FakeGitHubTransport(pr_merged_at="2026-09-01T00:00:00Z")
+    runner, store = _runner(tmp_path, transport, NoSessionOrchestrator())
+    candidate = codeql_candidate(action=Action.OPEN_PR)
+    merged_row = candidate.model_copy(
+        update={
+            "state": CandidateState.MERGED,
+            "issue_number": 1,
+            "issue_url": "https://github.test/victorciao/superset/issues/1",
+            "pr_number": 2,
+            "pr_url": "https://github.test/victorciao/superset/pull/2",
+            "merged_at": "2026-08-31T00:00:00Z",
+            "merge_verified": True,
+        }
+    )
+    store.append(merged_row)
+
+    result = runner.process(candidate)
+
+    assert result == merged_row
+    assert result.merge_verified is True
+    assert transport.reads == []
+
+
 def test_reconcile_observes_human_closed_pr(tmp_path: Path) -> None:
     """A later run records a human-closed PR as terminal."""
     transport = FakeGitHubTransport(pr_state="closed")
@@ -329,6 +380,32 @@ def test_reconcile_observes_human_closed_pr(tmp_path: Path) -> None:
 
     assert result.state is CandidateState.TERMINAL
     assert result.reason is ReasonCode.CLOSED_PULL_REQUEST
+
+
+def test_reconcile_observes_human_closed_terminal_pr(tmp_path: Path) -> None:
+    """A terminal PR can still record a later human close without merge."""
+    transport = FakeGitHubTransport(pr_state="closed")
+    runner, store = _runner(tmp_path, transport, NoSessionOrchestrator())
+    candidate = codeql_candidate(action=Action.OPEN_PR)
+    store.append(
+        candidate.model_copy(
+            update={
+                "state": CandidateState.TERMINAL,
+                "issue_number": 1,
+                "issue_url": "https://github.test/victorciao/superset/issues/1",
+                "pr_number": 2,
+                "pr_url": "https://github.test/victorciao/superset/pull/2",
+                "reason": ReasonCode.SESSION_FAILED,
+                "action": Action.OPEN_PR,
+            }
+        )
+    )
+
+    result = runner.process(candidate)
+
+    assert result.state is CandidateState.TERMINAL
+    assert result.reason is ReasonCode.CLOSED_PULL_REQUEST
+    assert any(path.endswith("/pulls/2") for path in transport.reads)
 
 
 def test_reconcile_leaves_open_pr_awaiting_human_merge(tmp_path: Path) -> None:

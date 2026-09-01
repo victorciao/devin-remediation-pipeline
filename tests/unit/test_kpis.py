@@ -288,8 +288,20 @@ def test_verification_pass_rate_below_floor_alerts(simulate_config: PipelineConf
         event("passed", session_id="session-passed", criterion_evidence=satisfied),
         event("failed", session_id="session-failed"),
     ]
+    candidates = [
+        codeql_candidate(
+            candidate_id="passed",
+            run_id="run-1",
+            session_id="session-passed",
+        ),
+        codeql_candidate(
+            candidate_id="failed",
+            run_id="run-1",
+            session_id="session-failed",
+        ),
+    ]
 
-    rollup = compute_kpis([], events, {}, simulate_config)
+    rollup = compute_kpis(candidates, events, {}, simulate_config)
 
     assert rollup["verification_pass_rate"] == 0.5
     assert rollup[VERIFICATION_PASS_RATE_ALERT] == 1
@@ -304,8 +316,23 @@ def test_verification_pass_rate_at_floor_does_not_alert() -> None:
         for index in range(4)
     ]
     events.append(event("failed", session_id="session-failed"))
+    candidates = [
+        codeql_candidate(
+            candidate_id=f"passed-{index}",
+            run_id="run-1",
+            session_id=f"session-passed-{index}",
+        )
+        for index in range(4)
+    ]
+    candidates.append(
+        codeql_candidate(
+            candidate_id="failed",
+            run_id="run-1",
+            session_id="session-failed",
+        )
+    )
 
-    rollup = compute_kpis([], events, {}, config)
+    rollup = compute_kpis(candidates, events, {}, config)
 
     assert rollup["verification_pass_rate"] == 0.8
     assert rollup[VERIFICATION_PASS_RATE_ALERT] == 0

@@ -48,6 +48,7 @@ def render_run_artifacts(
         state_path,
         artifact_simulated=config.mode is Mode.SIMULATE,
     )
+    report_notes = list(capability_notes)
     rendered_candidates = [
         candidate.model_copy(
             update={
@@ -56,7 +57,7 @@ def render_run_artifacts(
         )
         for candidate in candidates
     ]
-    for candidate in rendered_candidates:
+    for index, candidate in enumerate(rendered_candidates):
         try:
             store.append(candidate)
         except StatePreservationError:
@@ -67,6 +68,11 @@ def render_run_artifacts(
                 or not has_local_artifact(latest)
             ):
                 raise
+            report_notes.append(
+                f"{candidate.candidate_id}: settlement preserved: "
+                f"{latest.state.value} -> {candidate.state.value} not written"
+            )
+            rendered_candidates[index] = latest
 
     fixes = fix_outputs or {}
     pr_template = (config.templates_dir / "superset/PULL_REQUEST_TEMPLATE.md").read_text(
@@ -141,7 +147,7 @@ def render_run_artifacts(
         run_path,
         rendered_candidates,
         run_id=run_id,
-        capability_notes=capability_notes,
+        capability_notes=report_notes,
         mode=config.mode,
     )
     kpi_path = output_dir / "reports" / "kpis.md"

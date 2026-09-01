@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from pipeline.observability.results import ResultsInputError, state_path
 from pipeline.schemas import REMOVED_LEGACY_CANDIDATE_KEYS, Candidate
+from pipeline.state import settlement_violation
 
 
 def _strip_legacy_keys(payload: dict[str, Any]) -> dict[str, Any]:
@@ -49,8 +50,6 @@ def _read_candidates(path: Path, *, quarantine: Path) -> tuple[list[Candidate], 
                 seen.add(line)
                 quarantined += 1
             continue
-        if candidate.artifact_simulated:
-            continue
         rows.append(candidate)
     return rows, quarantined
 
@@ -70,6 +69,7 @@ def seed(history_dir: Path, output: Path) -> list[str]:
     run_ids: list[str] = []
     quarantined = 0
     skipped = 0
+    preserved = 0
     quarantine = output.with_name(output.name + ".corrupt")
     for run_dir in run_dirs:
         try:
@@ -81,6 +81,13 @@ def seed(history_dir: Path, output: Path) -> list[str]:
         rows, row_quarantine = _read_candidates(source, quarantine=quarantine)
         quarantined += row_quarantine
         for candidate in rows:
+            if candidate.artifact_simulated:
+                skipped += 1
+                continue
+            previous = latest.get(candidate.candidate_id)
+            if previous is not None and settlement_violation(previous, candidate) is not None:
+                preserved += 1
+                continue
             if candidate.run_id and candidate.run_id not in run_ids:
                 run_ids.append(candidate.run_id)
             latest[candidate.candidate_id] = candidate
@@ -103,20 +110,21 @@ def seed(history_dir: Path, output: Path) -> list[str]:
         if temp_path is not None and temp_path.exists():
             temp_path.unlink()
     output.with_name(output.name + ".seed.json").write_text(
-        json.dumps({"run_ids": run_ids, "seeded_rows": len(latest)}, sort_keys=True) + "\n",
+        json.dumps({"seeded_rows": len(latest)}, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     print(
         f"seeded {len(latest)} rows from {len(run_ids)} run ids into {output}"
         f" (quarantined {quarantined}, skipped {skipped})"
     )
+    print(f"preserved {preserved} settled rows")
     return run_ids
 
 
 def _seeded_rows(path: Path) -> int:
-    """Read the seeded line offset, treating absent metadata as an empty seed."""
+    """Read the seeded line offset from required metadata."""
     if not path.exists():
-        return 0
+        raise RuntimeError(f"missing seed metadata: {path}")
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise RuntimeError(f"invalid seed metadata: {path}")

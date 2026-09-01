@@ -6,26 +6,36 @@ and end-of-life deprecations—then applies the shared gate, rubric, score, dete
 dispatch, session, review, artifact, and observability contracts.
 
 The implementation repository (REPO A) is this repository. The target checkout (REPO B) is
-Apache Superset, normally `/home/ubuntu/repos/superset`, at the revision captured by
-`fixtures/baseline.json`. REPO A does not modify REPO B during a SIMULATE run.
+Apache Superset at the revision captured by `fixtures/baseline.json`. REPO A does not
+modify REPO B during a SIMULATE run.
 
 The source of truth for behavior and requirements is
 [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md). This README is an operator
 guide, not a replacement for that plan.
 
+## Prerequisites
+
+Use Python 3.11+, git, Docker with the Compose v2 plugin (`docker compose`), and a POSIX
+shell. Windows users should use WSL2: these commands use POSIX `VAR=value cmd`, `export`,
+`.venv/bin/...`, and `id -u` syntax.
+
 ## Setup
 
-Python 3.11 or newer is required. Install the package and development tools in a virtual
-environment. Editable installation is unavailable in this checkout; use `PYTHONPATH=src`
-when invoking the source tree:
+Python 3.11 may be named `python3` on some systems. Set the target checkout once, pinned to
+the `head_sha` in `fixtures/baseline.json`, then install the package and development tools:
 
 ```bash
-python3.11 -m venv .venv
+export SUPERSET_CHECKOUT="$HOME/src/superset"
+git clone https://github.com/victorciao/superset.git "$SUPERSET_CHECKOUT"
+git -C "$SUPERSET_CHECKOUT" checkout a140e74f5f54b2ada25e7558d884812facd3375d
+python3.11 -m venv .venv  # or: python3 -m venv .venv
 .venv/bin/python -m pip install '.[dev]'
 ```
 
 The package has no required network service for SIMULATE. The checked-in CodeQL fixture and
-Phase 0c baseline are used for the credential-free path.
+the fixed snapshot of the fork's CodeQL alerts, skipped tests, and EOL deprecations taken
+before any pipeline code ran ([discovery](docs/PHASE0_DISCOVERY.md)) are used for the
+credential-free path and its burn-down denominators.
 
 ## Credential-free SIMULATE
 
@@ -33,14 +43,14 @@ Every invocation defaults to SIMULATE. Run the complete local pipeline with:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m pipeline \
-  --repo-path /home/ubuntu/repos/superset \
+  --repo-path "$SUPERSET_CHECKOUT" \
   --output-dir . \
   --baseline fixtures/baseline.json \
   --alert-source sarif_file
 ```
 
-If the target checkout is absent, the entrypoint uses the baseline records for the skipped
-test and deprecation lanes and still runs from the checked-in fixtures. SIMULATE creates no
+If the target checkout is absent, the entrypoint falls back to baseline records for the
+skipped-test and deprecation lanes: the run still works, but is degraded. SIMULATE creates no
 remote writes: the GitHub transport seam rejects mutation before a transport method can be
 called. It renders the artifacts that a live run would publish. SIMULATE labels session counts
 as `(simulated)` and prefixes alert lines with `SIMULATED`; verification alerts remain visible,
@@ -59,11 +69,9 @@ configuration errors, blocking capability preconditions, or hard session/cost ce
 
 ## LIVE
 
-LIVE is deliberately guarded. A constrained LIVE run against `victorciao/superset` created
-30 tracking issues, one remediation branch, and one Devin session; it left its candidate awaiting
-human merge with a pull request and did not merge anything. Runtime credentials must be supplied through the
-environment only; they are never accepted from a configuration file, Docker build argument,
-image layer, source file, or log:
+LIVE is deliberately guarded. Runtime credentials must be supplied through the environment
+only; they are never accepted from a configuration file, Docker build argument, image layer,
+source file, or log:
 
 ```bash
 export DEVIN_API_KEY='...'
@@ -90,7 +98,7 @@ After obtaining explicit approval for a target run, provide the Devin-created br
 ```bash
 PYTHONPATH=src .venv/bin/python -m pipeline \
   --mode=live --head-branch devin/remediation \
-  --repo-path /home/ubuntu/repos/superset \
+  --repo-path "$SUPERSET_CHECKOUT" \
   --output-dir ./live-output \
   --baseline fixtures/baseline.json
 ```
@@ -99,9 +107,7 @@ The command-line entrypoint constructs guarded stdlib HTTP transports for LIVE, 
 read-only GitHub capability preflight before candidate work, and then runs Devin sessions and
 ordered GitHub publication only when the preconditions pass. A missing credential, unreadable
 capability, unavailable required service, missing `--head-branch`, or hard runtime ceiling
-causes a non-zero abort before the relevant work. The constrained run demonstrated capability
-preflight, issue and branch publication, Devin session execution, and candidate settlement;
-it did not demonstrate PR creation, merge behavior, or an independently verified remediation.
+causes a non-zero abort before the relevant work.
 
 ## Configuration reference (§13)
 
@@ -155,14 +161,14 @@ for merge.
 ## Docker and Compose smoke
 
 The image uses Python 3.11, copies only the package and `config/`, `templates/`, and
-`fixtures/`, and runs as a non-root user. The target checkout is mounted read-only at
-`/target-repo`; override `SUPERSET_CHECKOUT` when the clone is elsewhere. Bind-mounted output
-must be writable by the container user:
+`fixtures/`, and runs as a non-root user. Compose mounts `$SUPERSET_CHECKOUT` read-only at
+`/target-repo`; the container uses that mounted path for `--repo-path`. Bind-mounted
+`./docker-output` (relative to the repository root) must be writable by the container user:
 
 ```bash
 mkdir -p docker-output
 PIPELINE_UID="$(id -u)" PIPELINE_GID="$(id -g)" \
-  docker compose run --rm remediation
+  SUPERSET_CHECKOUT="$SUPERSET_CHECKOUT" docker compose run --rm remediation
 ```
 
 Compose uses `network_mode: none`, mounts `./docker-output` at `/output`, and mounts the
@@ -183,7 +189,8 @@ The output directory is the root for three observability layers:
 * `reports/issues/<candidate_id>.md` — rendered manager-facing issue body.
 * `reports/prs/<candidate_id>.md` — rendered engineer/AI-reviewer PR body for PR actions.
 
-The Phase 0c baseline is used for burn-down denominators. A lane absent from
+The fixed snapshot of the fork's CodeQL alerts, skipped tests, and EOL deprecations taken
+before any pipeline code ran is used for burn-down denominators. A lane absent from
 `baseline_valid_lanes` is represented as typed `n/a (capability_unavailable)`, never as zero.
 
 ## Verification status
@@ -217,10 +224,37 @@ performed by automation is therefore absent from the evidence on purpose.
 
 ## Automated triggers and secrets
 
-Remediation runs can start from a successful CodeQL `workflow_run` dispatch in the Superset
-fork, the weekly scheduled workflow, or a manual `workflow_dispatch` with lane, budget,
-session, and threshold inputs. The pipeline repository requires repository secrets
-`DEVIN_API_KEY` and `REMEDIATION_GITHUB_PAT` (GitHub rejects secret names prefixed
+### CodeQL repository dispatch
+
+A push or merge to the fork's `master` completes CodeQL; its workflow must send
+`codeql-scan-completed` as a `repository_dispatch` to this repository. The fork needs
+`REMEDIATION_DISPATCH_TOKEN` with repository-dispatch rights here. This repository needs
+`DEVIN_API_KEY` and `REMEDIATION_GITHUB_PAT` secrets (GitHub rejects secret names prefixed
 `GITHUB_`, so the workflow maps that secret onto the `GITHUB_PAT_REMEDIATION` environment
-variable the configuration reads); the Superset fork requires `REMEDIATION_DISPATCH_TOKEN`
-with repository-dispatch rights on the pipeline repository.
+variable the configuration reads).
+
+### Manual workflow dispatch
+
+In the Actions UI, select **Remediation**, choose **Run workflow**, and provide the optional
+inputs `only_lanes` (empty or a comma-separated list of `codeql`, `skipped_tests`, and
+`deprecations`), `budget_n` (default `1`), `max_sessions` (default `1`), `tier_high_min`
+(empty for the configured default), and `max_total_acu` (empty for the configured default).
+The equivalent command is:
+
+```bash
+gh workflow run remediation.yml --repo victorciao/devin-remediation-pipeline --ref main \
+  -f only_lanes= -f budget_n=1 -f max_sessions=1 -f tier_high_min= -f max_total_acu=
+```
+
+### Weekly schedule
+
+The workflow runs every Monday at 03:17 UTC (`17 3 * * 1`).
+
+### Local CLI
+
+For a local LIVE run, use the instructions in [LIVE](#live).
+
+Run artifacts are uploaded under `remediation-<run_id>`. A successful publication also commits
+the run directory under `history/` and refreshes `RESULTS.md`; publication failures are
+annotated without failing remediation. The `remediation-pipeline` concurrency group queues a
+new trigger while another run is active instead of racing it.

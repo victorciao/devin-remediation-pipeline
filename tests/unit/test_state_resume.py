@@ -823,4 +823,26 @@ def test_artifact_backed_settlement_is_preserved_across_arbitrary_appends(
         assert latest.issue_url == ISSUE_URL
 
 
+def test_merged_artifact_row_rejects_weaker_state_and_merge_evidence(
+    tmp_path: Path,
+) -> None:
+    """A merged row cannot regress state or verified merge evidence."""
+    store = store_for(tmp_path)
+    current = persisted(
+        CandidateState.MERGED,
+        pr_number=2,
+        pr_url=PR_URL,
+        issue_number=1,
+        issue_url=ISSUE_URL,
+        merged_at="2026-09-01T00:00:00Z",
+        merge_verified=True,
+    )
+    store.append(current)
+
+    with pytest.raises(StatePreservationError, match="attempted transition"):
+        store.append(current.model_copy(update={"state": CandidateState.TERMINAL}))
+    with pytest.raises(StatePreservationError, match="merge_verified"):
+        store.append(current.model_copy(update={"merge_verified": False}))
+
+
 # -- durable identity ----------------------------------------------------------------------

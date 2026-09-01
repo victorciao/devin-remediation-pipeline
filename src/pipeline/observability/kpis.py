@@ -108,12 +108,17 @@ def compute_kpis(
             issue_ids.add(event.candidate_id)
     dispatched_pr = len(pr_ids)
     dispatched_issue = len(issue_ids)
+    event_run_ids = {event.run_id for event in events}
+    current_run_candidate_ids = {
+        candidate.candidate_id for candidate in candidates if candidate.run_id in event_run_ids
+    }
     session_ids = {
         candidate_id
         for candidate_id, rows in by_candidate.items()
-        if any(event.session_id is not None for event in rows)
+        if candidate_id in current_run_candidate_ids
+        and any(event.session_id is not None for event in rows)
     }
-    dispatched_ids = _dispatched_candidate_ids(candidates, session_ids, events)
+    dispatched_ids = _dispatched_candidate_ids(candidates, events)
     verification_passes = sum(
         any(
             event.criterion_evidence is not None and event.criterion_evidence.satisfied is True
@@ -287,7 +292,6 @@ def _latest_pr_events(events: list[EventRecord]) -> list[EventRecord]:
 
 def _dispatched_candidate_ids(
     candidates: list[Candidate],
-    session_ids: set[str],
     events: list[EventRecord],
 ) -> set[str]:
     """Return candidates dispatched in the runs represented by the events."""
@@ -295,8 +299,9 @@ def _dispatched_candidate_ids(
     return {
         candidate.candidate_id
         for candidate in candidates
-        if candidate.head_branch is not None and candidate.run_id in event_run_ids
-    } | session_ids
+        if candidate.run_id in event_run_ids
+        and (candidate.head_branch is not None or candidate.session_id is not None)
+    }
 
 
 def _verification_pass_rate_by_lane(

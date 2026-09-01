@@ -211,22 +211,14 @@ class CandidateRunner:
             if self._settled(opened):
                 return opened
             return self._settle_merge(opened)
-        except StatePreservationError as exc:
+        except StatePreservationError:
             latest = self.state_store.resume(candidate.candidate_id)
-            preserves_settlement = (
-                latest is not None and latest.state in SETTLED_STATES and has_local_artifact(latest)
-            )
-            if preserves_settlement:
+            if latest is not None and latest.state in SETTLED_STATES and has_local_artifact(latest):
                 self.notes.append(
-                    f"{candidate.candidate_id}: settled state preserved; write deferred"
+                    f"{candidate.candidate_id}: settlement preserved: "
+                    f"{latest.state.value} -> {candidate.state.value} not written"
                 )
-                return candidate.model_copy(
-                    update={
-                        "state": CandidateState.DEFERRED,
-                        "reason": ReasonCode.CAPABILITY_UNAVAILABLE,
-                        "reason_detail": str(exc),
-                    }
-                )
+                return latest
             raise
         except (
             ArtifactUnavailableError,
@@ -308,6 +300,12 @@ class CandidateRunner:
                     reason=ReasonCode.CLOSED_PULL_REQUEST,
                     **observed_update,
                 )
+        if (
+            persisted is not None
+            and persisted.state is CandidateState.MERGED
+            and persisted.merged_at
+        ):
+            return persisted
         if persisted is not None and persisted.merged_at is not None:
             return self._persist(candidate, state=CandidateState.MERGED, **update)
         reconciled = candidate.model_copy(update=update)

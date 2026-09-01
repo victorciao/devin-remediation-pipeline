@@ -147,6 +147,26 @@ def has_local_artifact(candidate: Candidate | None) -> bool:
     )
 
 
+def settlement_violation(previous: Candidate, candidate: Candidate) -> str | None:
+    """Return a reason when a candidate row would weaken durable settlement."""
+    previous_row = previous.model_dump(mode="json")
+    current_row = candidate.model_dump(mode="json")
+    for field in DURABLE_IDENTITY_FIELDS:
+        if previous_row.get(field) is not None and current_row.get(field) is None:
+            return f"state append discarded persisted {field}"
+    if previous.merge_verified and not candidate.merge_verified:
+        return "state append discarded persisted merge_verified"
+    if previous.state in SETTLED_STATES and has_local_artifact(previous):
+        if candidate.state not in SETTLED_STATES or (
+            previous.state is CandidateState.MERGED and candidate.state is not CandidateState.MERGED
+        ):
+            return (
+                f"state append attempted transition "
+                f"{previous.state.value} -> {candidate.state.value}"
+            )
+    return None
+
+
 def decide_resume(
     persisted: Candidate | None,
     *,
@@ -386,20 +406,9 @@ class CandidateStateStore:
             candidate = candidate.model_copy(update={"artifact_simulated": True})
         latest = self.latest().get(candidate.candidate_id)
         if latest is not None:
-            previous_row = latest.model_dump(mode="json")
-            current_row = candidate.model_dump(mode="json")
-            for field in DURABLE_IDENTITY_FIELDS:
-                if previous_row.get(field) is not None and current_row.get(field) is None:
-                    raise StatePreservationError(f"state append discarded persisted {field}")
-            if latest.state in SETTLED_STATES and has_local_artifact(latest):
-                if candidate.state not in SETTLED_STATES or (
-                    latest.state is CandidateState.MERGED
-                    and candidate.state is not CandidateState.MERGED
-                ):
-                    raise StatePreservationError(
-                        f"state append attempted transition "
-                        f"{latest.state.value} -> {candidate.state.value}"
-                    )
+            violation = settlement_violation(latest, candidate)
+            if violation is not None:
+                raise StatePreservationError(violation)
         if latest is not None and latest.model_dump(mode="json") == candidate.model_dump(
             mode="json"
         ):
@@ -461,6 +470,7 @@ __all__ = [
     "CandidateStateStore",
     "DURABLE_IDENTITY_FIELDS",
     "SETTLED_STATES",
+    "settlement_violation",
     "ResumeAction",
     "ResumeDecision",
     "StatePreservationError",
