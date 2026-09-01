@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from pipeline.observability.results import state_path
 from pipeline.schemas import REMOVED_LEGACY_CANDIDATE_KEYS, Candidate
@@ -18,7 +18,7 @@ def _strip_legacy_keys(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _write_candidate(handle: Any, candidate: Candidate) -> None:  # noqa: ANN401
+def _write_candidate(handle: TextIO, candidate: Candidate) -> None:
     """Write one state row using the state store's canonical serialization."""
     handle.write(json.dumps(candidate.model_dump(mode="json"), sort_keys=True) + "\n")
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from pydantic import SecretStr
@@ -9,7 +10,7 @@ from pydantic import SecretStr
 from pipeline.__main__ import CandidateRunner, LiveTarget
 from pipeline.config import Mode, PipelineConfig
 from pipeline.github_client import GitHubClient
-from pipeline.schemas import Action, Candidate, CandidateState, ReasonCode, RetryDecision
+from pipeline.schemas import Action, Candidate, CandidateState, ReasonCode, RetryDecision, Tier
 from pipeline.session_client import (
     FixOutput,
     SessionAttempt,
@@ -19,7 +20,7 @@ from pipeline.session_client import (
     SessionInfeasibleError,
     SessionOutputError,
 )
-from pipeline.state import CandidateStateStore
+from pipeline.state import CandidateStateStore, MarkerArtifact
 from pipeline.verify import Observers
 from tests.factories import codeql_candidate
 from tests.fakes import BASE_SHA, HEAD_SHA, FakeGitHubTransport
@@ -29,13 +30,14 @@ def _runner(
     tmp_path: Path,
     transport: FakeGitHubTransport,
     orchestrator: object,
+    marker_search: Callable[[str], MarkerArtifact | None] | None = None,
 ) -> tuple[CandidateRunner, CandidateStateStore]:
     config = PipelineConfig(
         mode=Mode.LIVE,
         github_token=SecretStr("placeholder-token"),
         devin_api_key=SecretStr("placeholder-key"),
     )
-    store = CandidateStateStore(tmp_path / "candidates.jsonl")
+    store = CandidateStateStore(tmp_path / "candidates.jsonl", marker_search=marker_search)
     runner = CandidateRunner(
         config=config,
         run_id="run",
@@ -203,6 +205,24 @@ class NoSessionOrchestrator:
         raise AssertionError("settled candidate was redispatched")
 
 
+class SessionCallbackThenBlockedOrchestrator:
+    """Record session creation before returning a terminal session failure."""
+
+    def run_candidate(self, _candidate: object, _prompt: str, **kwargs: object) -> object:
+        callback = kwargs["session_created"]
+        assert callable(callback)
+        callback(
+            SessionAttempt(
+                "codeql-0",
+                1,
+                "created-session",
+                True,
+                RetryDecision.PROCEED,
+            )
+        )
+        raise SessionBlockedError("session blocked")
+
+
 def _persisted_awaiting(
     runner: CandidateRunner,
     candidate: Candidate,
@@ -237,6 +257,41 @@ def test_persisted_awaiting_human_merge_is_not_redispatched(tmp_path: Path) -> N
 
     assert result.state is CandidateState.AWAITING_HUMAN_MERGE
     assert transport.writes == []
+
+
+def test_persisted_budget_overflow_deferred_candidate_is_reprocessed(tmp_path: Path) -> None:
+    """A deferred candidate resumes publication and dispatches a new session."""
+    transport = FakeGitHubTransport()
+    runner, store = _runner(
+        tmp_path,
+        transport,
+        SessionCallbackThenBlockedOrchestrator(),
+        marker_search=lambda _marker: None,
+    )
+    candidate = codeql_candidate(
+        action=Action.OPEN_PR,
+        state=CandidateState.SCORED,
+        tier=Tier.HIGH,
+        score=80.0,
+        risk=3,
+        gate_passed=True,
+    )
+    store.append(
+        candidate.model_copy(
+            update={
+                "state": CandidateState.DEFERRED,
+                "reason": ReasonCode.BUDGET_OVERFLOW,
+            }
+        )
+    )
+
+    result = runner.process(candidate)
+
+    assert result.state is CandidateState.TERMINAL
+    assert result.reason is ReasonCode.SESSION_BLOCKED
+    assert result.session_id == "created-session"
+    assert any(path.endswith("/issues") for path in transport.write_paths)
+    assert any(path.endswith("/git/refs") for path in transport.write_paths)
 
 
 def test_reconcile_observes_human_merged_pr(tmp_path: Path) -> None:

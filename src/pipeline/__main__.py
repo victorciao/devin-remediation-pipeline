@@ -288,25 +288,20 @@ class CandidateRunner:
                 )
         if persisted is not None and persisted.merged_at is not None:
             return self._persist(candidate, state=CandidateState.MERGED, **update)
-        reconciled = candidate.model_copy(
-            update={
-                **update,
-                "state": persisted.state if persisted is not None else candidate.state,
-                "reason": persisted.reason if persisted is not None else candidate.reason,
-                "reason_detail": (
-                    persisted.reason_detail if persisted is not None else candidate.reason_detail
-                ),
-                "merge_verified": (
-                    persisted.merge_verified if persisted is not None else candidate.merge_verified
-                ),
-            }
-        )
+        reconciled = candidate.model_copy(update=update)
         if (
             persisted is not None
             and self.state_store.resume_decision(candidate.candidate_id).action is ResumeAction.SKIP
         ):
             self.notes.append(f"{candidate.candidate_id}: already settled in a previous run")
-            return reconciled
+            return reconciled.model_copy(
+                update={
+                    "state": persisted.state,
+                    "reason": persisted.reason,
+                    "reason_detail": persisted.reason_detail,
+                    "merge_verified": persisted.merge_verified,
+                }
+            )
         defer_reason = _MARKER_DEFER_REASONS.get(outcome)
         if defer_reason is not None:
             return self._deferred(candidate, defer_reason, outcome.value)
@@ -1172,7 +1167,10 @@ def run_once(
     )
     if config.mode is Mode.SIMULATE:
         candidates = [
+            # Normalize unconfigured markers for candidates bypassing _reconcile.
             candidate.model_copy(update={"marker_search_outcome": MarkerSearchOutcome.ABSENT.value})
+            if candidate.marker_search_outcome == MarkerSearchOutcome.UNCONFIGURED.value
+            else candidate
             for candidate in candidates
         ]
     dispatched = _select(candidates, config)
