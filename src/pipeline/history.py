@@ -27,11 +27,10 @@ def _write_candidate(handle: TextIO, candidate: Candidate) -> None:
     handle.write(json.dumps(candidate.model_dump(mode="json"), sort_keys=True) + "\n")
 
 
-def _read_candidates(path: Path) -> tuple[list[Candidate], int]:
-    """Read historical rows and quarantine malformed lines beside their source."""
+def _read_candidates(path: Path, *, quarantine: Path) -> tuple[list[Candidate], int]:
+    """Read historical rows and quarantine malformed lines beside the seed output."""
     rows: list[Candidate] = []
     quarantined = 0
-    quarantine = path.with_suffix(path.suffix + ".corrupt")
     seen = (
         set(quarantine.read_text(encoding="utf-8").splitlines()) if quarantine.exists() else set()
     )
@@ -71,6 +70,7 @@ def seed(history_dir: Path, output: Path) -> list[str]:
     run_ids: list[str] = []
     quarantined = 0
     skipped = 0
+    quarantine = output.with_name(output.name + ".corrupt")
     for run_dir in run_dirs:
         try:
             source = state_path(run_dir)
@@ -78,7 +78,7 @@ def seed(history_dir: Path, output: Path) -> list[str]:
             print(f"warning: skipping {run_dir}: {exc}")
             skipped += 1
             continue
-        rows, row_quarantine = _read_candidates(source)
+        rows, row_quarantine = _read_candidates(source, quarantine=quarantine)
         quarantined += row_quarantine
         for candidate in rows:
             if candidate.run_id and candidate.run_id not in run_ids:

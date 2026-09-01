@@ -27,14 +27,17 @@ from pipeline.http_transport import HttpTransportError
 from pipeline.lanes.codeql import read_alert_fixture
 from pipeline.observability.events import EventLog
 from pipeline.schemas import (
+    Action,
     CandidateState,
     EventRecord,
     Lane,
     ReasonCode,
     RunEventRecord,
+    Tier,
 )
-from pipeline.state import MarkerSearchOutcome
+from pipeline.state import CandidateStateStore, MarkerSearchOutcome
 from tests.conftest import FIXTURES_DIR, RUBRICS_PATH, TARGET_CHECKOUT, TEMPLATES_DIR
+from tests.factories import lane3_candidate
 from tests.fakes import FakeGitHubTransport, WriteRecord
 
 MARKER_SEARCH_FAILED = "marker_search_failed"
@@ -378,6 +381,64 @@ def test_simulated_rows_are_invisible_to_a_live_run(tmp_path: Path) -> None:
     assert all(row["artifact_simulated"] is True for row in simulated)
     assert read_rows(output_dir / "state" / SIMULATE_STATE_FILE) == simulated
     assert all(row["artifact_simulated"] is False for row in live_rows)
+
+
+def test_settled_skip_is_excluded_from_run_verification_denominator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prior settled PR does not count as a dispatch in this run's KPI denominator."""
+    output_dir = tmp_path / "out"
+    settled = lane3_candidate(
+        candidate_id="settled",
+        run_id="previous-run",
+        state=CandidateState.AWAITING_HUMAN_MERGE,
+        action=Action.OPEN_PR,
+        tier=Tier.HIGH,
+        score=100.0,
+        risk=3,
+        issue_number=1,
+        issue_url="https://github.test/issues/1",
+        pr_number=2,
+        pr_url="https://github.test/pull/2",
+        head_branch="devin/remediation/settled",
+    )
+    state_path = output_dir / "state" / SIMULATE_STATE_FILE
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(settled.model_dump(mode="json")) + "\n",
+        encoding="utf-8",
+    )
+    dispatched = lane3_candidate(candidate_id="fresh")
+    monkeypatch.setattr(
+        entrypoint,
+        "_enumerate",
+        lambda **_kwargs: [dispatched, settled],
+    )
+    state_store_type = CandidateStateStore
+
+    def configured_state_store(path: Path, **kwargs: Any) -> Any:  # noqa: ANN401
+        """Give this seam test an explicit empty marker index in SIMULATE."""
+        kwargs.pop("marker_search", None)
+        return state_store_type(
+            path,
+            marker_search=lambda _marker: None,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(entrypoint, "CandidateStateStore", configured_state_store)
+
+    entrypoint.run_once(
+        config=config_for(Mode.SIMULATE, budget_N=2),
+        repo_path=tmp_path / "nonexistent-target",
+        output_dir=output_dir,
+        baseline_path=baseline_file(tmp_path),
+        base_sha="1" * 40,
+    )
+
+    report = (output_dir / "reports" / "kpis.md").read_text(encoding="utf-8")
+    assert "**Verification Pass Rate:** 1.0" in report
+    assert "Verification Pass Rate Alert" not in report
 
 
 def test_an_unconfigured_marker_search_completes_normally(tmp_path: Path) -> None:

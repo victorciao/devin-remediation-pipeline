@@ -107,7 +107,8 @@ def test_seed_skips_simulated_rows_and_quarantines_malformed_rows(tmp_path: Path
     output = tmp_path / "state.jsonl"
     assert seed(history_dir, output) == []
     assert output.read_text() == ""
-    assert (state.with_suffix(state.suffix + ".corrupt")).read_text() == "{bad json\n"
+    assert output.with_name(output.name + ".corrupt").read_text() == "{bad json\n"
+    assert not state.with_suffix(state.suffix + ".corrupt").exists()
 
 
 def test_export_rejects_state_shorter_than_seeded_prefix(tmp_path: Path) -> None:

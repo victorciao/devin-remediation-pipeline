@@ -52,7 +52,6 @@ def render_run_artifacts(
         candidate.model_copy(
             update={
                 "artifact_simulated": config.mode is Mode.SIMULATE,
-                "run_id": run_id,
             }
         )
         for candidate in candidates
