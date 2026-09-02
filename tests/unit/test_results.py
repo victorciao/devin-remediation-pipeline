@@ -370,7 +370,8 @@ def test_closed_pull_request_settlement_replaces_pending_row() -> None:
 
     assert candidates == [closed]
     assert "| terminal | closed_pull_request |" in report
-    assert "**Awaiting Merge:** 0" in report
+    assert "**Reached Manual Merge Gate (cumulative):** 0" in report
+    assert "**Awaiting Merge Now:** 0" in report
 
 
 @pytest.mark.parametrize("first_state", ["merged", "closed"])

@@ -22,6 +22,20 @@ class NotApplicable:
 KpiValue: TypeAlias = float | int | None | NotApplicable | dict[str, int] | dict[str, float]
 
 
+def kpi_label(name: str) -> str:
+    """Return the display label for a KPI key."""
+    label = name.replace("_", " ").title()
+    if name == "dispatched_pr":
+        return "Problems With Pull Request"
+    if name == "pull_requests_opened":
+        return "Pull Requests Opened"
+    if name == "manual_merge_pending":
+        return "Reached Manual Merge Gate (cumulative)"
+    if name == "awaiting_merge":
+        return "Awaiting Merge Now"
+    return label
+
+
 def compute_kpis(
     candidates: list[Candidate],
     events: list[EventRecord],
@@ -391,15 +405,7 @@ def render_kpi_report(
             "verification_pass_rate_by_lane",
         }:
             continue
-        label = name.replace("_", " ").title()
-        if name == "dispatched_pr":
-            label = "Problems With Pull Request"
-        elif name == "pull_requests_opened":
-            label = "Pull Requests Opened"
-        elif name == "manual_merge_pending":
-            label = "Reached Manual Merge Gate (cumulative)"
-        elif name == "awaiting_merge":
-            label = "Awaiting Merge Now"
+        label = kpi_label(name)
         if config.mode is Mode.SIMULATE and name in {
             "sessions_created",
             "sessions_per_candidate",
@@ -460,6 +466,7 @@ def write_kpi_report(
 __all__ = [
     "NotApplicable",
     "compute_kpis",
+    "kpi_label",
     "render_kpi_report",
     "write_kpi_report",
 ]

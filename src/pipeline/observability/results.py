@@ -13,6 +13,7 @@ from pipeline.observability.kpis import (
     KpiValue,
     NotApplicable,
     compute_kpis,
+    kpi_label,
 )
 from pipeline.observability.scope import written_by_run
 from pipeline.schemas import (
@@ -357,11 +358,7 @@ def render_results(
     for name, value in metrics.items():
         if name in _KPI_SECTION_KEYS:
             continue
-        label = name.replace("_", " ").title()
-        if name == "dispatched_pr":
-            label = "Problems With Pull Request"
-        elif name == "pull_requests_opened":
-            label = "Pull Requests Opened"
+        label = kpi_label(name)
         lines.append(f"- **{label}:** {_kpi_cell(value)}")
     lines.extend(["", "## Deferred by reason", ""])
     deferred = metrics["deferred_by_reason"]
