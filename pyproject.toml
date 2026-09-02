@@ -49,14 +49,7 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 
 [tool.coverage.run]
-include = [
-  "src/pipeline/gate.py",
-  "src/pipeline/score.py",
-  "src/pipeline/dispatch.py",
-  "src/pipeline/dedupe.py",
-  "src/pipeline/templates/render.py",
-  "src/pipeline/observability/kpis.py",
-]
+source = ["src/pipeline"]
 
 [tool.coverage.report]
 fail_under = 80

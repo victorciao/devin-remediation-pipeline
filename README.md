@@ -223,8 +223,6 @@ computed outputs and cannot be set.
 | `merge_rate_floor` | Sets the merge-rate KPI alert floor | `0.50` | `0.0..1.0` | Alerts when observed merge rate falls below the floor |
 | `verification_pass_rate_floor` | Sets the verification pass-rate KPI alert floor | `0.80` | `0.0..1.0` | Alerts when observed pass rate falls below the floor |
 | `session_failure_ceiling` | Sets the session-failure KPI alert ceiling | `0.30` | `0.0..1.0` | Alerts when observed failure rate exceeds the ceiling |
-| `verification_pass_rate_alert` | Reports the derived verification-rate status | derived | `0` or `1` | `1` when pass rate is below its configured floor; otherwise `0` |
-| `publication_safety_alert` | Reports the derived publication-safety status | derived | `0` or `1` | `1` when publication safety is undetermined; otherwise `0` |
 | `max_sessions` | Sets the per-run Devin session limit | `8` | `>=1` | The run aborts if the ceiling is exceeded |
 | `session_timeout_s` | Sets the maximum duration of one Devin session | `5400.0` | `>0` | A timed-out session is recorded as a failure |
 | `max_total_acu` | Sets the per-run Devin ACU limit | `500.0` | `>0` | The run aborts if cumulative ACU exceeds the ceiling |
@@ -233,6 +231,9 @@ computed outputs and cannot be set.
 | `alert_analysis_wait_s` | Sets how long to wait for CodeQL analysis | `2700.0` | `>0` | Expiry leaves alert evidence unavailable |
 | `ci_evidence_mode` | Selects local or Actions criterion evidence | `local` | `actions`, `local` | — |
 | `suite_check_context` | Names the suite check used for evidence | `unit-tests-required` | Non-empty string | — |
+| `pytest_command` | Sets the local candidate verification command | `python -m pytest -q --tb=no -rA` | Command words | — |
+| `local_item_scope` | Selects the local test paths for candidate verification | `tests/unit_tests/` | Paths | — |
+| `integration_suite_check_context` | Names the integration suite check used for evidence | `test-postgres-required` | Non-empty string | — |
 | `ci_wait_timeout_s` | Sets how long to wait for GitHub evidence | `5400` | `>0` | Expiry leaves CI evidence unavailable |
 | `required_contexts_min` | Lists the required completed contexts | `pre-commit (current)` | Non-empty context names | LIVE stops if the list is empty or required contexts do not pass |
 | `only_lanes` | Restricts high-tier dispatch to selected lanes | `()` | Comma-separated `codeql`, `skipped_tests`, `deprecations` | Only selected high-tier lanes can dispatch; other lanes remain reported |
@@ -245,6 +246,9 @@ computed outputs and cannot be set.
 | `rubrics_path` | Locates observable rubric tables | `config/rubrics.yaml` | Path | — |
 | `templates_dir` | Locates vendored issue and PR templates | `templates` | Path | — |
 | `session_snapshot_id` | Selects the Devin target-repository snapshot | unset | Optional string | — |
+
+Derived outputs, which cannot be set, include `verification_pass_rate_alert` and
+`publication_safety_alert`.
 
 `only_lanes` accepts a comma-separated lane list from `--only-lanes=...` or
 `PIPELINE_ONLY_LANES`; it restricts high-tier dispatch eligibility, while other lanes remain
@@ -259,6 +263,9 @@ After a run, look in the output directory for:
 
 * `state/candidates.jsonl` — append-only state; the newest row for a problem is its current state,
   and this lets a re-run resume instead of duplicating work.
+* `state/candidates-live.jsonl` — the corresponding append-only state file for LIVE runs. Its
+  sidecars are `state/candidates-live.jsonl.seed.json` (history seed metadata) and
+  `state/candidates-live.jsonl.corrupt` (quarantined malformed rows).
 * `reports/events.jsonl` — the per-step audit trail, including session IDs and final outcomes.
 * `reports/run-<run_id>.md` — an account of every problem the run saw and why it was or was not
   acted on, with artifact links.

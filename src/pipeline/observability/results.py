@@ -230,12 +230,28 @@ def render_results(
         ]
     )
     earlier_candidate_ids: set[str] = set()
+    earlier_issue_urls: set[str] = set()
+    earlier_pr_urls: set[str] = set()
     for run in runs:
-        run_candidates = list(run.candidates)
+        run_candidates = [
+            candidate for candidate in run.candidates if candidate.superseded_by is None
+        ]
         run_events = list(run.events)
         run_metrics = compute_kpis(run_candidates, run_events, config)
         run_candidate_ids = {candidate.candidate_id for candidate in run_candidates}
         first_seen = len(run_candidate_ids - earlier_candidate_ids)
+        run_issue_urls = {
+            candidate.issue_url
+            for candidate in run_candidates
+            if candidate.issue_url is not None
+            and candidate.state is not CandidateState.DEFERRED
+            and not candidate.issue_adopted
+        }
+        run_pr_urls = {
+            candidate.pr_url
+            for candidate in run_candidates
+            if candidate.pr_url is not None and candidate.state is not CandidateState.DEFERRED
+        }
         criterion_ids = {
             event.candidate_id
             for event in run_events
@@ -260,9 +276,9 @@ def render_results(
                     f"`{run.run_dir.name}`",
                     str(len(run_candidates)),
                     str(first_seen),
-                    _kpi_cell(run_metrics["issues_created"]),
+                    str(len(run_issue_urls - earlier_issue_urls)),
                     _kpi_cell(run_metrics["sessions_created"]),
-                    _kpi_cell(run_metrics["pull_requests_opened"]),
+                    str(len(run_pr_urls - earlier_pr_urls)),
                     _cell(len(criterion_ids) if criterion_evidence_available else None),
                     _cell(session_failures if run_events else None),
                 )
@@ -270,6 +286,8 @@ def render_results(
             + " |"
         )
         earlier_candidate_ids.update(run_candidate_ids)
+        earlier_issue_urls.update(run_issue_urls)
+        earlier_pr_urls.update(run_pr_urls)
     if not runs:
         lines.append("| _no run directory was supplied_ | | | | | | | |")
     lines.extend(

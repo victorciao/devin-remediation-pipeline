@@ -126,7 +126,7 @@ def seed(history_dir: Path, output: Path) -> list[str]:
 def _seeded_rows(path: Path) -> int:
     """Read the seeded line offset from required metadata."""
     if not path.exists():
-        raise RuntimeError(f"missing seed metadata: {path}")
+        return 0
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise RuntimeError(f"invalid seed metadata: {path}")

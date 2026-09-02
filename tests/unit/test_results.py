@@ -163,6 +163,44 @@ def test_per_run_missing_evidence_renders_na_instead_of_zero() -> None:
     assert "| `20260101T000000Z-missing` | 1 | 1 | 0 | 0 | 0 | n/a | n/a |" in report
 
 
+def test_per_run_artifact_counts_are_differenced_by_url() -> None:
+    first_candidate = codeql_candidate(
+        candidate_id="first",
+        state=CandidateState.ISSUE_CREATED,
+        issue_url="https://github.test/issues/1",
+        pr_url="https://github.test/pulls/1",
+    )
+    later_candidate = first_candidate.model_copy(update={"state": CandidateState.PR_CREATED})
+    first = RunArtifacts(
+        Path("/runs/20260101T000000Z-first"), Path("first"), (first_candidate,), ()
+    )
+    later = RunArtifacts(
+        Path("/runs/20260102T000000Z-later"), Path("later"), (later_candidate,), ()
+    )
+
+    report = render_results((first, later), PipelineConfig())
+    rows = [line for line in report.splitlines() if line.startswith("| `2026010")]
+
+    assert "| `20260101T000000Z-first` | 1 | 1 | 1 | 0 | 1 |" in rows[0]
+    assert "| `20260102T000000Z-later` | 1 | 0 | 0 | 0 | 0 |" in rows[1]
+
+
+def test_per_run_problems_excludes_superseded_rows() -> None:
+    superseded = codeql_candidate(
+        candidate_id="old",
+        superseded_by="new",
+        issue_url="https://github.test/issues/old",
+    )
+    current = codeql_candidate(candidate_id="new", supersedes="old")
+    run = RunArtifacts(
+        Path("/runs/20260101T000000Z-superseded"), Path("state"), (superseded, current), ()
+    )
+
+    report = render_results((run,), PipelineConfig())
+
+    assert "| `20260101T000000Z-superseded` | 1 | 1 |" in report
+
+
 def test_lifecycle_progress_ranks_every_candidate_state() -> None:
     assert set(LIFECYCLE_PROGRESS) == set(CandidateState)
     assert LIFECYCLE_PROGRESS[CandidateState.ENUMERATED] < LIFECYCLE_PROGRESS[CandidateState.GATED]

@@ -44,6 +44,7 @@ def render_run_artifacts(
     token_login: str | None = None,
     token_scopes: Sequence[str] = (),
     run_events: Sequence[RunEventRecord] = (),
+    reobserved_candidates: Sequence[Candidate] = (),
 ) -> RenderedRun:
     """Render a complete run without invoking a remote write transport."""
     state_path = (
@@ -60,6 +61,7 @@ def render_run_artifacts(
     rendered_candidates = [
         candidate.model_copy(
             update={
+                "run_id": candidate.run_id if candidate.run_id is not None else run_id,
                 "artifact_simulated": config.mode is Mode.SIMULATE,
             }
         )
@@ -82,6 +84,7 @@ def render_run_artifacts(
             )
             rendered_candidates[index] = latest
 
+    observed_candidates = [*rendered_candidates, *reobserved_candidates]
     fixes = fix_outputs or {}
     pr_template = (config.templates_dir / "superset/PULL_REQUEST_TEMPLATE.md").read_text(
         encoding="utf-8"
@@ -144,7 +147,7 @@ def render_run_artifacts(
     event_log = EventLog(events_path)
     append_candidate_events(
         event_log,
-        rendered_candidates,
+        observed_candidates,
         run_id=run_id,
         token_login=token_login,
         token_scopes=token_scopes,
@@ -157,9 +160,10 @@ def render_run_artifacts(
         run_id=run_id,
         capability_notes=report_notes,
         mode=config.mode,
+        reobserved_candidates=reobserved_candidates,
     )
     kpi_path = output_dir / "reports" / "kpis.md"
-    write_kpi_report(kpi_path, list(rendered_candidates), event_log.read(), config)
+    write_kpi_report(kpi_path, observed_candidates, event_log.read(), config)
     produced.extend((run_path, kpi_path))
     return RenderedRun(
         produced=tuple(produced),

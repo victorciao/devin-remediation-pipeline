@@ -121,12 +121,14 @@ def config_for(mode: Mode, **fields: Any) -> PipelineConfig:  # noqa: ANN401
     )
 
 
-def persisted_awaiting(output_dir: Path) -> Candidate:
+def persisted_awaiting(
+    output_dir: Path, state: CandidateState = CandidateState.AWAITING_HUMAN_MERGE
+) -> Candidate:
     """Persist one settled PR row that a later run can re-observe."""
     candidate = lane3_candidate(
         candidate_id="persisted-awaiting",
         run_id="previous-run",
-        state=CandidateState.AWAITING_HUMAN_MERGE,
+        state=state,
         action=Action.OPEN_PR,
         reason=ReasonCode.MANUAL_MERGE_REQUIRED,
         issue_number=1,
@@ -185,6 +187,10 @@ def test_merge_sweep_reobserves_an_unenumerated_merged_pr(
     assert "**Merge Rate:** 1.0" in report
     run_report = next((output_dir / "reports").glob("run-*.md")).read_text(encoding="utf-8")
     assert "merge re-observed externally" in run_report
+    assert "- Merges re-observed: 1" in run_report
+    assert "- Candidates seen: 0" in run_report
+    assert latest["run_id"] == persisted.run_id
+    assert "**Verification Pass Rate:** n/a" in report
 
 
 def test_merge_sweep_records_an_unenumerated_closed_pr_as_terminal(

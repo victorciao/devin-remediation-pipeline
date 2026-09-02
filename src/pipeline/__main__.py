@@ -259,6 +259,7 @@ class CandidateRunner:
             )
             return self._persist(
                 candidate,
+                run_id=candidate.run_id,
                 state=CandidateState.MERGED,
                 pr_number=match.number,
                 pr_url=match.url,
@@ -268,6 +269,7 @@ class CandidateRunner:
         if match is not None and match.state == "closed":
             return self._persist(
                 candidate,
+                run_id=candidate.run_id,
                 state=CandidateState.TERMINAL,
                 reason=ReasonCode.CLOSED_PULL_REQUEST,
                 pr_number=match.number,
@@ -1078,21 +1080,20 @@ def _normalize(
     prior_rows = state_store.latest()
     normalized: list[Candidate] = []
     for candidate in candidates:
+        current = (
+            candidate.model_copy(update={"run_id": run_id}) if run_id is not None else candidate
+        )
         prior = prior_rows.get(candidate.candidate_id)
         if prior is not None:
             normalized.append(
-                prior if prior.pr_url is not None or prior.issue_url is not None else candidate
+                prior if prior.pr_url is not None or prior.issue_url is not None else current
             )
             continue
-        if run_id is not None:
-            current = candidate.model_copy(update={"run_id": run_id})
-        else:
-            current = candidate
         if candidate.lane is Lane.CODEQL:
             drifted = state_store.drift_match(candidate, current_scan=candidates)
             if drifted is not None and drifted.superseded_by is None:
-                state_store.supersede(drifted, candidate)
-                current = candidate.model_copy(
+                state_store.supersede(drifted, current)
+                current = current.model_copy(
                     update={
                         "state": drifted.state,
                         "issue_number": drifted.issue_number,
@@ -1292,6 +1293,7 @@ def run_once(
         ci_mode=config.ci_evidence_mode,
     )
     settled = [runner.process(candidate) for candidate in dispatched]
+    reobserved_merges: list[Candidate] = []
     if live is not None:
         processed_ids = {candidate.candidate_id for candidate in settled}
         for candidate in state_store.latest().values():
@@ -1302,7 +1304,7 @@ def run_once(
             ):
                 observed = runner.reobserve_merge(candidate)
                 if observed is not None:
-                    settled.append(observed)
+                    reobserved_merges.append(observed)
 
     notes.extend(_capability_notes(baseline, target_exists=target_exists, config=config))
     if state_store.quarantined_rows:
@@ -1333,6 +1335,7 @@ def run_once(
         config=config,
         fix_outputs=runner.fix_outputs,
         capability_notes=notes,
+        reobserved_candidates=reobserved_merges,
         token_login=preflight.token_login if preflight is not None else None,
         token_scopes=preflight.token_scopes if preflight is not None else (),
         run_events=run_events,

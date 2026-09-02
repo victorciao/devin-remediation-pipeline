@@ -215,12 +215,21 @@ def test_seed_export_reseed_round_trip_preserves_live_identity(tmp_path: Path) -
     assert preserved["pr_url"] == "https://github.test/pull/2"
 
 
-def test_export_rejects_missing_seed_metadata(tmp_path: Path) -> None:
-    """A missing seed sidecar is corruption rather than an empty seed."""
+def test_export_treats_missing_seed_metadata_as_empty_seed(tmp_path: Path) -> None:
+    """A first hosted export has no seed sidecar and exports every state row."""
     current = codeql_candidate(candidate_id="current", run_id="run-current").model_dump(mode="json")
     state = tmp_path / "state.jsonl"
     state.write_text(json.dumps(current) + "\n", encoding="utf-8")
 
     output = tmp_path / "export.jsonl"
-    with pytest.raises(RuntimeError, match="missing seed metadata"):
-        export_rows(state, tmp_path / "missing.seed.json", output)
+    assert export_rows(state, tmp_path / "missing.seed.json", output) == 0
+    assert output.read_text(encoding="utf-8").strip() == json.dumps(current, sort_keys=True)
+
+
+def test_export_rejects_malformed_seed_metadata(tmp_path: Path) -> None:
+    """Malformed seed metadata remains an explicit history error."""
+    metadata = tmp_path / "seed.json"
+    metadata.write_text("not json", encoding="utf-8")
+
+    with pytest.raises(json.JSONDecodeError):
+        export_rows(tmp_path / "state.jsonl", metadata, tmp_path / "export.jsonl")

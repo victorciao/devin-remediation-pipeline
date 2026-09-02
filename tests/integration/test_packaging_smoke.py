@@ -2,7 +2,7 @@
 
 The container is never started here (a test suite must stay network- and daemon-free), so the
 smoke is the static contract: the image entrypoint runs SIMULATE, the compose service injects
-credentials at runtime only, and the §13 coverage subjects are the ones the bar is measured on.
+credentials at runtime only, and the full package is measured by the coverage bar.
 """
 
 from __future__ import annotations
@@ -12,15 +12,6 @@ import tomllib
 import yaml
 
 from tests.conftest import REPO_ROOT
-
-COVERAGE_SUBJECTS = (
-    "src/pipeline/gate.py",
-    "src/pipeline/score.py",
-    "src/pipeline/dispatch.py",
-    "src/pipeline/dedupe.py",
-    "src/pipeline/templates/render.py",
-    "src/pipeline/observability/kpis.py",
-)
 
 
 def test_dockerfile_runs_simulate_by_default() -> None:
@@ -56,9 +47,9 @@ def test_compose_service_runs_the_pipeline_in_simulate() -> None:
 
 
 def test_coverage_configuration_measures_the_plan_subjects() -> None:
-    """§13 — the 80% bar is enforced on exactly the six pure-logic modules."""
+    """§13 — the 80% bar measures the whole pipeline package."""
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     coverage = pyproject["tool"]["coverage"]
 
-    assert tuple(coverage["run"]["include"]) == COVERAGE_SUBJECTS
+    assert coverage["run"]["source"] == ["src/pipeline"]
     assert coverage["report"]["fail_under"] >= 80

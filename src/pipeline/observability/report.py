@@ -65,9 +65,11 @@ def render_run_report(
     run_id: str,
     capability_notes: Iterable[str] = (),
     mode: Mode = Mode.SIMULATE,
+    reobserved_candidates: Iterable[Candidate] = (),
 ) -> str:
     """Render a deterministic per-run summary in Markdown."""
     rows = list(candidates)
+    reobserved_rows = list(reobserved_candidates)
     summary = summarize_run(rows)
     notes = list(capability_notes)
     note_lines = [f"- {note}" for note in notes] if notes else ["- None"]
@@ -184,6 +186,8 @@ def render_run_report(
             "",
             f"- mode: {mode.value}",
             f"- Candidates seen: {summary.problems}",
+            "- Merges re-observed: "
+            f"{sum(candidate.state is CandidateState.MERGED for candidate in reobserved_rows)}",
             f"- Scored: {summary.scored}",
             f"- Dispatched: {summary.dispatched}",
             f"- Deferred: {summary.deferred}",
@@ -268,6 +272,7 @@ def write_run_report(
     run_id: str,
     capability_notes: Iterable[str] = (),
     mode: Mode = Mode.SIMULATE,
+    reobserved_candidates: Iterable[Candidate] = (),
 ) -> None:
     """Write a Layer 2 report."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -277,6 +282,7 @@ def write_run_report(
             run_id=run_id,
             capability_notes=capability_notes,
             mode=mode,
+            reobserved_candidates=reobserved_candidates,
         ),
         encoding="utf-8",
     )
