@@ -249,7 +249,9 @@ class CandidateRunner:
         try:
             match = self.live.client.pull_request(candidate.pr_number)
         except (GitHubResponseError, HttpTransportError) as exc:
-            self.notes.append(f"{candidate.candidate_id}: merge observation unavailable: {exc}")
+            self.notes.append(
+                f"{candidate.candidate_id}: pull request observation unavailable: {exc}"
+            )
             return candidate
         if match is not None and match.merged_at is not None:
             self.notes.append(

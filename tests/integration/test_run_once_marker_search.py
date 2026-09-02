@@ -228,7 +228,7 @@ def test_merge_sweep_keeps_unreachable_pr_unchanged(
     assert sum(path.endswith("/pulls/2") for path in transport.reads) == 1
     run_report = next((output_dir / "reports").glob("run-*.md")).read_text(encoding="utf-8")
     assert (
-        "persisted-awaiting: merge observation unavailable: service unavailable"
+        "persisted-awaiting: pull request observation unavailable: service unavailable"
         in run_report
     )
 
