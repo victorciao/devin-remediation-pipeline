@@ -16,4 +16,4 @@ services:
       - /app/fixtures/baseline.json
     volumes:
       - ./docker-output:/output
-      - ${SUPERSET_CHECKOUT:-/home/ubuntu/repos/superset}:/target-repo:ro
+      - ${SUPERSET_CHECKOUT:?SUPERSET_CHECKOUT must be set to the target checkout path}:/target-repo:ro

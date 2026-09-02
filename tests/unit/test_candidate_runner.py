@@ -5,8 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from pydantic import SecretStr
-
 from pipeline.__main__ import CandidateRunner, LiveTarget
 from pipeline.config import Mode, PipelineConfig
 from pipeline.github_client import GitHubClient
@@ -35,8 +33,6 @@ def _runner(
 ) -> tuple[CandidateRunner, CandidateStateStore]:
     config = PipelineConfig(
         mode=Mode.LIVE,
-        github_token=SecretStr("placeholder-token"),
-        devin_api_key=SecretStr("placeholder-key"),
     )
     store = CandidateStateStore(tmp_path / "candidates.jsonl", marker_search=marker_search)
     runner = CandidateRunner(

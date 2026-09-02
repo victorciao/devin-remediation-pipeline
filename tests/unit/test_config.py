@@ -6,7 +6,6 @@ import logging
 from pathlib import Path
 
 import pytest
-from pydantic import SecretStr
 
 from pipeline.config import (
     BUDGET_HARD_MAX,
@@ -46,17 +45,15 @@ def test_mode_unset_empty_or_unrecognized_resolves_to_simulate(raw: str | None) 
 
 
 def test_mode_live_is_honoured_when_explicit() -> None:
-    """§3 — `live` is the one recognized non-default mode, and it requires credentials."""
-    live_env = {
-        "PIPELINE_MODE": "live",
-        "PIPELINE_GITHUB_TOKEN": "placeholder-github-token",
-        "PIPELINE_DEVIN_API_KEY": "placeholder-devin-key",
-    }
+    """`live` is the one recognized non-default mode."""
+    live_env = {"PIPELINE_MODE": "live"}
 
     assert load_config(env=live_env).mode == Mode.LIVE
 
-    with pytest.raises(ConfigError):
-        load_config(env={"PIPELINE_MODE": "live"})
+
+def test_budget_cli_key_is_case_insensitive() -> None:
+    assert load_config(cli_args=["--budget-n", "5"]).budget_N == 5
+    assert load_config(cli_args=["--budget-N", "5"]).budget_N == 5
 
 
 def test_budget_above_hard_max_is_clamped_and_logged(
@@ -104,19 +101,11 @@ def test_target_repository_and_paths_are_configurable() -> None:
     assert config.templates_dir == Path("templates")
 
 
-def test_secrets_never_appear_in_repr_or_str() -> None:
-    """Frozen post-delta additions: both credentials are non-printing `SecretStr`s."""
-    token = "ghp_notarealtoken0000000000000000000000"
-    api_key = "devin_notarealkey000000000000000000000"
-    config = PipelineConfig(github_token=SecretStr(token), devin_api_key=SecretStr(api_key))
-
-    assert config.github_token is not None
-    assert config.devin_api_key is not None
-    assert config.github_token.get_secret_value() == token
-    assert config.devin_api_key.get_secret_value() == api_key
-    for rendering in (repr(config), str(config), config.model_dump_json()):
-        assert token not in rendering
-        assert api_key not in rendering
+def test_credentials_are_rejected_from_configuration_files(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("github_token: not-a-token\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="credentials are environment-only"):
+        load_config(config_file)
 
 
 def test_suite_check_context_is_environment_configurable() -> None:

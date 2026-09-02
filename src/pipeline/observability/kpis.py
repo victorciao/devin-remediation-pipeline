@@ -32,6 +32,11 @@ def compute_kpis(
         for candidate in candidates
         if candidate.pr_url is not None and candidate.state is not CandidateState.DEFERRED
     }
+    pr_urls = {
+        candidate.pr_url
+        for candidate in candidates
+        if candidate.pr_url is not None and candidate.state is not CandidateState.DEFERRED
+    }
     issue_ids = {
         candidate.candidate_id
         for candidate in candidates
@@ -42,6 +47,7 @@ def compute_kpis(
         by_candidate.setdefault(event.candidate_id, []).append(event)
         if event.pr_url is not None:
             pr_ids.add(event.candidate_id)
+            pr_urls.add(event.pr_url)
         if event.issue_url is not None:
             issue_ids.add(event.candidate_id)
     dispatched_pr = len(pr_ids)
@@ -147,6 +153,7 @@ def compute_kpis(
         "active": sum(candidate.state not in terminal_states for candidate in candidates),
         "completed": sum(candidate.state in terminal_states for candidate in candidates),
         "dispatched_pr": dispatched_pr,
+        "pull_requests_opened": len(pr_urls),
         "dispatched_issue": dispatched_issue,
         "deferred": sum(candidate.state is CandidateState.DEFERRED for candidate in candidates),
         "deferred_by_reason": _deferred_by_reason(candidates),
@@ -371,6 +378,10 @@ def render_kpi_report(
         }:
             continue
         label = name.replace("_", " ").title()
+        if name == "dispatched_pr":
+            label = "Problems With Pull Request"
+        elif name == "pull_requests_opened":
+            label = "Pull Requests Opened"
         if config.mode is Mode.SIMULATE and name in {
             "sessions_created",
             "sessions_per_candidate",

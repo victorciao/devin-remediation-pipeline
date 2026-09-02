@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from pipeline.dedupe import find_drift_match
 from pipeline.schemas import Candidate, CandidateState
 
@@ -40,6 +42,10 @@ class ResumeAction(str, Enum):
 
 class StatePreservationError(RuntimeError):
     """Raised when a resume write would discard durable artifact identity."""
+
+
+class StateCompatibilityError(RuntimeError):
+    """Raised when persisted state was written by an incompatible version."""
 
 
 class MarkerSearchOutcome(str, Enum):
@@ -273,6 +279,11 @@ class CandidateStateStore:
                             handle.write(line + "\n")
                         self._quarantine_seen.add(line)
                         self.quarantined_rows += 1
+                except ValidationError as exc:
+                    raise StateCompatibilityError(
+                        f"state file {self._path} was written by an incompatible version; "
+                        "use a fresh output directory"
+                    ) from exc
         return rows
 
     def rows(self) -> list[Candidate]:

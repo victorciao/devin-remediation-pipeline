@@ -66,14 +66,16 @@ On Windows, use WSL2: the commands below use POSIX syntax (`VAR=value cmd`, `exp
 
 ## Setup
 
-Clone the fork and install this program. Check the clone out at the same commit the baseline was
-recorded at, so that counts in the reports line up with it. On some systems Python 3.11 is
-installed as `python3` rather than `python3.11`.
+Start by cloning this repository. Run every command below from its root directory. Clone the
+fork separately; that is the source tree this program reads.
+
+On some systems Python 3.11 is installed as `python3` rather than `python3.11`.
 
 ```bash
+git clone https://github.com/victorciao/devin-remediation-pipeline.git remediation-pipeline
+cd remediation-pipeline
 export SUPERSET_CHECKOUT="$HOME/src/superset"
 git clone https://github.com/victorciao/superset.git "$SUPERSET_CHECKOUT"
-git -C "$SUPERSET_CHECKOUT" checkout a140e74f5f54b2ada25e7558d884812facd3375d
 python3.11 -m venv .venv  # or: python3 -m venv .venv
 .venv/bin/python -m pip install '.[dev]'
 ```
@@ -83,11 +85,10 @@ python3.11 -m venv .venv  # or: python3 -m venv .venv
 This is the whole program, end to end, on your machine:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pipeline \
+./.venv/bin/python -m pipeline \
   --repo-path "$SUPERSET_CHECKOUT" \
-  --output-dir . \
-  --baseline fixtures/baseline.json \
-  --alert-source sarif_file
+  --output-dir ./run-output \
+  --baseline fixtures/baseline.json
 ```
 
 It writes its reports under the output directory (see
@@ -103,12 +104,32 @@ command-line options, in that order of increasing precedence — so a command-li
 wins. For example, to raise how many problems get a Devin session in one run:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pipeline \
-  --mode=simulate --budget-N=5 --output-dir ./run-output
+./.venv/bin/python -m pipeline \
+  --mode=simulate --budget-N 5 \
+  --repo-path "$SUPERSET_CHECKOUT" \
+  --output-dir ./run-output \
+  --baseline fixtures/baseline.json
 ```
 
 The program exits with a non-zero status if the configuration is invalid, if something it needs
 is unavailable, or if a run hits one of its session or cost limits.
+
+## Running with Docker Compose
+
+Docker Compose runs the same SIMULATE command inside a container. Run it from this repository's
+root directory. The image build needs network access; the container run has no network access.
+You need a Docker daemon and permission to use it. The `id -u` and `id -g` prefixes are for Linux;
+Docker Desktop users do not need them. The results are written to `./docker-output`, relative to
+the repository root.
+
+```bash
+mkdir -p docker-output
+PIPELINE_UID="$(id -u)" PIPELINE_GID="$(id -g)" \
+  SUPERSET_CHECKOUT="$SUPERSET_CHECKOUT" docker compose run --rm remediation
+```
+
+The target checkout is mounted read-only. If `SUPERSET_CHECKOUT` is unset, Compose stops with a
+message asking you to set it.
 
 ## Running in LIVE
 
@@ -120,14 +141,16 @@ export DEVIN_API_KEY='...'
 export GITHUB_PAT_REMEDIATION='...'
 ```
 
-The configuration loader also accepts `PIPELINE_DEVIN_API_KEY` and `PIPELINE_GITHUB_TOKEN`.
 LIVE requires:
 
 * explicit `--mode=live`;
 * both credentials;
 * a target checkout;
-* a `--head-branch` value; and
+* a `--head-branch` branch-name prefix; and
 * at least one completed `pull_request` Actions run in the target repository.
+
+The program creates one branch per problem, named
+`<head-branch>/<candidate-id>`. The hosted workflow uses `devin/remediation` as the prefix.
 
 Before candidate work begins, LIVE also checks that the target token can:
 
@@ -141,10 +164,21 @@ If a required check is unavailable, LIVE stops instead of treating that lane as 
 optional `session_snapshot_id` setting selects a Devin snapshot prepared for the target repository;
 it is never hard-coded. The pipeline never merges pull requests.
 
-After obtaining explicit approval for a target run, provide the Devin-created branch and run:
+For a local LIVE run, restore prior history before starting the pipeline:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pipeline \
+.venv/bin/python -m pipeline.history seed \
+  --history-dir history \
+  --out ./live-output/state/candidates-live.jsonl
+```
+
+This lets the run adopt existing issues instead of filing duplicates. Skipping it can make a local
+LIVE run file issues that already exist.
+
+After obtaining explicit approval for a target run, run:
+
+```bash
+.venv/bin/python -m pipeline \
   --mode=live --head-branch devin/remediation \
   --repo-path "$SUPERSET_CHECKOUT" \
   --output-dir ./live-output \
@@ -158,10 +192,24 @@ relevant work.
 
 ## Configuration reference
 
+Set a value in a YAML file passed with `--config <path>`, an environment variable named
+`PIPELINE_` followed by the upper-cased setting name, or a command-line option using dashes.
+These are applied in that order, so command-line options take precedence. For example:
+
+```bash
+PIPELINE_MAX_SESSIONS=2 .venv/bin/python -m pipeline \
+  --config config/example.yaml --max-sessions 4
+```
+
+Credentials are environment-only: use `GITHUB_PAT_REMEDIATION` and `DEVIN_API_KEY`. Naming either
+credential in the configuration file is rejected. An unrecognised `PIPELINE_*` variable aborts
+startup. Some settings are available only through particular routes; derived rows below are
+computed outputs and cannot be set.
+
 | Name | What it controls | Default | Range / allowed values | Safety behavior |
 |---|---|---:|---|---|
 | `mode` | Selects SIMULATE or LIVE execution | `simulate` | `simulate`, `live` | `live` is explicit and credential-gated; unset values default to simulate |
-| `budget_N` | Caps high-tier Devin dispatches per run, highest score first | `5` | `1..25` (`BUDGET_HARD_MAX=25`) | Dispatch overflow is deferred; values above 25 are clamped and recorded as `guardrail_clamped` |
+| `budget_N` | Caps high-tier Devin session dispatches per run, highest score first | `5` | `1..25` (`BUDGET_HARD_MAX=25`) | High-tier overflow is deferred; medium-tier problems can still receive tracking issues |
 | `score_cap` | Sets the maximum calculated candidate score | `200` | `>0` | — |
 | `tier_high_min` | Sets the score cutoff for high-tier routing | `60` | `> tier_medium_min` | Rejected at startup unless greater than `tier_medium_min` |
 | `tier_medium_min` | Sets the score cutoff for medium-tier routing | `20` | `>0` | Rejected at startup unless below `tier_high_min` |
@@ -191,96 +239,72 @@ relevant work.
 | `rubrics_path` | Locates observable rubric tables | `config/rubrics.yaml` | Path | — |
 | `templates_dir` | Locates vendored issue and PR templates | `templates` | Path | — |
 | `session_snapshot_id` | Selects the Devin target-repository snapshot | unset | Optional string | — |
-| `github_token` | Supplies the GitHub API credential | unset | Runtime secret | LIVE stops without it |
-| `devin_api_key` | Supplies the Devin API credential | unset | Runtime secret | LIVE stops without it |
 
 `only_lanes` accepts a comma-separated lane list from `--only-lanes=...` or
-`PIPELINE_ONLY_LANES`; it restricts dispatch eligibility only, so other lanes remain
-enumerated, gated, scored, and represented in the run report.
+`PIPELINE_ONLY_LANES`; it restricts high-tier dispatch eligibility, while other lanes remain
+represented in the run report.
 Security tracking issues do not describe the vulnerability or how to exploit it. They contain
 only a summary, affected scope, status, verification, and rule ID. The system checks the stated
 success condition and CI evidence before handing a pull request to a human for review.
 
-## Running with Docker Compose
-
-Docker Compose runs the program in the same SIMULATE mode without network access. It mounts
-`$SUPERSET_CHECKOUT` read-only at `/target-repo` and writes the results to `./docker-output`,
-relative to this repository. The command passes your user and group IDs so those result files
-are writable by your account:
-
-```bash
-mkdir -p docker-output
-PIPELINE_UID="$(id -u)" PIPELINE_GID="$(id -g)" \
-  SUPERSET_CHECKOUT="$SUPERSET_CHECKOUT" docker compose run --rm remediation
-```
-
-The container has no network access and cannot change the target checkout. LIVE credentials, if
-ever used by an embedding deployment, are runtime environment values and are not Docker build
-inputs.
-
 ## Output files
 
-After a run, the output directory contains:
+After a run, look in the output directory for:
 
-* `state/candidates.jsonl` — saved state used to resume work and avoid duplicate work.
-* `reports/events.jsonl` — an event log showing checks, sessions, reviews, artifacts, and
-  final outcomes.
-* `reports/run-<run_id>.md` — a summary of one run, with problem outcomes and artifact links.
-* `reports/kpis.md` — measured rates and threshold alerts.
-* `reports/issues/<candidate_id>.md` — issue text for each tracked problem.
-* `reports/prs/<candidate_id>.md` — pull-request text for each proposed fix.
+* `state/candidates.jsonl` — append-only state; the newest row for a problem is its current state,
+  and this lets a re-run resume instead of duplicating work.
+* `reports/events.jsonl` — the per-step audit trail, including session IDs and final outcomes.
+* `reports/run-<run_id>.md` — an account of every problem the run saw and why it was or was not
+  acted on, with artifact links.
+* `reports/kpis.md` — pass and failure rates plus the four threshold alerts.
+* `reports/issues/<candidate_id>.md` — the tracking-issue body; in SIMULATE, this is exactly the
+  text a LIVE run would publish.
+* `reports/prs/<candidate_id>.md` — the pull-request body; in SIMULATE, this is exactly the text a
+  LIVE run would publish.
 
 The baseline records the problems found before this program ran. SIMULATE uses those records when
 the target checkout is unavailable.
 
-## Verification status
+Run artifacts are uploaded under `remediation-<run_id>`. A successful publication also commits
+the run directory under `history/` and refreshes `RESULTS.md`; publication failures are
+annotated without failing remediation. The `remediation-pipeline` concurrency group queues a
+new trigger while another run is active instead of racing it.
 
-The following checks have been completed:
+## How do I know whether it worked?
 
-* The package imports and static checks pass.
-* The baseline reproduces the captured Superset revision, except for `captured_at`.
-* A credential-free SIMULATE run in Docker completes for each problem type. At the default
-  threshold, `codeql` scores 81/high and `deprecations` scores 200/high and runs the full
-  simulated loop; `skipped_tests` is medium and produces an issue only.
+Exit code 0 means the run completed. Exit code 1 means it aborted; the reason is printed to
+standard error. The final `summary:` line reports the mode, number of problems, scores,
+dispatches, and deferrals. Read `reports/run-<run_id>.md` to see what happened to each problem
+and why it was or was not acted on. Read `reports/kpis.md` for pass and failure rates and the four
+threshold alerts.
 
-All three problem types have also completed LIVE against the Superset fork. The program checked
-each success condition against the code at the pull-request head, independently of the Devin
-session's report:
-
-* `codeql` — issue [#44](https://github.com/victorciao/superset/issues/44), pull request
-  [#45](https://github.com/victorciao/superset/pull/45), merged.
-* `skipped_tests` — issue [#4](https://github.com/victorciao/superset/issues/4), pull request
-  [#42](https://github.com/victorciao/superset/pull/42).
-* `deprecations` — issue [#30](https://github.com/victorciao/superset/issues/30), pull request
-  [#46](https://github.com/victorciao/superset/pull/46).
-
-The event-driven path was also verified end to end on hosted runners. A merge to the fork's
-`master` completed CodeQL, and the fork's workflow sent `codeql-scan-completed` to this
-repository. The resulting run found 30 existing tracking issues by their stored markers instead
-of creating duplicates, created one session, pushed one branch with the pull-request token,
-opened a pull request, checked its success condition, observed the required checks, and left the
-candidate awaiting a human merge (`awaiting_human_merge`).
-
-The program never merges pull requests. A successful candidate remains open for a human to
-review and merge; any later merge is recorded as evidence from outside the program.
+In LIVE, completion does not mean that a pull request was merged. The program never merges;
+the end state is `awaiting_human_merge`, and human review and acceptance of the pull request are
+what success means.
 
 ## Automated triggers and secrets
 
 ### CodeQL repository dispatch
 
-A push or merge to the fork's `master` completes CodeQL; its workflow must send
-`codeql-scan-completed` as a `repository_dispatch` to this repository. The fork needs
-`REMEDIATION_DISPATCH_TOKEN` with repository-dispatch rights here. This repository needs
-`DEVIN_API_KEY` and `REMEDIATION_GITHUB_PAT` secrets (GitHub rejects secret names prefixed
-`GITHUB_`, so the workflow maps that secret onto the `GITHUB_PAT_REMEDIATION` environment
-variable the configuration reads).
+In the fork, `.github/workflows/remediation-dispatch.yml` runs after a successful CodeQL
+`workflow_run` on `master`. It sends a POST request with
+`event_type: codeql-scan-completed` to this repository's `dispatches` endpoint. Give the fork the
+`REMEDIATION_DISPATCH_TOKEN` secret with permission to send that request. Give this repository
+the `DEVIN_API_KEY` and `REMEDIATION_GITHUB_PAT` secrets. GitHub rejects secret names beginning
+with `GITHUB_`, so the workflow maps `REMEDIATION_GITHUB_PAT` to the
+`GITHUB_PAT_REMEDIATION` environment variable.
 
 ### Manual workflow dispatch
 
-In the Actions UI, select **Remediation**, choose **Run workflow**, and provide the optional
-inputs `only_lanes` (empty or a comma-separated list of `codeql`, `skipped_tests`, and
-`deprecations`), `budget_n` (default `1`), `max_sessions` (default `1`), `tier_high_min`
-(empty for the configured default), and `max_total_acu` (empty for the configured default).
+In this repository's Actions UI, select **Remediation**, choose **Run workflow**, and set any of
+these inputs:
+
+* `only_lanes`
+* `budget_n` (default `1`)
+* `max_sessions` (default `1`)
+* `tier_high_min`
+* `max_total_acu`
+
 The equivalent command is:
 
 ```bash
@@ -292,11 +316,6 @@ gh workflow run remediation.yml --repo victorciao/devin-remediation-pipeline --r
 
 The workflow runs every Monday at 03:17 UTC (`17 3 * * 1`).
 
-### Local CLI
-
-For a local LIVE run, use the instructions in [Running in LIVE](#running-in-live).
-
-Run artifacts are uploaded under `remediation-<run_id>`. A successful publication also commits
-the run directory under `history/` and refreshes `RESULTS.md`; publication failures are
-annotated without failing remediation. The `remediation-pipeline` concurrency group queues a
-new trigger while another run is active instead of racing it.
+The run uploads an artifact named `remediation-<run_id>`. It also publishes the run directory
+under `history/` and refreshes `RESULTS.md` when publication succeeds. The resulting reports and
+history are the hosted evidence for the run.

@@ -15,8 +15,6 @@ import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 
-from pydantic import SecretStr
-
 from pipeline import __main__ as entrypoint
 from pipeline.config import CiEvidenceMode, Mode, PipelineConfig
 from pipeline.lanes.codeql import read_alert_fixture
@@ -285,8 +283,6 @@ def run_harness(*, kill_point: str, state_dir: Path, ledger: Path) -> int:
     setattr(entrypoint, "UrllibDevinTransport", lambda: devin)  # noqa: B010
     config = PipelineConfig(
         mode=Mode.LIVE,
-        github_token=SecretStr("crash-harness-token"),
-        devin_api_key=SecretStr("crash-harness-key"),
         rubrics_path=RUBRICS_PATH,
         templates_dir=TEMPLATES_DIR,
         alert_fixture_path=FIXTURES_DIR / "codeql_alerts.json",

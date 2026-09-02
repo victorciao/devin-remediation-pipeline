@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import SecretStr
 
 from pipeline.config import CiEvidenceMode, Mode, PipelineConfig
 from pipeline.dispatch import (
@@ -59,8 +58,6 @@ def live_config(
     """A LIVE configuration carrying placeholder credentials (never real secrets)."""
     return pipeline_config(
         mode=Mode.LIVE,
-        github_token=SecretStr("placeholder-github-token"),
-        devin_api_key=SecretStr("placeholder-devin-key"),
         **overrides,
     )
 

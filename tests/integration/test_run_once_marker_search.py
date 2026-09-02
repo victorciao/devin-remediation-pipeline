@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import SecretStr
 
 from pipeline import __main__ as entrypoint
 from pipeline.config import Mode, PipelineConfig
@@ -113,8 +112,6 @@ def config_for(mode: Mode, **fields: Any) -> PipelineConfig:  # noqa: ANN401
     """A config in `mode` pointed at the shipped rubrics, templates and alert fixture."""
     return PipelineConfig(
         mode=mode,
-        github_token=SecretStr("placeholder-token"),
-        devin_api_key=SecretStr("placeholder-key"),
         rubrics_path=RUBRICS_PATH,
         templates_dir=TEMPLATES_DIR,
         alert_fixture_path=FIXTURES_DIR / "codeql_alerts.json",
@@ -175,7 +172,7 @@ def test_the_kpi_rollup_survives_the_abort(aborted_run: AbortedRun) -> None:
     """§11 — the rollup is written too, and reports nothing as dispatched."""
     rollup = (aborted_run.output_dir / "reports" / "kpis.md").read_text(encoding="utf-8")
 
-    assert "**Dispatched Pr:** 0" in rollup
+    assert "**Problems With Pull Request:** 0" in rollup
     assert "**Dispatched Issue:** 0" in rollup
 
 
@@ -446,7 +443,7 @@ def test_an_unconfigured_marker_search_completes_normally(tmp_path: Path) -> Non
     """§14.1 — SIMULATE configures no marker search, so there is nothing to fail: exit 0."""
     output_dir = tmp_path / "out"
 
-    _run_id, produced = entrypoint.run_once(
+    outcome = entrypoint.run_once(
         config=config_for(Mode.SIMULATE),
         repo_path=tmp_path / "nonexistent-target",
         output_dir=output_dir,
@@ -457,7 +454,7 @@ def test_an_unconfigured_marker_search_completes_normally(tmp_path: Path) -> Non
     events = EventLog(output_dir / "reports" / "events.jsonl").read_run_events()
     rows = read_rows(output_dir / "state" / SIMULATE_STATE_FILE)
 
-    assert produced != ()
+    assert outcome.produced != ()
     assert list((output_dir / "reports").glob("run-*.md")) != []
     assert [event for event in events if event.event_type == "marker_search_failure"] == []
     assert rows

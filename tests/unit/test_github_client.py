@@ -6,7 +6,6 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import pytest
-from pydantic import SecretStr
 
 from pipeline.config import (
     DEFAULT_REQUIRED_CONTEXTS_MIN,
@@ -56,8 +55,6 @@ def live_config(**fields: Any) -> PipelineConfig:  # noqa: ANN401
     """A LIVE-mode config; SIMULATE forbids every write path under test here."""
     return PipelineConfig(
         mode=Mode.LIVE,
-        github_token=SecretStr("placeholder-token"),
-        devin_api_key=SecretStr("placeholder-key"),
         **fields,
     )
 

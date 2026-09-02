@@ -1,0 +1,8 @@
+/state/
+/reports/
+/docker-output/
+/run-output/
+/.coverage
+__pycache__/
+.venv/
+*.egg-info/

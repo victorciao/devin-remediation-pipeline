@@ -63,7 +63,8 @@ Candidates without an issue or a pull request: 29 (excluded from the table above
 - **Candidates Seen:** 62
 - **Active:** 39
 - **Completed:** 23
-- **Dispatched Pr:** 5
+- **Problems With Pull Request:** 5
+- **Pull Requests Opened:** 6
 - **Dispatched Issue:** 33
 - **Deferred:** 2
 - **Marker Search Outcomes:** absent=2, found=31

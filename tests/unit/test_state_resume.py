@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from pipeline.state import (
     MarkerArtifact,
     MarkerSearchOutcome,
     ResumeAction,
+    StateCompatibilityError,
     StatePreservationError,
     build_marker_index,
     decide_resume,
@@ -88,6 +90,19 @@ def ambiguous_marker(_marker: str) -> MarkerArtifact | None:
 def test_no_persisted_row_has_no_local_artifact() -> None:
     """§14.1 — absence of state proves nothing exists locally."""
     assert has_local_artifact(None) is False
+
+
+def test_unknown_state_field_aborts_as_incompatible_version(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.jsonl"
+    row = codeql_candidate(candidate_id="old").model_dump(mode="json")
+    row["unknown_field_from_newer_version"] = True
+    state_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    with pytest.raises(
+        StateCompatibilityError,
+        match=r"state file .* was written by an incompatible version; use a fresh output directory",
+    ):
+        CandidateStateStore(state_path).rows()
 
 
 @pytest.mark.parametrize(("state", "link"), ARTIFACT_STATE_LINKS)

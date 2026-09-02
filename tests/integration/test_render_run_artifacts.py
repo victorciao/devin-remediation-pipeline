@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import SecretStr
 
 from pipeline import __main__ as entrypoint
 from pipeline.config import Mode, PipelineConfig
@@ -41,8 +40,6 @@ def config_for(mode: Mode, **fields: Any) -> PipelineConfig:  # noqa: ANN401
     """A config in `mode` pointed at the shipped rubrics, templates and alert fixture."""
     return PipelineConfig(
         mode=mode,
-        github_token=SecretStr("placeholder-token"),
-        devin_api_key=SecretStr("placeholder-key"),
         rubrics_path=RUBRICS_PATH,
         templates_dir=TEMPLATES_DIR,
         alert_fixture_path=FIXTURES_DIR / "codeql_alerts.json",

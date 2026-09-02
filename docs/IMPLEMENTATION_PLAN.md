@@ -256,10 +256,10 @@ or a fork match — never by a state value alone. A per-candidate failure defers
 | `verification_pass_rate_alert` / `publication_safety_alert` | derived | Alert when verification pass rate is below its floor or publication safety is undetermined |
 | Unit-test coverage floor | `80%` | This repository's own unit-test coverage floor is `[tool.coverage.report] fail_under = 80` in `pyproject.toml`, enforced by `pytest --cov` in CI over the six pure-logic modules, currently approximately 94%; it is not a configurable pipeline setting |
 
-Also configurable: target `owner/repo`, GitHub token, Devin API key, rubrics, templates. **SIMULATE** (default) needs **no credentials**, makes **no** network writes and creates no sessions: discovery from fixtures, gates, scoring, rendering, reporting; every artifact is marked `artifact_simulated = true` with `writes_suppressed
+Also configurable: target `owner/repo`, rubrics, templates, and the environment-only GitHub and Devin credentials. **SIMULATE** (default) needs **no credentials**, makes **no** network writes and creates no sessions: discovery from fixtures, gates, scoring, rendering, reporting; every artifact is marked `artifact_simulated = true` with `writes_suppressed
 = <n>`, and any attempted write raises. `docker compose run --rm remediation` must complete a full SIMULATE run offline; the image needs no CodeQL toolchain, since the fork's workflow performs every scan.
 
-**LIVE preconditions**, all checked before the first write, each failure aborting before it: `mode = live` supplied explicitly; `github_token` and `devin_api_key` present; token identity and scopes recorded from `GET /user`; `GET /repos/{o}/{r}` reachable with push access; `codeql-analysis` enabled on the fork, with its latest
+**LIVE preconditions**, all checked before the first write, each failure aborting before it: `mode = live` supplied explicitly; `GITHUB_PAT_REMEDIATION` and `DEVIN_API_KEY` environment credentials present; token identity and scopes recorded from `GET /user`; `GET /repos/{o}/{r}` reachable with push access; `codeql-analysis` enabled on the fork, with its latest
 `master` analysis sitting on `base_sha`; Actions enabled with ≥1 completed `pull_request` run; `required_contexts_min` non-empty; issue search reachable when medium-tier candidates are present.
 
 ## 16. Ordered task list

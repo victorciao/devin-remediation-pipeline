@@ -8,9 +8,8 @@ import shutil
 from pathlib import Path
 
 import pytest
-from pydantic import SecretStr
 
-from pipeline.config import ConfigError, Mode, PipelineConfig
+from pipeline.config import Mode, PipelineConfig
 from pipeline.dispatch import dispatch_candidates
 from pipeline.gate import evaluate_gates
 from pipeline.lanes.codeql import enumerate_codeql_candidates, read_alert_fixture
@@ -105,7 +104,6 @@ def test_full_simulate_flow_makes_no_writes(
     config, candidates, produced = simulated
 
     assert config.mode is Mode.SIMULATE
-    assert config.github_token is None
     assert candidates != []
     assert produced != ()
     assert all(path.is_file() for path in produced)
@@ -207,7 +205,6 @@ def test_simulate_run_leaves_no_secrets_in_its_artifacts(
     for path in written:
         text = path.read_text(encoding="utf-8", errors="ignore")
         assert "ghp_" not in text
-        assert "PIPELINE_GITHUB_TOKEN" not in text
 
 
 def test_live_smoke_is_opt_in() -> None:
@@ -217,14 +214,5 @@ def test_live_smoke_is_opt_in() -> None:
     """
     assert os.environ.get("PIPELINE_LIVE_SMOKE") != "1"
 
-    with pytest.raises(ConfigError):
-        PipelineConfig(mode=Mode.LIVE)
-
-    config = PipelineConfig(
-        mode=Mode.LIVE,
-        github_token=SecretStr("placeholder-github-token"),
-        devin_api_key=SecretStr("placeholder-devin-key"),
-    )
-
+    config = PipelineConfig(mode=Mode.LIVE)
     assert config.mode == Mode.LIVE
-    assert config.github_token is not None

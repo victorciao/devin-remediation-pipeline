@@ -56,6 +56,7 @@ from pipeline.http_transport import HttpTransportError, UrllibDevinTransport, Ur
 from pipeline.lanes.codeql import enumerate_from_config, read_alert_fixture
 from pipeline.lanes.deprecations import enumerate_deprecations, is_eol
 from pipeline.lanes.skipped_tests import enumerate_skipped_tests
+from pipeline.observability.report import RunSummary, summarize_run
 from pipeline.observers import LocalCheckout, PullRequestAlerts
 from pipeline.prompts import render_fix_prompt
 from pipeline.rubric import load_rubrics
@@ -88,6 +89,7 @@ from pipeline.state import (
     CandidateStateStore,
     MarkerSearchOutcome,
     ResumeAction,
+    StateCompatibilityError,
     StatePreservationError,
     has_local_artifact,
 )
@@ -107,6 +109,15 @@ from pipeline.verify import Observers, post_pr_criterion_pending, verify_candida
 
 class RunAbort(RuntimeError):
     """Raised when a blocking capability or runtime guard aborts a run."""
+
+
+@dataclass(frozen=True)
+class RunOutcome:
+    """The durable artifacts and headline counts from one run."""
+
+    run_id: str
+    produced: tuple[Path, ...]
+    summary: RunSummary
 
 
 _SIGNOFF_TRAILER = re.compile(r"(?im)^Signed-off-by:[ \t]+[^<>\r\n]*\S[ \t]+<[^>\r\n]+>[ \t]*$")
@@ -979,7 +990,7 @@ def _enumerate(
             base_sha=base_sha,
         )
     )
-    if target_exists:
+    if repo_path is not None and target_exists:
         skipped, _failures = enumerate_skipped_tests(
             repo_path,
             repo_name=repo_name,
@@ -995,7 +1006,7 @@ def _enumerate(
                 current_major=current_major,
             )
         )
-    if target_exists:
+    if repo_path is not None and target_exists:
         release = baseline.get("current_release")
         candidates.extend(
             enumerate_deprecations(
@@ -1112,19 +1123,19 @@ def _resolve_base_sha(
 def run_once(
     *,
     config: PipelineConfig,
-    repo_path: Path,
+    repo_path: Path | None,
     output_dir: Path,
     baseline_path: Path,
     base_sha: str | None = None,
     head_branch: str | None = None,
     base_branch: str = "master",
-) -> tuple[str, tuple[Path, ...]]:
+) -> RunOutcome:
     """Execute the §6 lifecycle end to end for one run, then report on it."""
     run_id = uuid.uuid4().hex
     baseline = _load_baseline(baseline_path)
     if config.mode is Mode.SIMULATE and config.ci_evidence_mode is not CiEvidenceMode.LOCAL:
         config = config.model_copy(update={"ci_evidence_mode": CiEvidenceMode.LOCAL})
-    target_exists = repo_path.exists()
+    target_exists = repo_path is not None and repo_path.is_dir()
     notes: list[str] = []
     run_events: list[RunEventRecord] = []
     preflight: LivePreflight | None = None
@@ -1176,20 +1187,23 @@ def run_once(
         require_marker_proof=config.mode is Mode.LIVE,
         artifact_simulated=config.mode is Mode.SIMULATE,
     )
-    candidates = _normalize(
-        _enumerate(
-            config=config,
-            baseline=baseline,
-            repo_path=repo_path,
-            repo_name=repo_name,
-            target_exists=target_exists,
-            base_sha=base_sha,
-            preflight=preflight,
-            notes=notes,
-        ),
-        state_store=state_store,
-        run_id=run_id,
-    )
+    try:
+        candidates = _normalize(
+            _enumerate(
+                config=config,
+                baseline=baseline,
+                repo_path=repo_path if repo_path is not None else Path("/nonexistent"),
+                repo_name=repo_name,
+                target_exists=target_exists,
+                base_sha=base_sha,
+                preflight=preflight,
+                notes=notes,
+            ),
+            state_store=state_store,
+            run_id=run_id,
+        )
+    except StateCompatibilityError as exc:
+        raise RunAbort(str(exc)) from exc
     dispatched = _select(candidates, config)
 
     live: LiveTarget | None = None
@@ -1210,7 +1224,7 @@ def run_once(
             branch_prefix=head_branch,
         )
     checkout: LocalCheckout | None = None
-    if target_exists:
+    if repo_path is not None and target_exists:
         checkout = LocalCheckout(
             repo_path=repo_path,
             worktree_root=output_dir / "worktrees",
@@ -1262,6 +1276,12 @@ def run_once(
                 reason_detail=state_store.marker_search_failure_detail or "marker_search_failed",
             )
         )
+    if any(candidate.reason is ReasonCode.MARKER_SEARCH_UNCONFIGURED for candidate in settled):
+        notes.append(
+            "duplicate detection was unavailable because no GitHub credential was configured; "
+            "nothing was published (expected in SIMULATE)"
+        )
+    summary = summarize_run(settled)
     produced = simulate_run(
         settled,
         run_id=run_id,
@@ -1283,7 +1303,7 @@ def run_once(
             f"marker_search_failed: {ReasonCode.CAPABILITY_UNAVAILABLE.value}; "
             f"dedupe capability is unavailable{failure_detail}"
         )
-    return run_id, produced
+    return RunOutcome(run_id=run_id, produced=produced, summary=summary)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1295,10 +1315,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             env=None,
             cli_args=config_args,
         )
-        repo_path = Path(runtime.get("repo_path", "/home/ubuntu/repos/superset"))
+        repo_path_value = runtime.get("repo_path")
+        repo_path = Path(repo_path_value) if repo_path_value else None
         output_dir = Path(runtime.get("output_dir", "."))
         baseline_path = Path(runtime.get("baseline", "fixtures/baseline.json"))
-        run_id, produced = run_once(
+        outcome = run_once(
             config=config,
             repo_path=repo_path,
             output_dir=output_dir,
@@ -1317,9 +1338,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     ) as exc:
         print(f"pipeline run aborted: {exc}", file=sys.stderr)
         return 1
-    print(f"run_id={run_id}")
-    for path in produced:
+    print(f"run_id={outcome.run_id}")
+    for path in outcome.produced:
         print(path)
+    summary = outcome.summary
+    verdict = (
+        f"summary: mode={config.mode.value} problems={summary.problems} "
+        f"scored={summary.scored} dispatched={summary.dispatched} "
+        f"deferred={summary.deferred} reports={output_dir / 'reports'}"
+    )
+    if summary.duplicate_detection_unavailable:
+        verdict += (
+            "; duplicate detection unavailable without a GitHub credential; "
+            "nothing was published (expected in SIMULATE)"
+        )
+    print(verdict)
     return 0
 
 

@@ -262,7 +262,7 @@ def render_results(
                     str(first_seen),
                     _kpi_cell(run_metrics["issues_created"]),
                     _kpi_cell(run_metrics["sessions_created"]),
-                    _kpi_cell(run_metrics["dispatched_pr"]),
+                    _kpi_cell(run_metrics["pull_requests_opened"]),
                     _cell(len(criterion_ids) if criterion_evidence_available else None),
                     _cell(session_failures if run_events else None),
                 )
@@ -316,7 +316,12 @@ def render_results(
     for name, value in metrics.items():
         if name in _KPI_SECTION_KEYS:
             continue
-        lines.append(f"- **{name.replace('_', ' ').title()}:** {_kpi_cell(value)}")
+        label = name.replace("_", " ").title()
+        if name == "dispatched_pr":
+            label = "Problems With Pull Request"
+        elif name == "pull_requests_opened":
+            label = "Pull Requests Opened"
+        lines.append(f"- **{label}:** {_kpi_cell(value)}")
     lines.extend(["", "## Deferred by reason", ""])
     deferred = metrics["deferred_by_reason"]
     if isinstance(deferred, dict) and deferred:

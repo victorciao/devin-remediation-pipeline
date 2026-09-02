@@ -564,7 +564,7 @@ def test_dispatch_counts_derive_from_lifecycle_state_not_routing(
 ) -> None:
     """§11 — a candidate routed to a PR that never left `deferred` was not dispatched.
 
-    A LIVE run reported `Dispatched Pr: 1` for a candidate whose only durable row was
+    A LIVE run reported one problem with a pull request for a candidate whose only durable row was
     `deferred/capability_unavailable`; the routing decision alone is not evidence of an
     artifact.
     """
@@ -605,6 +605,33 @@ def test_dispatch_counts_derive_from_lifecycle_state_not_routing(
 
     assert rollup["dispatched_pr"] == 1
     assert rollup["dispatched_issue"] == 1
+
+
+def test_pull_requests_opened_counts_distinct_urls() -> None:
+    candidates = [
+        dispatched_pr_candidate(
+            "codeql-1",
+            state=CandidateState.PR_CREATED,
+            pr_url="https://example.invalid/pr/1",
+        ),
+        dispatched_pr_candidate(
+            "codeql-2",
+            state=CandidateState.PR_CREATED,
+            pr_url="https://example.invalid/pr/1",
+        ),
+        dispatched_pr_candidate(
+            "codeql-3",
+            state=CandidateState.PR_CREATED,
+            pr_url="https://example.invalid/pr/2",
+        ),
+    ]
+
+    rollup = compute_kpis(
+        candidates, [event("codeql-4", pr_url="https://example.invalid/pr/3")], PipelineConfig()
+    )
+
+    assert rollup["dispatched_pr"] == 4
+    assert rollup["pull_requests_opened"] == 3
 
 
 @pytest.mark.parametrize(
