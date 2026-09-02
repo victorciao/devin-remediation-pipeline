@@ -9,9 +9,10 @@ from pipeline.observability.results import (
     LIFECYCLE_PROGRESS,
     RunArtifacts,
     aggregate,
+    read_run,
     render_results,
 )
-from pipeline.schemas import CandidateState, CriterionEvidence, ReasonCode, Tier
+from pipeline.schemas import CandidateState, CriterionEvidence, EventRecord, Lane, ReasonCode, Tier
 from tests.factories import codeql_candidate
 
 
@@ -199,6 +200,58 @@ def test_per_run_problems_excludes_superseded_rows() -> None:
     report = render_results((run,), PipelineConfig())
 
     assert "| `20260101T000000Z-superseded` | 1 | 1 |" in report
+
+
+def test_per_run_rows_use_event_run_id_attribution() -> None:
+    reobserved = codeql_candidate(
+        candidate_id="reobserved",
+        run_id="previous-run",
+        state=CandidateState.MERGED,
+        pr_url="https://github.test/pulls/1",
+    )
+    run_event = EventRecord(
+        run_id="current-run",
+        lane=Lane.CODEQL,
+        candidate_id="reobserved",
+    )
+    run = RunArtifacts(
+        Path("/runs/20260101T000000Z-current"),
+        Path("state"),
+        (reobserved,),
+        (run_event,),
+    )
+
+    report = render_results((run,), PipelineConfig())
+
+    assert "| `20260101T000000Z-current` | 0 | 0 | 0 | 0 | 0 | n/a | 0 |" in report
+
+
+def test_read_run_keeps_legacy_rows_without_run_id(tmp_path: Path) -> None:
+    run_dir = tmp_path / "20260101T000000Z-current"
+    state_dir = run_dir / "state"
+    reports_dir = run_dir / "reports"
+    state_dir.mkdir(parents=True)
+    reports_dir.mkdir()
+    current = codeql_candidate(candidate_id="current", run_id="current-run")
+    reobserved = codeql_candidate(candidate_id="reobserved", run_id="previous-run")
+    legacy = codeql_candidate(candidate_id="legacy", run_id=None)
+    (state_dir / "candidates-live.jsonl").write_text(
+        "".join(f"{candidate.model_dump_json()}\n" for candidate in (current, reobserved, legacy)),
+        encoding="utf-8",
+    )
+    (reports_dir / "events.jsonl").write_text(
+        EventRecord(
+            run_id="current-run",
+            lane=Lane.CODEQL,
+            candidate_id="current",
+        ).model_dump_json()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    run = read_run(run_dir)
+
+    assert [candidate.candidate_id for candidate in run.candidates] == ["current", "legacy"]
 
 
 def test_lifecycle_progress_ranks_every_candidate_state() -> None:

@@ -231,5 +231,5 @@ def test_export_rejects_malformed_seed_metadata(tmp_path: Path) -> None:
     metadata = tmp_path / "seed.json"
     metadata.write_text("not json", encoding="utf-8")
 
-    with pytest.raises(json.JSONDecodeError):
+    with pytest.raises(RuntimeError, match="invalid seed metadata"):
         export_rows(tmp_path / "state.jsonl", metadata, tmp_path / "export.jsonl")

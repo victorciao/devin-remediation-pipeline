@@ -207,6 +207,9 @@ def test_merge_sweep_records_an_unenumerated_closed_pr_as_terminal(
     assert latest["state"] == CandidateState.TERMINAL.value
     assert latest["reason"] == ReasonCode.CLOSED_PULL_REQUEST.value
     assert sum(path.endswith("/pulls/2") for path in transport.reads) == 1
+    run_report = next((output_dir / "reports").glob("run-*.md")).read_text(encoding="utf-8")
+    assert "- Merges re-observed: 0" in run_report
+    assert "- Closed PRs re-observed: 1" in run_report
 
 
 def test_merge_sweep_ignores_an_open_pr_without_rewriting_state(

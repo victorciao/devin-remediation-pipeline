@@ -71,6 +71,11 @@ def render_run_report(
     rows = list(candidates)
     reobserved_rows = list(reobserved_candidates)
     summary = summarize_run(rows)
+    closed_reobservations = sum(
+        candidate.state is CandidateState.TERMINAL
+        and candidate.reason is ReasonCode.CLOSED_PULL_REQUEST
+        for candidate in reobserved_rows
+    )
     notes = list(capability_notes)
     note_lines = [f"- {note}" for note in notes] if notes else ["- None"]
     gated = Counter(
@@ -188,6 +193,7 @@ def render_run_report(
             f"- Candidates seen: {summary.problems}",
             "- Merges re-observed: "
             f"{sum(candidate.state is CandidateState.MERGED for candidate in reobserved_rows)}",
+            f"- Closed PRs re-observed: {closed_reobservations}",
             f"- Scored: {summary.scored}",
             f"- Dispatched: {summary.dispatched}",
             f"- Deferred: {summary.deferred}",

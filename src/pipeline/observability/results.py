@@ -89,6 +89,19 @@ def _read_historical_events(path: Path) -> list[EventRecord]:
     return events
 
 
+def _scope_candidates_to_run(
+    candidates: Iterable[Candidate],
+    events: Sequence[EventRecord],
+) -> tuple[Candidate, ...]:
+    """Keep rows attributed to this run, plus legacy rows without attribution."""
+    run_id = events[0].run_id if events else None
+    return tuple(
+        candidate
+        for candidate in candidates
+        if candidate.run_id is None or run_id is None or candidate.run_id == run_id
+    )
+
+
 def state_path(run_dir: Path) -> Path:
     """Return the one state JSONL file a run directory persisted."""
     state_dir = run_dir / "state"
@@ -120,7 +133,7 @@ def read_run(run_dir: Path) -> RunArtifacts:
     return RunArtifacts(
         run_dir=run_dir,
         state_path=path,
-        candidates=tuple(latest.values()),
+        candidates=_scope_candidates_to_run(tuple(latest.values()), events),
         events=tuple(events),
     )
 
@@ -130,7 +143,7 @@ def aggregate(runs: Sequence[RunArtifacts]) -> tuple[list[Candidate], list[Event
     latest: dict[str, tuple[int, int, Candidate]] = {}
     events: list[EventRecord] = []
     for run_index, run in enumerate(runs):
-        for candidate in run.candidates:
+        for candidate in _scope_candidates_to_run(run.candidates, run.events):
             rank = LIFECYCLE_PROGRESS[candidate.state]
             previous = latest.get(candidate.candidate_id)
             if previous is None or (rank, run_index) >= (previous[0], previous[1]):
@@ -234,7 +247,9 @@ def render_results(
     earlier_pr_urls: set[str] = set()
     for run in runs:
         run_candidates = [
-            candidate for candidate in run.candidates if candidate.superseded_by is None
+            candidate
+            for candidate in _scope_candidates_to_run(run.candidates, run.events)
+            if candidate.superseded_by is None
         ]
         run_events = list(run.events)
         run_metrics = compute_kpis(run_candidates, run_events, config)

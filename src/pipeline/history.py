@@ -127,7 +127,10 @@ def _seeded_rows(path: Path) -> int:
     """Read the seeded line offset from required metadata."""
     if not path.exists():
         return 0
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid seed metadata: {path}") from exc
     if not isinstance(payload, dict):
         raise RuntimeError(f"invalid seed metadata: {path}")
     value = payload.get("seeded_rows", 0)
