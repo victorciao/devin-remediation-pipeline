@@ -41,8 +41,6 @@ KPI_FLOAT_PRECISION = 3
 
 def kpi_display(value: object) -> str:
     """Render one KPI scalar for display, at fixed float precision."""
-    if isinstance(value, bool):
-        return str(value)
     if isinstance(value, float):
         return str(round(value, KPI_FLOAT_PRECISION))
     return str(value)
