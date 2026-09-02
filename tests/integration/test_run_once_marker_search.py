@@ -193,6 +193,49 @@ def test_merge_sweep_reobserves_an_unenumerated_merged_pr(
     assert "**Verification Pass Rate:** n/a" in report
 
 
+def test_merge_sweep_reobserves_a_budget_deferred_enumerated_pr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A budget-deferred enumerated PR still receives external merge observation."""
+    transport = FakeGitHubTransport(pr_merged_at="2026-09-01T00:00:00Z")
+    output_dir = tmp_path / "out"
+    persisted = persisted_awaiting(output_dir)
+    deferred = persisted.model_copy(
+        update={
+            "state": CandidateState.DEFERRED,
+            "reason": ReasonCode.BUDGET_OVERFLOW,
+            "action": Action.DEFERRED,
+        }
+    )
+    transport.completed_workflow_runs = True
+    monkeypatch.setattr(entrypoint, "UrllibGitHubTransport", lambda: transport)
+    monkeypatch.setattr(entrypoint, "UrllibDevinTransport", FakeDevinTransport)
+    monkeypatch.setattr(entrypoint, "_enumerate", lambda **_kwargs: [deferred])
+    monkeypatch.setattr(entrypoint, "_select", lambda _candidates, _config: [deferred])
+
+    entrypoint.run_once(
+        config=config_for(Mode.LIVE),
+        repo_path=TARGET_CHECKOUT,
+        output_dir=output_dir,
+        baseline_path=baseline_file(tmp_path),
+        base_sha="1" * 40,
+        head_branch="devin/merge-sweep",
+        base_branch="master",
+    )
+
+    latest = {
+        row["candidate_id"]: row for row in read_rows(output_dir / "state" / LIVE_STATE_FILE)
+    }[persisted.candidate_id]
+    assert latest["state"] == CandidateState.MERGED.value
+    assert latest["merge_verified"] is True
+    assert sum(path.endswith("/pulls/2") for path in transport.reads) == 1
+    report = (output_dir / "reports" / "kpis.md").read_text(encoding="utf-8")
+    assert "**Merged Clean:** 1" in report
+    run_report = next((output_dir / "reports").glob("run-*.md")).read_text(encoding="utf-8")
+    assert "- Merges re-observed: 1" in run_report
+
+
 def test_merge_sweep_records_an_unenumerated_closed_pr_as_terminal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

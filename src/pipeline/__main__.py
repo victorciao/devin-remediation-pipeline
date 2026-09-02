@@ -332,6 +332,7 @@ class CandidateRunner:
                 }
                 return self._persist(
                     candidate,
+                    run_id=candidate.run_id if candidate.run_id is not None else self.run_id,
                     state=CandidateState.MERGED,
                     **observed_update,
                 )
@@ -343,6 +344,7 @@ class CandidateRunner:
                 }
                 return self._persist(
                     candidate,
+                    run_id=candidate.run_id if candidate.run_id is not None else self.run_id,
                     state=CandidateState.TERMINAL,
                     reason=ReasonCode.CLOSED_PULL_REQUEST,
                     **observed_update,
@@ -1295,7 +1297,11 @@ def run_once(
     settled = [runner.process(candidate) for candidate in dispatched]
     reobserved_merges: list[Candidate] = []
     if live is not None:
-        processed_ids = {candidate.candidate_id for candidate in settled}
+        processed_ids = {
+            candidate.candidate_id
+            for candidate in dispatched
+            if candidate.action in _PUBLISHING_ACTIONS
+        }
         for candidate in state_store.latest().values():
             if (
                 candidate.candidate_id not in processed_ids

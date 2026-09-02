@@ -304,7 +304,7 @@ def test_reconcile_observes_human_merged_pr(tmp_path: Path) -> None:
     """A later run records an externally observed human merge."""
     transport = FakeGitHubTransport(pr_merged_at="2026-09-01T00:00:00Z")
     runner, _store = _runner(tmp_path, transport, NoSessionOrchestrator())
-    candidate = codeql_candidate(action=Action.OPEN_PR)
+    candidate = codeql_candidate(action=Action.OPEN_PR, run_id="previous-run")
     _persisted_awaiting(runner, candidate)
 
     result = runner.process(candidate)
@@ -312,6 +312,7 @@ def test_reconcile_observes_human_merged_pr(tmp_path: Path) -> None:
     assert result.state is CandidateState.MERGED
     assert result.merged_at == "2026-09-01T00:00:00Z"
     assert result.merge_verified is True
+    assert result.run_id == "previous-run"
 
 
 def test_reconcile_observes_human_merged_terminal_pr(tmp_path: Path) -> None:
@@ -369,13 +370,14 @@ def test_reconcile_observes_human_closed_pr(tmp_path: Path) -> None:
     """A later run records a human-closed PR as terminal."""
     transport = FakeGitHubTransport(pr_state="closed")
     runner, _store = _runner(tmp_path, transport, NoSessionOrchestrator())
-    candidate = codeql_candidate(action=Action.OPEN_PR)
+    candidate = codeql_candidate(action=Action.OPEN_PR, run_id="previous-run")
     _persisted_awaiting(runner, candidate)
 
     result = runner.process(candidate)
 
     assert result.state is CandidateState.TERMINAL
     assert result.reason is ReasonCode.CLOSED_PULL_REQUEST
+    assert result.run_id == "previous-run"
 
 
 def test_reconcile_observes_human_closed_terminal_pr(tmp_path: Path) -> None:
