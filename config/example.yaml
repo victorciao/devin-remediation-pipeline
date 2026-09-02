@@ -1,0 +1,10 @@
+# Run without GitHub writes or credentials.
+mode: simulate
+# Read the captured CodeQL input instead of the GitHub API.
+alert_source: sarif_file
+# Use the checked-in CodeQL/SARIF fixture.
+alert_fixture_path: fixtures/codeql_alerts.json
+# Allow up to four high-tier session dispatches.
+budget_N: 4
+# Permit eight Devin sessions in one run.
+max_sessions: 8

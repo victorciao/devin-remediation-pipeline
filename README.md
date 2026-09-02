@@ -69,14 +69,15 @@ On Windows, use WSL2: the commands below use POSIX syntax (`VAR=value cmd`, `exp
 Start by cloning this repository. Run every command below from its root directory. Clone the
 fork separately; that is the source tree this program reads.
 
-On some systems Python 3.11 is installed as `python3` rather than `python3.11`.
+Python 3.11 or newer is required. On systems where `python3` points to that version, use it
+first. If `python3` points to an older version, use `python3.11` instead.
 
 ```bash
 git clone https://github.com/victorciao/devin-remediation-pipeline.git remediation-pipeline
 cd remediation-pipeline
 export SUPERSET_CHECKOUT="$HOME/src/superset"
 git clone https://github.com/victorciao/superset.git "$SUPERSET_CHECKOUT"
-python3.11 -m venv .venv  # or: python3 -m venv .venv
+python3 -m venv .venv  # or: python3.11 -m venv .venv
 .venv/bin/python -m pip install '.[dev]'
 ```
 
@@ -129,6 +130,9 @@ mkdir -p docker-output
 PIPELINE_UID="$(id -u)" PIPELINE_GID="$(id -g)" \
   SUPERSET_CHECKOUT="$SUPERSET_CHECKOUT" docker compose run --rm remediation
 ```
+
+The summary's `/output/reports` path is inside the container; it maps to
+`./docker-output/reports` on your machine.
 
 The target checkout is mounted read-only. If `SUPERSET_CHECKOUT` is unset, Compose stops with a
 message asking you to set it.
@@ -266,8 +270,10 @@ After a run, look in the output directory for:
 
 Run artifacts are uploaded under `remediation-<run_id>`. A successful publication also commits
 the run directory under `history/` and refreshes `RESULTS.md`; publication failures are
-annotated without failing remediation. The `remediation-pipeline` concurrency group queues a
-new trigger while another run is active instead of racing it.
+annotated without failing remediation. Only one hosted run executes at a time, and a trigger that
+arrives during a run waits in line instead of running alongside it, because simultaneous runs
+could read the same state and file duplicate issues or dispatch a second session for the same
+problem.
 
 ## How do I know whether it worked?
 
