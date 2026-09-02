@@ -226,7 +226,7 @@ def test_per_run_rows_use_event_run_id_attribution() -> None:
     assert "| `20260101T000000Z-current` | 0 | 0 | 0 | 0 | 0 | n/a | 0 |" in report
 
 
-def test_read_run_keeps_legacy_rows_without_run_id(tmp_path: Path) -> None:
+def test_read_run_keeps_rows_written_by_other_runs(tmp_path: Path) -> None:
     run_dir = tmp_path / "20260101T000000Z-current"
     state_dir = run_dir / "state"
     reports_dir = run_dir / "reports"
@@ -251,7 +251,71 @@ def test_read_run_keeps_legacy_rows_without_run_id(tmp_path: Path) -> None:
 
     run = read_run(run_dir)
 
-    assert [candidate.candidate_id for candidate in run.candidates] == ["current", "legacy"]
+    assert [candidate.candidate_id for candidate in run.candidates] == [
+        "current",
+        "reobserved",
+        "legacy",
+    ]
+
+
+def test_reobserved_merge_is_latest_cumulative_state_but_not_per_run_problem(
+    tmp_path: Path,
+) -> None:
+    pr_url = "https://github.test/pulls/1"
+    pending = codeql_candidate(
+        candidate_id="reobserved",
+        run_id="previous-run",
+        state=CandidateState.AWAITING_HUMAN_MERGE,
+        pr_url=pr_url,
+        pr_number=1,
+    )
+    merged = pending.model_copy(
+        update={
+            "state": CandidateState.MERGED,
+            "merged_at": "2026-09-01T00:00:00Z",
+            "merge_verified": True,
+        }
+    )
+    previous_event = EventRecord(
+        run_id="previous-run",
+        lane=Lane.CODEQL,
+        candidate_id="reobserved",
+        terminal_outcome=CandidateState.AWAITING_HUMAN_MERGE,
+        pr_url=pr_url,
+        pr_number=1,
+    )
+    merged_event = EventRecord(
+        run_id="current-run",
+        lane=Lane.CODEQL,
+        candidate_id="reobserved",
+        terminal_outcome=CandidateState.MERGED,
+        pr_url=pr_url,
+        pr_number=1,
+        merged_at="2026-09-01T00:00:00Z",
+        merge_verified=True,
+    )
+    runs = (
+        RunArtifacts(
+            Path("/runs/20260101T000000Z-previous"),
+            Path("previous.jsonl"),
+            (pending,),
+            (previous_event,),
+        ),
+        RunArtifacts(
+            Path("/runs/20260102T000000Z-current"),
+            Path("current.jsonl"),
+            (merged,),
+            (merged_event,),
+        ),
+    )
+
+    candidates, _ = aggregate(runs)
+    report = render_results(runs, PipelineConfig())
+
+    assert candidates == [merged]
+    assert "| merged |" in report
+    assert "**Merged Clean:** 1" in report
+    assert "| `20260102T000000Z-current` | 0 | 0 | 0 | 0 | 0 | n/a | 0 |" in report
 
 
 def test_lifecycle_progress_ranks_every_candidate_state() -> None:

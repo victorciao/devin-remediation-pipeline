@@ -133,7 +133,7 @@ def read_run(run_dir: Path) -> RunArtifacts:
     return RunArtifacts(
         run_dir=run_dir,
         state_path=path,
-        candidates=_scope_candidates_to_run(tuple(latest.values()), events),
+        candidates=tuple(latest.values()),
         events=tuple(events),
     )
 
@@ -143,7 +143,7 @@ def aggregate(runs: Sequence[RunArtifacts]) -> tuple[list[Candidate], list[Event
     latest: dict[str, tuple[int, int, Candidate]] = {}
     events: list[EventRecord] = []
     for run_index, run in enumerate(runs):
-        for candidate in _scope_candidates_to_run(run.candidates, run.events):
+        for candidate in run.candidates:
             rank = LIFECYCLE_PROGRESS[candidate.state]
             previous = latest.get(candidate.candidate_id)
             if previous is None or (rank, run_index) >= (previous[0], previous[1]):
