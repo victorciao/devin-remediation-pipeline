@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from pipeline import __main__ as entrypoint
 from pipeline.config import Mode, PipelineConfig
 from pipeline.dispatch import dispatch_candidates
 from pipeline.gate import evaluate_gates
@@ -216,3 +217,29 @@ def test_live_smoke_is_opt_in() -> None:
 
     config = PipelineConfig(mode=Mode.LIVE)
     assert config.mode == Mode.LIVE
+
+
+@pytest.mark.parametrize("missing", ("GITHUB_PAT_REMEDIATION", "DEVIN_API_KEY"))
+def test_live_main_aborts_before_preflight_without_each_credential(
+    missing: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """LIVE must fail clearly before any network access when one credential is absent."""
+    monkeypatch.setenv("GITHUB_PAT_REMEDIATION", "placeholder-github-token")
+    monkeypatch.setenv("DEVIN_API_KEY", "placeholder-devin-key")
+    monkeypatch.delenv(missing)
+
+    exit_code = entrypoint.main(
+        [
+            "--mode=live",
+            "--head-branch",
+            "devin/test",
+            "--output-dir",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    assert exit_code == 1
+    assert missing in capsys.readouterr().err

@@ -85,7 +85,7 @@ python3.11 -m venv .venv  # or: python3 -m venv .venv
 This is the whole program, end to end, on your machine:
 
 ```bash
-./.venv/bin/python -m pipeline \
+.venv/bin/python -m pipeline \
   --repo-path "$SUPERSET_CHECKOUT" \
   --output-dir ./run-output \
   --baseline fixtures/baseline.json
@@ -99,12 +99,15 @@ source code: instead of finding disabled tests and deprecated calls itself, it l
 recorded in the baseline. The reports say so. Anything that changed in the fork since the
 baseline commit will be missing, so clone the fork if you want a true picture.
 
+The baseline records the problems found before this program ran. SIMULATE uses those records when
+the target checkout is unavailable.
+
 Settings can come from a configuration file, from `PIPELINE_*` environment variables, or from
 command-line options, in that order of increasing precedence — so a command-line option always
 wins. For example, to raise how many problems get a Devin session in one run:
 
 ```bash
-./.venv/bin/python -m pipeline \
+.venv/bin/python -m pipeline \
   --mode=simulate --budget-N 5 \
   --repo-path "$SUPERSET_CHECKOUT" \
   --output-dir ./run-output \
@@ -261,9 +264,6 @@ After a run, look in the output directory for:
   text a LIVE run would publish.
 * `reports/prs/<candidate_id>.md` — the pull-request body; in SIMULATE, this is exactly the text a
   LIVE run would publish.
-
-The baseline records the problems found before this program ran. SIMULATE uses those records when
-the target checkout is unavailable.
 
 Run artifacts are uploaded under `remediation-<run_id>`. A successful publication also commits
 the run directory under `history/` and refreshes `RESULTS.md`; publication failures are

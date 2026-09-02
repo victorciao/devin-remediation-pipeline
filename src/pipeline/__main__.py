@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import uuid
@@ -960,7 +961,7 @@ def _enumerate(
     *,
     config: PipelineConfig,
     baseline: Mapping[str, object],
-    repo_path: Path,
+    repo_path: Path | None,
     repo_name: str,
     target_exists: bool,
     base_sha: str | None,
@@ -984,7 +985,7 @@ def _enumerate(
     candidates.extend(
         enumerate_from_config(
             config,
-            repo_path=repo_path if target_exists else Path("/nonexistent"),
+            repo_path=repo_path,
             repo=repo_name,
             payload=payload,
             base_sha=base_sha,
@@ -1192,7 +1193,7 @@ def run_once(
             _enumerate(
                 config=config,
                 baseline=baseline,
-                repo_path=repo_path if repo_path is not None else Path("/nonexistent"),
+                repo_path=repo_path,
                 repo_name=repo_name,
                 target_exists=target_exists,
                 base_sha=base_sha,
@@ -1315,6 +1316,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             env=None,
             cli_args=config_args,
         )
+        if config.mode is Mode.LIVE:
+            missing_credentials = [
+                name
+                for name in ("GITHUB_PAT_REMEDIATION", "DEVIN_API_KEY")
+                if not os.environ.get(name)
+            ]
+            if missing_credentials:
+                raise RunAbort(
+                    "LIVE requires environment credentials: " + ", ".join(missing_credentials)
+                )
         repo_path_value = runtime.get("repo_path")
         repo_path = Path(repo_path_value) if repo_path_value else None
         output_dir = Path(runtime.get("output_dir", "."))

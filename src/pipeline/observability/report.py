@@ -39,7 +39,6 @@ def summarize_run(candidates: Iterable[Candidate]) -> RunSummary:
     dispatched = sum(
         candidate.action in {Action.OPEN_PR, Action.OPEN_ISSUE}
         and candidate.state in _DISPATCHED_STATES
-        and candidate.state is not CandidateState.DEFERRED
         and candidate.tier is not None
         for candidate in rows
     )
