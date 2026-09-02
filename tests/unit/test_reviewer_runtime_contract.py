@@ -83,7 +83,7 @@ def _baseline(valid_lanes: list[str]) -> dict[str, object]:
 def test_live_discovery_never_synthesizes_candidates_from_the_baseline_fixture(
     tmp_path: Path,
 ) -> None:
-    """§7: `fixtures/baseline.json` is the SIMULATE input and burn-down denominator only."""
+    """§7: `fixtures/baseline.json` is the SIMULATE input only."""
     from pipeline.__main__ import _enumerate
 
     notes: list[str] = []
@@ -204,7 +204,7 @@ def test_verification_pass_rate_is_per_dispatched_candidate() -> None:
         _event(candidate_id="cand", session_id="s1", pr_url="https://github.test/pull/1"),
     ]
     candidates = [codeql_candidate(candidate_id="cand", run_id="run", session_id="s1")]
-    metrics = compute_kpis(candidates, events, _baseline([]), config())
+    metrics = compute_kpis(candidates, events, config())
     assert metrics["verification_pass_rate"] == 1.0, (
         "the pass rate counted state rows instead of dispatched candidates"
     )
@@ -212,7 +212,7 @@ def test_verification_pass_rate_is_per_dispatched_candidate() -> None:
 
 def test_kpis_report_issues_created_separately_from_issues_adopted() -> None:
     """§14 Layer 3: issues created and issues adopted, split by tier."""
-    metrics = compute_kpis([], [], _baseline([]), config())
+    metrics = compute_kpis([], [], config())
     assert {"issues_created", "issues_adopted"} <= set(metrics), (
         "the KPI rollup does not distinguish created from adopted issues"
     )
@@ -227,7 +227,7 @@ def test_candidate_state_rows_account_for_every_candidate() -> None:
         stable_locator="tests/x.py::test_y",
         state=CandidateState.ENUMERATED,
     )
-    metrics = compute_kpis([candidate], [], _baseline([]), config())
+    metrics = compute_kpis([candidate], [], config())
     assert metrics["candidates_seen"] == 1
     accounted = [metrics["active"], metrics["completed"]]
     assert sum(value for value in accounted if isinstance(value, int)) == 1

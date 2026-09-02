@@ -152,7 +152,6 @@ jobs:
           done < <(find history -mindepth 1 -maxdepth 1 -type d -print | sort)
           python -m pipeline.observability.results \
             "${result_args[@]}" \
-            --baseline fixtures/baseline.json \
             --out RESULTS.md
 
           git config user.name "devin-remediation"

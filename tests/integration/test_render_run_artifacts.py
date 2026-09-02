@@ -105,7 +105,6 @@ def render(mode: Mode, output_dir: Path, **role_outputs: Any) -> tuple[Path, ...
         [routed_pr(), routed_issue(), gated(), budget_deferred()],
         run_id=RUN_ID,
         output_dir=output_dir,
-        baseline={},
         config=config_for(mode),
         **role_outputs,
     )
@@ -209,7 +208,6 @@ def test_simulate_run_is_still_the_same_callable(tmp_path: Path) -> None:
         [routed_pr()],
         run_id=RUN_ID,
         output_dir=tmp_path / "out",
-        baseline={},
         config=config_for(Mode.SIMULATE),
     )
 

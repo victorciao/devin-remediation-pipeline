@@ -1,4 +1,4 @@
-"""Layer 3 KPI computation and burn-down validity."""
+"""Layer 3 KPI computation."""
 
 from __future__ import annotations
 
@@ -13,79 +13,17 @@ from pipeline.state import has_local_artifact
 
 @dataclass(frozen=True)
 class NotApplicable:
-    """A KPI value unavailable because its baseline capability was absent."""
+    """A KPI value unavailable because its evidence was absent."""
 
     reason: ReasonCode
 
 
-BurnDownValue: TypeAlias = int | NotApplicable
 KpiValue: TypeAlias = float | int | None | NotApplicable | dict[str, int] | dict[str, float]
-
-
-@dataclass(frozen=True)
-class BurnDown:
-    """Burn-down denominator and progress for one lane."""
-
-    denominator: BurnDownValue
-    completed: BurnDownValue
-    remaining: BurnDownValue
-
-
-def _baseline_key(lane: Lane) -> str:
-    return {
-        Lane.CODEQL: "codeql_open_alerts",
-        Lane.SKIPPED_TESTS: "skipped_tests",
-        Lane.DEPRECATIONS: "deprecations",
-    }[lane]
-
-
-def compute_burndown(
-    candidates: list[Candidate],
-    baseline: dict[str, object],
-) -> dict[Lane, BurnDown]:
-    """Compute burn-down only for lanes with valid Phase 0c baselines."""
-    valid = baseline.get("baseline_valid_lanes")
-    valid_lanes = {str(item) for item in valid} if isinstance(valid, list) else set()
-    result: dict[Lane, BurnDown] = {}
-    for lane in Lane:
-        if lane.value not in valid_lanes:
-            reasons = baseline.get("baseline_invalid_reasons")
-            reason = ReasonCode.CAPABILITY_UNAVAILABLE
-            if isinstance(reasons, dict):
-                raw_reason = reasons.get(lane.value)
-                if raw_reason == ReasonCode.CAPABILITY_UNAVAILABLE.value:
-                    reason = ReasonCode.CAPABILITY_UNAVAILABLE
-            unavailable = NotApplicable(reason)
-            result[lane] = BurnDown(unavailable, unavailable, unavailable)
-            continue
-        totals = baseline.get("totals")
-        total_value = totals.get(_baseline_key(lane), 0) if isinstance(totals, dict) else 0
-        denominator = int(total_value)
-        lane_rows = [candidate for candidate in candidates if candidate.lane is lane]
-        progress = sum(
-            has_local_artifact(candidate)
-            and (
-                candidate.state
-                in {
-                    CandidateState.PR_CREATED,
-                    CandidateState.AWAITING_HUMAN_MERGE,
-                    CandidateState.MERGED,
-                }
-                or (
-                    candidate.state is CandidateState.TERMINAL
-                    and candidate.reason is ReasonCode.STALE_SKIP
-                )
-            )
-            for candidate in lane_rows
-        )
-        result[lane] = BurnDown(denominator, progress, max(denominator - progress, 0))
-    return result
 
 
 def compute_kpis(
     candidates: list[Candidate],
     events: list[EventRecord],
-    baseline: dict[str, object],
     config: PipelineConfig,
 ) -> dict[str, KpiValue]:
     """Compute the §11 KPI set from candidate and event evidence."""
@@ -138,8 +76,6 @@ def compute_kpis(
         }
         for event in events
     )
-    burndown = compute_burndown(candidates, baseline)
-    valid_rows = [value for value in burndown.values() if isinstance(value.denominator, int)]
     merge_rate = _merge_rate(events)
     pr_events = _latest_pr_events(events)
     settled_pr_events = _settled_pr_events(events)
@@ -245,9 +181,6 @@ def compute_kpis(
         "issues_created_by_tier": issues_created_by_tier,
         "issues_adopted_by_tier": issues_adopted_by_tier,
         "high_issue_closure_by_merged_pr": high_issue_closure_by_merged_pr,
-        "burn_down_denominators": sum(
-            value.denominator for value in valid_rows if isinstance(value.denominator, int)
-        ),
         "merge_rate": merge_rate,
         "merged_clean": merged_clean,
         "edited": edited,
@@ -419,11 +352,10 @@ def _expected_reason_match_rate(events: list[EventRecord]) -> float | None:
 def render_kpi_report(
     candidates: list[Candidate],
     events: list[EventRecord],
-    baseline: dict[str, object],
     config: PipelineConfig,
 ) -> str:
     """Render the rolling KPI report with visually distinct alert lines."""
-    metrics = compute_kpis(candidates, events, baseline, config)
+    metrics = compute_kpis(candidates, events, config)
     title = (
         "SIMULATED Remediation KPI rollup"
         if config.mode is Mode.SIMULATE
@@ -479,16 +411,6 @@ def render_kpi_report(
         lines.extend(f"- **{lane}:** {rate}" for lane, rate in sorted(pass_rates.items()))
     else:
         lines.append("- None")
-    lines.extend(["", "## Burn-down — remediation PRs opened against baseline", ""])
-    for lane, value in compute_burndown(candidates, baseline).items():
-        if isinstance(value.denominator, NotApplicable):
-            lines.append(f"- **{lane.value}:** n/a ({value.denominator.reason.value})")
-        else:
-            lines.append(
-                f"- **{lane.value}:** {value.completed}/{value.denominator} complete; "
-                f"{value.remaining} remaining"
-            )
-    lines.append("")
     return "\n".join(lines)
 
 
@@ -496,22 +418,18 @@ def write_kpi_report(
     path: Path,
     candidates: list[Candidate],
     events: list[EventRecord],
-    baseline: dict[str, object],
     config: PipelineConfig,
 ) -> None:
     """Write the rolling KPI report to the configured local sink."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        render_kpi_report(candidates, events, baseline, config),
+        render_kpi_report(candidates, events, config),
         encoding="utf-8",
     )
 
 
 __all__ = [
-    "BurnDown",
-    "BurnDownValue",
     "NotApplicable",
-    "compute_burndown",
     "compute_kpis",
     "render_kpi_report",
     "write_kpi_report",

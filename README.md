@@ -53,10 +53,10 @@ is created outside your machine.
   reports to its own directory.
 * **Target checkout** — a local clone of the fork. The program reads its source code to find
   disabled tests and deprecated calls.
-* **Baseline** ([`fixtures/baseline.json`](fixtures/baseline.json)) — a stored inventory of every
-  problem present in the fork at one fixed commit, recorded before any of this program existed
-  (see [the discovery report](docs/PHASE0_DISCOVERY.md)). Reports use it to say how much of the
-  original backlog has been cleared, and SIMULATE reads it instead of calling GitHub.
+* **Baseline** ([`fixtures/baseline.json`](fixtures/baseline.json)) — stored offline input for
+  SIMULATE and fallback operation: an inventory of every problem present in the fork at one fixed
+  commit, recorded before any of this program existed (see
+  [the discovery report](docs/PHASE0_DISCOVERY.md)).
 
 ## Prerequisites
 
@@ -230,9 +230,8 @@ After a run, the output directory contains:
 * `reports/issues/<candidate_id>.md` — issue text for each tracked problem.
 * `reports/prs/<candidate_id>.md` — pull-request text for each proposed fix.
 
-The baseline records the problems found before this program ran. Reports compare the current
-results with that starting list. If a kind of problem has no usable baseline record, the report
-shows `n/a` rather than zero.
+The baseline records the problems found before this program ran. SIMULATE uses those records when
+the target checkout is unavailable.
 
 ## Verification status
 

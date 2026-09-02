@@ -88,7 +88,6 @@ def simulated(tmp_path: Path) -> tuple[PipelineConfig, list[Candidate], tuple[Pa
         candidates,
         run_id=RUN_ID,
         output_dir=tmp_path / "out",
-        baseline={},
         config=config,
     )
     return config, candidates, produced
@@ -175,10 +174,10 @@ def test_simulate_flow_is_idempotent_across_reruns(tmp_path: Path) -> None:
     candidates = three_lane_candidates(tmp_path, config)
     output = tmp_path / "out"
 
-    first = simulate_run(candidates, run_id="sim-1", output_dir=output, baseline={}, config=config)
+    first = simulate_run(candidates, run_id="sim-1", output_dir=output, config=config)
     store = CandidateStateStore(output / "state" / "candidates.jsonl")
     before = {row.candidate_id for row in store.rows()}
-    second = simulate_run(candidates, run_id="sim-2", output_dir=output, baseline={}, config=config)
+    second = simulate_run(candidates, run_id="sim-2", output_dir=output, config=config)
 
     def artifacts(paths: tuple[Path, ...]) -> set[str]:
         return {path.name for path in paths if not path.name.startswith("run-")}

@@ -91,7 +91,7 @@ error under LIVE — never an empty or stale candidate set read as "no debt foun
 
 **LANE 3 — EOL `@deprecated` removals.** AST scan of `superset/**/*.py` yielding `module:qualname`. EOL = `removed_in <=` current version, or, absent `removed_in`, `major(deprecated_in) <= current_major - eol_major_lag` (`eol_major_lag = 2`). `current_major` is the highest concrete release in `version_source` — **6** at
 baseline, so the threshold is `major <= 4`; a source with no concrete release is a startup error. Live: 2 EOL sites, 1 automatable (`normalize_indexes`). LANES 2 and 3 are likewise computed fresh on every run — both are AST scans the orchestrator performs over the checked-out fork at `base_sha` — and `fixtures/baseline.json` is
-only the SIMULATE input and the burn-down denominator, never live input.
+only the SIMULATE input and offline fallback data, never live input.
 
 **Gates** — binary, all must pass, each failure recording its own reason:
 
@@ -234,8 +234,7 @@ or a fork match — never by a state value alone. A per-candidate failure defers
 - Failed sessions retain their observed `session_id` on terminal and deferred rows; retries may replace that ID, so it is evidence rather than durable identity.
 - **Layer 2** `reports/run-<run_id>.md`: candidates seen, gated out with reasons, scored, dispatched, deferred, every terminal candidate with its reason, PR and issue links, merge results, `skipped`/`neutral` check runs named, and every `awaiting_human_merge` PR called out as awaiting a human. No candidate may be unaccounted
   for.
-- **Layer 3** `reports/kpis.md`: observed human-merge rate (verified externally merged PRs over published PRs); **verification pass rate = candidates whose declared criterion was satisfied / candidates dispatched**, reported overall and per lane since the criteria differ; backlog burn-down per lane against
-  `fixtures/baseline.json` (`n/a` for a lane absent from `baseline_valid_lanes`); test-inclusion rate over the candidates whose criterion required a test; issues created and issues adopted, split by tier, with high-tier issues closed by their merged PR counted separately; session-failure rate; deferred-by-reason. Alerts when
+- **Layer 3** `reports/kpis.md`: observed human-merge rate (verified externally merged PRs over published PRs); **verification pass rate = candidates whose declared criterion was satisfied / candidates dispatched**, reported overall and per lane since the criteria differ; test-inclusion rate over the candidates whose criterion required a test; issues created and issues adopted, split by tier, with high-tier issues closed by their merged PR counted separately; session-failure rate; deferred-by-reason. Alerts when
   merge rate `< merge_rate_floor = 0.50`, verification pass rate `< verification_pass_rate_floor = 0.80`, publication safety undetermined, or session-failure rate `> session_failure_ceiling = 0.30`. Verification pass rate uses dispatched candidates evidenced by persisted `head_branch` and the current run's event IDs, and is reported overall and per lane. SIMULATE preserves `unconfigured` marker outcomes because it does not perform a search; only LIVE `unconfigured` outcomes contribute to publication-safety uncertainty, while failed and orphaned outcomes count in every mode.
 
 ## 15. Configuration and modes

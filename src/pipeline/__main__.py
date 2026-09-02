@@ -1266,7 +1266,6 @@ def run_once(
         settled,
         run_id=run_id,
         output_dir=output_dir,
-        baseline=baseline,
         config=config,
         fix_outputs=runner.fix_outputs,
         capability_notes=notes,

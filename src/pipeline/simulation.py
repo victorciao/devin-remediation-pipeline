@@ -29,7 +29,6 @@ def render_run_artifacts(
     *,
     run_id: str,
     output_dir: Path,
-    baseline: dict[str, object],
     config: PipelineConfig,
     fix_outputs: Mapping[str, Mapping[str, object]] | None = None,
     capability_notes: Sequence[str] = (),
@@ -151,7 +150,7 @@ def render_run_artifacts(
         mode=config.mode,
     )
     kpi_path = output_dir / "reports" / "kpis.md"
-    write_kpi_report(kpi_path, list(rendered_candidates), event_log.read(), baseline, config)
+    write_kpi_report(kpi_path, list(rendered_candidates), event_log.read(), config)
     produced.extend((run_path, kpi_path))
     return tuple(produced)
 

@@ -25,13 +25,11 @@ def test_results_rendering_is_deterministic() -> None:
     )
     run = RunArtifacts(Path("/runs/one"), Path("candidates-live.jsonl"), (candidate,), ())
 
-    assert render_results((run,), {}, PipelineConfig()) == render_results(
-        (run,), {}, PipelineConfig()
-    )
+    assert render_results((run,), PipelineConfig()) == render_results((run,), PipelineConfig())
 
 
 def test_results_rendering_handles_empty_input() -> None:
-    report = render_results((), {}, PipelineConfig())
+    report = render_results((), PipelineConfig())
 
     assert "no run directory was supplied" in report
     assert "no candidate reached an issue or a pull request" in report
@@ -57,7 +55,7 @@ def test_unpublished_candidates_are_excluded_but_counted() -> None:
         (),
     )
 
-    report = render_results((run,), {}, PipelineConfig())
+    report = render_results((run,), PipelineConfig())
 
     assert "`published`" in report
     assert "`unpublished`" not in report
@@ -91,7 +89,7 @@ def test_later_narrow_run_cannot_erase_a_proven_terminal_outcome() -> None:
     )
 
     candidates, _ = aggregate(runs)
-    report = render_results(runs, {}, PipelineConfig())
+    report = render_results(runs, PipelineConfig())
 
     assert candidates == [proven]
     assert "https://github.test/issues/1" in report
@@ -122,6 +120,47 @@ def test_later_more_advanced_run_wins_over_deferred() -> None:
     )
 
     assert candidates == [advanced]
+
+
+def test_per_run_first_seen_counts_a_candidate_only_in_its_first_run() -> None:
+    first_candidate = codeql_candidate(
+        candidate_id="repeated",
+        state=CandidateState.ISSUE_CREATED,
+        issue_url="https://github.test/issues/1",
+    )
+    later_candidate = first_candidate.model_copy(update={"state": CandidateState.SESSION_DONE})
+    first = RunArtifacts(
+        Path("/runs/20260101T000000Z-first"),
+        Path("first.jsonl"),
+        (first_candidate,),
+        (),
+    )
+    later = RunArtifacts(
+        Path("/runs/20260102T000000Z-later"),
+        Path("later.jsonl"),
+        (later_candidate,),
+        (),
+    )
+
+    report = render_results((later, first), PipelineConfig())
+    rows = [line for line in report.splitlines() if line.startswith("| `2026010")]
+
+    assert rows[0].startswith("| `20260101T000000Z-first` | 1 | 1 |")
+    assert rows[1].startswith("| `20260102T000000Z-later` | 1 | 0 |")
+
+
+def test_per_run_missing_evidence_renders_na_instead_of_zero() -> None:
+    candidate = codeql_candidate(candidate_id="without-evidence")
+    run = RunArtifacts(
+        Path("/runs/20260101T000000Z-missing"),
+        Path("missing.jsonl"),
+        (candidate,),
+        (),
+    )
+
+    report = render_results((run,), PipelineConfig())
+
+    assert "| `20260101T000000Z-missing` | 1 | 1 | 0 | 0 | 0 | n/a | n/a |" in report
 
 
 def test_lifecycle_progress_ranks_every_candidate_state() -> None:
