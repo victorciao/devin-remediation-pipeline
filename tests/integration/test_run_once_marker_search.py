@@ -203,6 +203,23 @@ def test_merge_sweep_records_an_unenumerated_closed_pr_as_terminal(
     assert sum(path.endswith("/pulls/2") for path in transport.reads) == 1
 
 
+def test_merge_sweep_ignores_an_open_pr_without_rewriting_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An open PR remains pending and is not counted as a current-run candidate."""
+    transport = FakeGitHubTransport(pr_state="open")
+    output_dir, persisted = run_merge_sweep(tmp_path, transport, monkeypatch)
+
+    state_path = output_dir / "state" / LIVE_STATE_FILE
+    assert state_path.read_text(encoding="utf-8") == (
+        json.dumps(persisted.model_dump(mode="json")) + "\n"
+    )
+    assert sum(path.endswith("/pulls/2") for path in transport.reads) == 1
+    run_report = next((output_dir / "reports").glob("run-*.md")).read_text(encoding="utf-8")
+    assert "- Candidates seen: 0" in run_report
+
+
 class UnreachablePullRequestTransport(FakeGitHubTransport):
     """Fail only the PR read used by the merge re-observation sweep."""
 
@@ -226,7 +243,12 @@ def test_merge_sweep_keeps_unreachable_pr_unchanged(
     }[persisted.candidate_id]
     assert latest == persisted.model_dump(mode="json")
     assert sum(path.endswith("/pulls/2") for path in transport.reads) == 1
+    state_path = output_dir / "state" / LIVE_STATE_FILE
+    assert state_path.read_text(encoding="utf-8") == (
+        json.dumps(persisted.model_dump(mode="json")) + "\n"
+    )
     run_report = next((output_dir / "reports").glob("run-*.md")).read_text(encoding="utf-8")
+    assert "- Candidates seen: 0" in run_report
     assert (
         "persisted-awaiting: pull request observation unavailable: service unavailable"
         in run_report

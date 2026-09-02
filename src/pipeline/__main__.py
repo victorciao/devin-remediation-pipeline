@@ -242,17 +242,17 @@ class CandidateRunner:
             latest = self.state_store.resume(candidate.candidate_id) or candidate
             return self._deferred(latest, ReasonCode.CAPABILITY_UNAVAILABLE, str(exc))
 
-    def reobserve_merge(self, candidate: Candidate) -> Candidate:
+    def reobserve_merge(self, candidate: Candidate) -> Candidate | None:
         """Re-observe one persisted PR without re-entering candidate publication."""
         if self.live is None or candidate.pr_number is None:
-            return candidate
+            return None
         try:
             match = self.live.client.pull_request(candidate.pr_number)
         except (GitHubResponseError, HttpTransportError) as exc:
             self.notes.append(
                 f"{candidate.candidate_id}: pull request observation unavailable: {exc}"
             )
-            return candidate
+            return None
         if match is not None and match.merged_at is not None:
             self.notes.append(
                 f"{candidate.candidate_id}: merge re-observed externally: {match.url}"
@@ -273,7 +273,7 @@ class CandidateRunner:
                 pr_number=match.number,
                 pr_url=match.url,
             )
-        return candidate
+        return None
 
     @staticmethod
     def _settled(candidate: Candidate) -> bool:
@@ -1300,7 +1300,9 @@ def run_once(
                 and candidate.state is CandidateState.AWAITING_HUMAN_MERGE
                 and candidate.pr_number is not None
             ):
-                settled.append(runner.reobserve_merge(candidate))
+                observed = runner.reobserve_merge(candidate)
+                if observed is not None:
+                    settled.append(observed)
 
     notes.extend(_capability_notes(baseline, target_exists=target_exists, config=config))
     if state_store.quarantined_rows:
