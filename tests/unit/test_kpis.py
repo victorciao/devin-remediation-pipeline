@@ -538,6 +538,37 @@ def test_kpi_report_distinguishes_cumulative_and_current_merge_labels(
     assert "- **Awaiting Merge Now:** 1" in report
 
 
+def test_kpi_report_formats_float_scalars_without_rounding_integers(
+    simulate_config: PipelineConfig,
+) -> None:
+    """Display formatting rounds rates while preserving integer and 1.0 values."""
+    candidates = [
+        codeql_candidate(
+            candidate_id=f"candidate-{index}",
+            run_id="run-1",
+            head_branch=f"devin/candidate-{index}",
+        )
+        for index in range(3)
+    ]
+    events = [
+        event("candidate-0", session_id="session-1"),
+        event(
+            "candidate-1",
+            terminal_outcome=CandidateState.MERGED,
+            pr_url="https://example.invalid/pr/merged",
+            merged_at=MERGED_AT,
+            merge_verified=True,
+        ),
+    ]
+
+    report = render_kpi_report(candidates, events, simulate_config)
+
+    assert "- **Sessions Per Candidate (simulated):** 0.333" in report
+    assert "0.3333333333333333" not in report
+    assert "- **Candidates Seen:** 3" in report
+    assert "- **Merge Rate:** 1.0" in report
+
+
 def test_rejected_counts_distinct_failed_pull_requests_across_retries(
     simulate_config: PipelineConfig,
 ) -> None:

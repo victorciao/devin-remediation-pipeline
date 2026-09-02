@@ -36,6 +36,16 @@ def kpi_label(name: str) -> str:
     return label
 
 
+KPI_FLOAT_PRECISION = 3
+
+
+def kpi_display(value: object) -> str:
+    """Render one KPI scalar for display, at fixed float precision."""
+    if isinstance(value, float):
+        return str(round(value, KPI_FLOAT_PRECISION))
+    return str(value)
+
+
 def compute_kpis(
     candidates: list[Candidate],
     events: list[EventRecord],
@@ -417,7 +427,9 @@ def render_kpi_report(
         elif name.endswith("_alert"):
             continue
         else:
-            lines.append(f"- **{label}:** {'n/a' if metric_value is None else metric_value}")
+            lines.append(
+                f"- **{label}:** {'n/a' if metric_value is None else kpi_display(metric_value)}"
+            )
     lines.extend(["", "## Deferred by reason", ""])
     deferred_by_reason = metrics["deferred_by_reason"]
     if isinstance(deferred_by_reason, dict):
@@ -466,6 +478,7 @@ def write_kpi_report(
 __all__ = [
     "NotApplicable",
     "compute_kpis",
+    "kpi_display",
     "kpi_label",
     "render_kpi_report",
     "write_kpi_report",

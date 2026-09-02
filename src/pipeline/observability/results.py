@@ -13,6 +13,7 @@ from pipeline.observability.kpis import (
     KpiValue,
     NotApplicable,
     compute_kpis,
+    kpi_display,
     kpi_label,
 )
 from pipeline.observability.scope import written_by_run
@@ -205,9 +206,11 @@ def _kpi_cell(value: KpiValue) -> str:
         return f"n/a ({value.reason.value})"
     if isinstance(value, dict):
         return (
-            ", ".join(f"{key}={value[key]}" for key in sorted(value)) if value else "none recorded"
+            ", ".join(f"{key}={kpi_display(value[key])}" for key in sorted(value))
+            if value
+            else "none recorded"
         )
-    return str(value)
+    return kpi_display(value)
 
 
 def render_results(
