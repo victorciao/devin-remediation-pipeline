@@ -13,6 +13,7 @@ from pipeline.observability.kpis import (
     KpiValue,
     NotApplicable,
     compute_kpis,
+    kpi_label,
 )
 from pipeline.observability.scope import written_by_run
 from pipeline.schemas import (
@@ -45,6 +46,20 @@ LIFECYCLE_PROGRESS: dict[CandidateState, int] = {
 
 class ResultsInputError(RuntimeError):
     """Raised when a run directory does not carry the artifacts a report needs."""
+
+
+def _row_progress(candidate: Candidate) -> float:
+    """Rank one row's lifecycle position, honouring external settlement.
+
+    A published pull request that a human closed is settled, not regressed: it
+    outranks the pending row it replaces, and never outranks a merge.
+    """
+    if (
+        candidate.state is CandidateState.TERMINAL
+        and candidate.reason is ReasonCode.CLOSED_PULL_REQUEST
+    ):
+        return LIFECYCLE_PROGRESS[CandidateState.AWAITING_HUMAN_MERGE] + 0.5
+    return float(LIFECYCLE_PROGRESS[candidate.state])
 
 
 @dataclass(frozen=True)
@@ -128,11 +143,11 @@ def read_run(run_dir: Path) -> RunArtifacts:
 
 def aggregate(runs: Sequence[RunArtifacts]) -> tuple[list[Candidate], list[EventRecord]]:
     """Merge runs by lifecycle progress, breaking ties in favor of later runs."""
-    latest: dict[str, tuple[int, int, Candidate]] = {}
+    latest: dict[str, tuple[float, int, Candidate]] = {}
     events: list[EventRecord] = []
     for run_index, run in enumerate(runs):
         for candidate in run.candidates:
-            rank = LIFECYCLE_PROGRESS[candidate.state]
+            rank = _row_progress(candidate)
             previous = latest.get(candidate.candidate_id)
             if previous is None or (rank, run_index) >= (previous[0], previous[1]):
                 latest[candidate.candidate_id] = (rank, run_index, candidate)
@@ -343,11 +358,7 @@ def render_results(
     for name, value in metrics.items():
         if name in _KPI_SECTION_KEYS:
             continue
-        label = name.replace("_", " ").title()
-        if name == "dispatched_pr":
-            label = "Problems With Pull Request"
-        elif name == "pull_requests_opened":
-            label = "Pull Requests Opened"
+        label = kpi_label(name)
         lines.append(f"- **{label}:** {_kpi_cell(value)}")
     lines.extend(["", "## Deferred by reason", ""])
     deferred = metrics["deferred_by_reason"]

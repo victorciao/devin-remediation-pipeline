@@ -22,6 +22,20 @@ class NotApplicable:
 KpiValue: TypeAlias = float | int | None | NotApplicable | dict[str, int] | dict[str, float]
 
 
+def kpi_label(name: str) -> str:
+    """Return the display label for a KPI key."""
+    label = name.replace("_", " ").title()
+    if name == "dispatched_pr":
+        return "Problems With Pull Request"
+    if name == "pull_requests_opened":
+        return "Pull Requests Opened"
+    if name == "manual_merge_pending":
+        return "Reached Manual Merge Gate (cumulative)"
+    if name == "awaiting_merge":
+        return "Awaiting Merge Now"
+    return label
+
+
 def compute_kpis(
     candidates: list[Candidate],
     events: list[EventRecord],
@@ -93,7 +107,12 @@ def compute_kpis(
         and event.test_exempt_reason is None
         for event in pr_events
     )
-    rejected = sum(event.reason is ReasonCode.CI_CHECK_FAILED for event in pr_events)
+    rejected_pr_urls = {
+        event.pr_url
+        for event in events
+        if event.pr_url is not None and event.reason is ReasonCode.CI_CHECK_FAILED
+    }
+    rejected = len(rejected_pr_urls)
     merged_total = sum(event.merged_at is not None for event in pr_events)
     edited = max(merged_total - merged_clean, 0)
     manual_merge_pending = len(
@@ -386,11 +405,7 @@ def render_kpi_report(
             "verification_pass_rate_by_lane",
         }:
             continue
-        label = name.replace("_", " ").title()
-        if name == "dispatched_pr":
-            label = "Problems With Pull Request"
-        elif name == "pull_requests_opened":
-            label = "Pull Requests Opened"
+        label = kpi_label(name)
         if config.mode is Mode.SIMULATE and name in {
             "sessions_created",
             "sessions_per_candidate",
@@ -451,6 +466,7 @@ def write_kpi_report(
 __all__ = [
     "NotApplicable",
     "compute_kpis",
+    "kpi_label",
     "render_kpi_report",
     "write_kpi_report",
 ]

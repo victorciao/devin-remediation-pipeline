@@ -520,6 +520,51 @@ def test_kpi_report_is_written_to_the_local_sink(
     ) in report
 
 
+def test_kpi_report_distinguishes_cumulative_and_current_merge_labels(
+    simulate_config: PipelineConfig,
+) -> None:
+    """Merge KPI labels distinguish historical reach from currently pending work."""
+    events = [
+        event(
+            "pending",
+            terminal_outcome=CandidateState.AWAITING_HUMAN_MERGE,
+            pr_url="https://example.invalid/pr/pending",
+        ),
+    ]
+
+    report = render_kpi_report([], events, simulate_config)
+
+    assert "- **Reached Manual Merge Gate (cumulative):** 1" in report
+    assert "- **Awaiting Merge Now:** 1" in report
+
+
+def test_rejected_counts_distinct_failed_pull_requests_across_retries(
+    simulate_config: PipelineConfig,
+) -> None:
+    """A failed PR remains visible when a later retry succeeds with another PR."""
+    events = [
+        event(
+            "retried",
+            terminal_outcome=CandidateState.TERMINAL,
+            pr_url="https://example.invalid/pr/failed",
+            reason=ReasonCode.CI_CHECK_FAILED,
+        ),
+        event(
+            "retried",
+            terminal_outcome=CandidateState.MERGED,
+            pr_url="https://example.invalid/pr/merged",
+            merged_at=MERGED_AT,
+            merge_verified=True,
+        ),
+    ]
+
+    rollup = compute_kpis([], events, simulate_config)
+
+    assert rollup["rejected"] == 1
+    assert rollup["merged_clean"] == 1
+    assert rollup["merge_rate"] == 1.0
+
+
 def test_the_kpi_title_says_simulated_only_when_writes_were_suppressed(
     simulate_config: PipelineConfig,
 ) -> None:
