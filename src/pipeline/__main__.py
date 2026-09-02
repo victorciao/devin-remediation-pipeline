@@ -356,7 +356,12 @@ class CandidateRunner:
         ):
             return persisted
         if persisted is not None and persisted.merged_at is not None:
-            return self._persist(candidate, state=CandidateState.MERGED, **update)
+            return self._persist(
+                candidate,
+                run_id=candidate.run_id if candidate.run_id is not None else self.run_id,
+                state=CandidateState.MERGED,
+                **update,
+            )
         reconciled = candidate.model_copy(update=update)
         if (
             persisted is not None

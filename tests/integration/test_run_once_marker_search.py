@@ -232,6 +232,9 @@ def test_merge_sweep_reobserves_a_budget_deferred_enumerated_pr(
     assert sum(path.endswith("/pulls/2") for path in transport.reads) == 1
     report = (output_dir / "reports" / "kpis.md").read_text(encoding="utf-8")
     assert "**Merged Clean:** 1" in report
+    assert "- **Candidates Seen:** 1" in report
+    events = EventLog(output_dir / "reports" / "events.jsonl").read()
+    assert sum(event.candidate_id == persisted.candidate_id for event in events) == 1
     run_report = next((output_dir / "reports").glob("run-*.md")).read_text(encoding="utf-8")
     assert "- Merges re-observed: 1" in run_report
 

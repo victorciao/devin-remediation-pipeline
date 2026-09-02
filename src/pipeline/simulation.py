@@ -84,7 +84,15 @@ def render_run_artifacts(
             )
             rendered_candidates[index] = latest
 
-    observed_candidates = [*rendered_candidates, *reobserved_candidates]
+    observed_candidates: list[Candidate] = []
+    observed_indexes: dict[str, int] = {}
+    for candidate in [*rendered_candidates, *reobserved_candidates]:
+        candidate_id = candidate.candidate_id
+        if candidate_id in observed_indexes:
+            observed_candidates[observed_indexes[candidate_id]] = candidate
+            continue
+        observed_indexes[candidate_id] = len(observed_candidates)
+        observed_candidates.append(candidate)
     fixes = fix_outputs or {}
     pr_template = (config.templates_dir / "superset/PULL_REQUEST_TEMPLATE.md").read_text(
         encoding="utf-8"

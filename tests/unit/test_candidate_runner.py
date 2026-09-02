@@ -366,6 +366,28 @@ def test_merged_candidate_is_final_and_preserves_merge_evidence(tmp_path: Path) 
     assert transport.reads == []
 
 
+def test_reconcile_preserves_attribution_for_existing_merge_evidence(tmp_path: Path) -> None:
+    """Existing merge evidence retains the row's original run attribution."""
+    transport = FakeGitHubTransport()
+    runner, store = _runner(tmp_path, transport, NoSessionOrchestrator())
+    candidate = codeql_candidate(action=Action.OPEN_PR, run_id="previous-run")
+    store.append(
+        candidate.model_copy(
+            update={
+                "state": CandidateState.DISPATCHING,
+                "pr_number": 2,
+                "pr_url": "https://github.test/victorciao/superset/pull/2",
+                "merged_at": "2026-09-01T00:00:00Z",
+            }
+        )
+    )
+
+    result = runner.process(candidate)
+
+    assert result.state is CandidateState.MERGED
+    assert result.run_id == "previous-run"
+
+
 def test_reconcile_observes_human_closed_pr(tmp_path: Path) -> None:
     """A later run records a human-closed PR as terminal."""
     transport = FakeGitHubTransport(pr_state="closed")
