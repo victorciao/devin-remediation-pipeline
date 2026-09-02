@@ -57,6 +57,44 @@ def test_results_names_the_run_scoped_column_and_cumulative_kpis() -> None:
     ) in report
 
 
+def test_results_formats_scalar_and_per_lane_float_kpis() -> None:
+    candidates = tuple(
+        codeql_candidate(
+            candidate_id=f"candidate-{index}",
+            run_id="run-1",
+            head_branch=f"devin/candidate-{index}",
+        )
+        for index in range(3)
+    )
+    events = (
+        EventRecord(
+            run_id="run-1",
+            lane=Lane.CODEQL,
+            candidate_id="candidate-0",
+            session_id="session-1",
+            criterion_evidence=CriterionEvidence(criterion="criterion", satisfied=True),
+        ),
+        EventRecord(
+            run_id="run-1",
+            lane=Lane.CODEQL,
+            candidate_id="candidate-1",
+        ),
+        EventRecord(
+            run_id="run-1",
+            lane=Lane.CODEQL,
+            candidate_id="candidate-2",
+        ),
+    )
+    run = RunArtifacts(Path("/runs/20260101T000000Z-floats"), Path("state"), candidates, events)
+
+    report = render_results((run,), PipelineConfig())
+
+    assert "**Sessions Per Candidate:** 0.333" in report
+    assert "0.3333333333333333" not in report
+    assert "codeql=0.333" in report
+    assert "codeql=0.3333333333333333" not in report
+
+
 def test_results_rendering_handles_empty_input() -> None:
     report = render_results((), PipelineConfig())
 
