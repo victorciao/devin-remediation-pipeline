@@ -22,11 +22,13 @@ import pytest
 
 from pipeline import __main__ as entrypoint
 from pipeline.config import Mode, PipelineConfig
+from pipeline.github_client import GitHubClient
 from pipeline.http_transport import HttpTransportError
 from pipeline.lanes.codeql import read_alert_fixture
 from pipeline.observability.events import EventLog
 from pipeline.schemas import (
     Action,
+    Candidate,
     CandidateState,
     EventRecord,
     Lane,
@@ -116,6 +118,143 @@ def config_for(mode: Mode, **fields: Any) -> PipelineConfig:  # noqa: ANN401
         templates_dir=TEMPLATES_DIR,
         alert_fixture_path=FIXTURES_DIR / "codeql_alerts.json",
         **{"ci_wait_timeout_s": 1, **fields},
+    )
+
+
+def persisted_awaiting(output_dir: Path) -> Candidate:
+    """Persist one settled PR row that a later run can re-observe."""
+    candidate = lane3_candidate(
+        candidate_id="persisted-awaiting",
+        run_id="previous-run",
+        state=CandidateState.AWAITING_HUMAN_MERGE,
+        action=Action.OPEN_PR,
+        reason=ReasonCode.MANUAL_MERGE_REQUIRED,
+        issue_number=1,
+        issue_url="https://github.test/victorciao/superset/issues/1",
+        pr_number=2,
+        pr_url="https://github.test/victorciao/superset/pull/2",
+    )
+    state_path = output_dir / "state" / LIVE_STATE_FILE
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(candidate.model_dump(mode="json")) + "\n",
+        encoding="utf-8",
+    )
+    return candidate
+
+
+def run_merge_sweep(
+    tmp_path: Path,
+    transport: FakeGitHubTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, Candidate]:
+    """Run LIVE with no enumerated candidates and one persisted PR to sweep."""
+    output_dir = tmp_path / "out"
+    persisted = persisted_awaiting(output_dir)
+    transport.completed_workflow_runs = True
+    monkeypatch.setattr(entrypoint, "UrllibGitHubTransport", lambda: transport)
+    monkeypatch.setattr(entrypoint, "UrllibDevinTransport", FakeDevinTransport)
+    monkeypatch.setattr(entrypoint, "_enumerate", lambda **_kwargs: [])
+    entrypoint.run_once(
+        config=config_for(Mode.LIVE),
+        repo_path=TARGET_CHECKOUT,
+        output_dir=output_dir,
+        baseline_path=baseline_file(tmp_path),
+        base_sha="1" * 40,
+        head_branch="devin/merge-sweep",
+        base_branch="master",
+    )
+    return output_dir, persisted
+
+
+def test_merge_sweep_reobserves_an_unenumerated_merged_pr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A merged PR remains observable after its source alert disappears."""
+    transport = FakeGitHubTransport(pr_merged_at="2026-09-01T00:00:00Z")
+    output_dir, persisted = run_merge_sweep(tmp_path, transport, monkeypatch)
+
+    rows = read_rows(output_dir / "state" / LIVE_STATE_FILE)
+    latest = {row["candidate_id"]: row for row in rows}[persisted.candidate_id]
+    assert latest["state"] == CandidateState.MERGED.value
+    assert latest["merge_verified"] is True
+    assert latest["merged_at"] == "2026-09-01T00:00:00Z"
+    assert sum(path.endswith("/pulls/2") for path in transport.reads) == 1
+    report = (output_dir / "reports" / "kpis.md").read_text(encoding="utf-8")
+    assert "**Merge Rate:** 1.0" in report
+    run_report = next((output_dir / "reports").glob("run-*.md")).read_text(encoding="utf-8")
+    assert "merge re-observed externally" in run_report
+
+
+def test_merge_sweep_records_an_unenumerated_closed_pr_as_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A human-closed PR becomes a durable closed-pull-request terminal row."""
+    transport = FakeGitHubTransport(pr_state="closed")
+    output_dir, persisted = run_merge_sweep(tmp_path, transport, monkeypatch)
+
+    latest = {
+        row["candidate_id"]: row for row in read_rows(output_dir / "state" / LIVE_STATE_FILE)
+    }[persisted.candidate_id]
+    assert latest["state"] == CandidateState.TERMINAL.value
+    assert latest["reason"] == ReasonCode.CLOSED_PULL_REQUEST.value
+    assert sum(path.endswith("/pulls/2") for path in transport.reads) == 1
+
+
+class UnreachablePullRequestTransport(FakeGitHubTransport):
+    """Fail only the PR read used by the merge re-observation sweep."""
+
+    def get(self, path: str) -> object:
+        if path.endswith("/pulls/2"):
+            self.reads.append(path)
+            raise HttpTransportError("service unavailable", status_code=503)
+        return super().get(path)
+
+
+def test_merge_sweep_keeps_unreachable_pr_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreachable PR is noted and cannot abort the otherwise successful run."""
+    transport = UnreachablePullRequestTransport()
+    output_dir, persisted = run_merge_sweep(tmp_path, transport, monkeypatch)
+
+    latest = {
+        row["candidate_id"]: row for row in read_rows(output_dir / "state" / LIVE_STATE_FILE)
+    }[persisted.candidate_id]
+    assert latest == persisted.model_dump(mode="json")
+    assert sum(path.endswith("/pulls/2") for path in transport.reads) == 1
+    run_report = next((output_dir / "reports").glob("run-*.md")).read_text(encoding="utf-8")
+    assert (
+        "persisted-awaiting: merge observation unavailable: service unavailable"
+        in run_report
+    )
+
+
+def test_simulate_does_not_reobserve_persisted_pull_requests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SIMULATE never constructs or calls the LIVE merge-observation client."""
+    output_dir = tmp_path / "out"
+    persisted = persisted_awaiting(output_dir).model_dump(mode="json")
+    state_path = output_dir / "state" / SIMULATE_STATE_FILE
+    state_path.write_text(json.dumps(persisted) + "\n", encoding="utf-8")
+    monkeypatch.setattr(entrypoint, "_enumerate", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        GitHubClient,
+        "pull_request",
+        lambda *_args, **_kwargs: pytest.fail("SIMULATE must not read pull requests"),
+    )
+
+    entrypoint.run_once(
+        config=config_for(Mode.SIMULATE),
+        repo_path=tmp_path / "nonexistent-target",
+        output_dir=output_dir,
+        baseline_path=baseline_file(tmp_path),
+        base_sha="1" * 40,
     )
 
 

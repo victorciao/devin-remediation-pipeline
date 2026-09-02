@@ -242,6 +242,37 @@ class CandidateRunner:
             latest = self.state_store.resume(candidate.candidate_id) or candidate
             return self._deferred(latest, ReasonCode.CAPABILITY_UNAVAILABLE, str(exc))
 
+    def reobserve_merge(self, candidate: Candidate) -> Candidate:
+        """Re-observe one persisted PR without re-entering candidate publication."""
+        if self.live is None or candidate.pr_number is None:
+            return candidate
+        try:
+            match = self.live.client.pull_request(candidate.pr_number)
+        except (GitHubResponseError, HttpTransportError) as exc:
+            self.notes.append(f"{candidate.candidate_id}: merge observation unavailable: {exc}")
+            return candidate
+        if match is not None and match.merged_at is not None:
+            self.notes.append(
+                f"{candidate.candidate_id}: merge re-observed externally: {match.url}"
+            )
+            return self._persist(
+                candidate,
+                state=CandidateState.MERGED,
+                pr_number=match.number,
+                pr_url=match.url,
+                merged_at=match.merged_at,
+                merge_verified=True,
+            )
+        if match is not None and match.state == "closed":
+            return self._persist(
+                candidate,
+                state=CandidateState.TERMINAL,
+                reason=ReasonCode.CLOSED_PULL_REQUEST,
+                pr_number=match.number,
+                pr_url=match.url,
+            )
+        return candidate
+
     @staticmethod
     def _settled(candidate: Candidate) -> bool:
         return candidate.state in {
@@ -1259,6 +1290,15 @@ def run_once(
         ci_mode=config.ci_evidence_mode,
     )
     settled = [runner.process(candidate) for candidate in dispatched]
+    if live is not None:
+        processed_ids = {candidate.candidate_id for candidate in settled}
+        for candidate in state_store.latest().values():
+            if (
+                candidate.candidate_id not in processed_ids
+                and candidate.state is CandidateState.AWAITING_HUMAN_MERGE
+                and candidate.pr_number is not None
+            ):
+                settled.append(runner.reobserve_merge(candidate))
 
     notes.extend(_capability_notes(baseline, target_exists=target_exists, config=config))
     if state_store.quarantined_rows:
