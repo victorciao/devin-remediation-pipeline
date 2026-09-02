@@ -310,17 +310,17 @@ these inputs:
 * `tier_high_min`
 * `max_total_acu`
 
-The equivalent command is:
+The equivalent command needs the [GitHub CLI](https://cli.github.com/) signed in as an account
+that can run workflows in this repository (`gh auth login`, or `GH_TOKEN` set to a token with the
+`workflow` scope). Empty values mean "use the default".
 
 ```bash
 gh workflow run remediation.yml --repo victorciao/devin-remediation-pipeline --ref main \
   -f only_lanes= -f budget_n=1 -f max_sessions=1 -f tier_high_min= -f max_total_acu=
 ```
 
+See [Output files](#output-files) for what a hosted run leaves behind.
+
 ### Weekly schedule
 
 The workflow runs every Monday at 03:17 UTC (`17 3 * * 1`).
-
-The run uploads an artifact named `remediation-<run_id>`. It also publishes the run directory
-under `history/` and refreshes `RESULTS.md` when publication succeeds. The resulting reports and
-history are the hosted evidence for the run.
