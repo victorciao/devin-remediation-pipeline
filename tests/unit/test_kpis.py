@@ -394,6 +394,33 @@ def test_sessions_are_simulation_labelled_in_both_reports(simulate_config: Pipel
 
 
 @pytest.mark.parametrize(
+    ("candidate_run_id", "expected"),
+    [("previous-run", 0), ("run-1", 1)],
+)
+def test_session_counts_are_scoped_to_the_rendered_run(
+    candidate_run_id: str,
+    expected: int,
+    simulate_config: PipelineConfig,
+) -> None:
+    """Session counts describe sessions attributed to the current run only."""
+    live_config = simulate_config.model_copy(update={"mode": Mode.LIVE})
+    candidate = codeql_candidate(
+        candidate_id="scoped-session",
+        run_id=candidate_run_id,
+        session_id="session-1",
+        session_attempts=1,
+    )
+    events = [event("scoped-session", session_id="session-1")]
+
+    report = render_run_report([candidate], run_id="run-1", mode=Mode.LIVE)
+    kpi = render_kpi_report([candidate], events, live_config)
+
+    assert f"- Session attempts: {expected}" in report
+    assert f"- Sessions created: {expected}" in report
+    assert f"- **Sessions Created:** {expected}" in kpi
+
+
+@pytest.mark.parametrize(
     ("safety_candidates", "expected_alert"),
     [
         ([], 0),
@@ -485,7 +512,12 @@ def test_kpi_report_is_written_to_the_local_sink(
 
     write_kpi_report(path, [], [merged("c1")], simulate_config)
 
-    assert path.read_text(encoding="utf-8").startswith("# SIMULATED Remediation KPI rollup")
+    report = path.read_text(encoding="utf-8")
+    assert report.startswith("# SIMULATED Remediation KPI rollup")
+    assert (
+        "KPI values are cumulative across every recorded run; the per-run table is scoped "
+        "to each run."
+    ) in report
 
 
 def test_the_kpi_title_says_simulated_only_when_writes_were_suppressed(

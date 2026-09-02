@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TypeAlias
 
 from pipeline.config import Mode, PipelineConfig
+from pipeline.observability.scope import written_by_run
 from pipeline.schemas import Candidate, CandidateState, EventRecord, Lane, ReasonCode
 from pipeline.state import has_local_artifact
 
@@ -52,9 +53,9 @@ def compute_kpis(
             issue_ids.add(event.candidate_id)
     dispatched_pr = len(pr_ids)
     dispatched_issue = len(issue_ids)
-    event_run_ids = {event.run_id for event in events}
     current_run_candidate_ids = {
-        candidate.candidate_id for candidate in candidates if candidate.run_id in event_run_ids
+        candidate.candidate_id
+        for candidate in written_by_run(candidates, {event.run_id for event in events})
     }
     session_ids = {
         candidate_id
@@ -368,7 +369,15 @@ def render_kpi_report(
         if config.mode is Mode.SIMULATE
         else "Remediation KPI rollup"
     )
-    lines = [f"# {title}", "", f"- mode: {config.mode.value}", ""]
+    lines = [
+        f"# {title}",
+        "",
+        f"- mode: {config.mode.value}",
+        "",
+        "KPI values are cumulative across every recorded run; the per-run table is scoped to "
+        "each run.",
+        "",
+    ]
     for name, metric_value in metrics.items():
         if name in {
             "deferred_by_reason",

@@ -188,7 +188,7 @@ def test_merge_sweep_reobserves_an_unenumerated_merged_pr(
     run_report = next((output_dir / "reports").glob("run-*.md")).read_text(encoding="utf-8")
     assert "merge re-observed externally" in run_report
     assert "- Merges re-observed: 1" in run_report
-    assert "- Candidates seen: 0" in run_report
+    assert "- Problems enumerated: 0" in run_report
     assert latest["run_id"] == persisted.run_id
     assert "**Verification Pass Rate:** n/a" in report
 
@@ -272,7 +272,7 @@ def test_merge_sweep_ignores_an_open_pr_without_rewriting_state(
     )
     assert sum(path.endswith("/pulls/2") for path in transport.reads) == 1
     run_report = next((output_dir / "reports").glob("run-*.md")).read_text(encoding="utf-8")
-    assert "- Candidates seen: 0" in run_report
+    assert "- Problems enumerated: 0" in run_report
 
 
 class UnreachablePullRequestTransport(FakeGitHubTransport):
@@ -303,7 +303,7 @@ def test_merge_sweep_keeps_unreachable_pr_unchanged(
         json.dumps(persisted.model_dump(mode="json")) + "\n"
     )
     run_report = next((output_dir / "reports").glob("run-*.md")).read_text(encoding="utf-8")
-    assert "- Candidates seen: 0" in run_report
+    assert "- Problems enumerated: 0" in run_report
     assert (
         "persisted-awaiting: pull request observation unavailable: service unavailable"
         in run_report

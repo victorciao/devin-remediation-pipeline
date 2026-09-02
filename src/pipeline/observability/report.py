@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pipeline.config import Mode
+from pipeline.observability.scope import written_by_run
 from pipeline.schemas import Action, Candidate, CandidateState, ReasonCode
 
 
@@ -184,13 +185,15 @@ def render_run_report(
         if safety_undetermined_count > 0
         else None
     )
-    session_count = sum(candidate.session_id is not None for candidate in rows)
+    session_rows = written_by_run(rows, {run_id})
+    session_count = sum(candidate.session_id is not None for candidate in session_rows)
+    session_attempts = sum(candidate.session_attempts for candidate in session_rows)
     return "\n".join(
         [
             f"# Run {run_id}",
             "",
             f"- mode: {mode.value}",
-            f"- Candidates seen: {summary.problems}",
+            f"- Problems enumerated: {summary.problems}",
             "- Merges re-observed: "
             f"{sum(candidate.state is CandidateState.MERGED for candidate in reobserved_rows)}",
             f"- Closed PRs re-observed: {closed_reobservations}",
@@ -226,7 +229,7 @@ def render_run_report(
             f"- Reached dispatching but unpublished: {unpublished_count}",
             f"- Publication safety undetermined: {safety_undetermined_count}",
             *([safety_alert] if safety_alert is not None else []),
-            f"- Session attempts: {sum(candidate.session_attempts for candidate in rows)}",
+            f"- Session attempts: {session_attempts}",
             f"- Sessions created{' (simulated)' if mode is Mode.SIMULATE else ''}: {session_count}",
             f"- Sessions per candidate{' (simulated)' if mode is Mode.SIMULATE else ''}: "
             f"{session_count / len(rows) if rows else 0.0}",
