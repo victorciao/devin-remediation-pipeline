@@ -93,7 +93,12 @@ def compute_kpis(
         and event.test_exempt_reason is None
         for event in pr_events
     )
-    rejected = sum(event.reason is ReasonCode.CI_CHECK_FAILED for event in pr_events)
+    rejected_pr_urls = {
+        event.pr_url
+        for event in events
+        if event.pr_url is not None and event.reason is ReasonCode.CI_CHECK_FAILED
+    }
+    rejected = len(rejected_pr_urls)
     merged_total = sum(event.merged_at is not None for event in pr_events)
     edited = max(merged_total - merged_clean, 0)
     manual_merge_pending = len(
@@ -391,6 +396,10 @@ def render_kpi_report(
             label = "Problems With Pull Request"
         elif name == "pull_requests_opened":
             label = "Pull Requests Opened"
+        elif name == "manual_merge_pending":
+            label = "Reached Manual Merge Gate (cumulative)"
+        elif name == "awaiting_merge":
+            label = "Awaiting Merge Now"
         if config.mode is Mode.SIMULATE and name in {
             "sessions_created",
             "sessions_per_candidate",

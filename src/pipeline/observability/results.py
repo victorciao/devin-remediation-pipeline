@@ -47,6 +47,20 @@ class ResultsInputError(RuntimeError):
     """Raised when a run directory does not carry the artifacts a report needs."""
 
 
+def _row_progress(candidate: Candidate) -> float:
+    """Rank one row's lifecycle position, honouring external settlement.
+
+    A published pull request that a human closed is settled, not regressed: it
+    outranks the pending row it replaces, and never outranks a merge.
+    """
+    if (
+        candidate.state is CandidateState.TERMINAL
+        and candidate.reason is ReasonCode.CLOSED_PULL_REQUEST
+    ):
+        return LIFECYCLE_PROGRESS[CandidateState.AWAITING_HUMAN_MERGE] + 0.5
+    return float(LIFECYCLE_PROGRESS[candidate.state])
+
+
 @dataclass(frozen=True)
 class RunArtifacts:
     """One run's persisted candidate rows and Layer 1 events."""
@@ -128,11 +142,11 @@ def read_run(run_dir: Path) -> RunArtifacts:
 
 def aggregate(runs: Sequence[RunArtifacts]) -> tuple[list[Candidate], list[EventRecord]]:
     """Merge runs by lifecycle progress, breaking ties in favor of later runs."""
-    latest: dict[str, tuple[int, int, Candidate]] = {}
+    latest: dict[str, tuple[float, int, Candidate]] = {}
     events: list[EventRecord] = []
     for run_index, run in enumerate(runs):
         for candidate in run.candidates:
-            rank = LIFECYCLE_PROGRESS[candidate.state]
+            rank = _row_progress(candidate)
             previous = latest.get(candidate.candidate_id)
             if previous is None or (rank, run_index) >= (previous[0], previous[1]):
                 latest[candidate.candidate_id] = (rank, run_index, candidate)

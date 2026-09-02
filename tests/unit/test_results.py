@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from pipeline.config import PipelineConfig
 from pipeline.observability.results import (
     LIFECYCLE_PROGRESS,
@@ -12,8 +14,24 @@ from pipeline.observability.results import (
     read_run,
     render_results,
 )
-from pipeline.schemas import CandidateState, CriterionEvidence, EventRecord, Lane, ReasonCode, Tier
+from pipeline.schemas import (
+    Candidate,
+    CandidateState,
+    CriterionEvidence,
+    EventRecord,
+    Lane,
+    ReasonCode,
+    Tier,
+)
 from tests.factories import codeql_candidate
+
+
+def _run(
+    name: str,
+    candidate: Candidate,
+    events: tuple[EventRecord, ...] = (),
+) -> RunArtifacts:
+    return RunArtifacts(Path(f"/runs/{name}"), Path(f"{name}.jsonl"), (candidate,), events)
 
 
 def test_results_rendering_is_deterministic() -> None:
@@ -326,6 +344,110 @@ def test_reobserved_merge_is_latest_cumulative_state_but_not_per_run_problem(
     assert "| merged |" in report
     assert "**Merged Clean:** 1" in report
     assert "| `20260102T000000Z-current` | 0 | 0 | 0 | 0 | 0 | n/a | 0 |" in report
+
+
+def test_closed_pull_request_settlement_replaces_pending_row() -> None:
+    pr_url = "https://github.test/pulls/1"
+    pending = codeql_candidate(
+        candidate_id="closed",
+        state=CandidateState.AWAITING_HUMAN_MERGE,
+        issue_url="https://github.test/issues/1",
+        pr_url=pr_url,
+    )
+    closed = pending.model_copy(
+        update={
+            "state": CandidateState.TERMINAL,
+            "reason": ReasonCode.CLOSED_PULL_REQUEST,
+        }
+    )
+    runs = (
+        _run("20260101T000000Z-earlier", pending),
+        _run("20260102T000000Z-later", closed),
+    )
+
+    candidates, _ = aggregate(runs)
+    report = render_results(runs, PipelineConfig())
+
+    assert candidates == [closed]
+    assert "| terminal | closed_pull_request |" in report
+    assert "**Awaiting Merge:** 0" in report
+
+
+@pytest.mark.parametrize("first_state", ["merged", "closed"])
+def test_merged_row_outranks_closed_pull_request_in_either_order(first_state: str) -> None:
+    pr_url = "https://github.test/pulls/1"
+    merged = codeql_candidate(
+        candidate_id="settled",
+        state=CandidateState.MERGED,
+        pr_url=pr_url,
+        merged_at="2026-09-01T00:00:00Z",
+        merge_verified=True,
+    )
+    closed = merged.model_copy(
+        update={
+            "state": CandidateState.TERMINAL,
+            "reason": ReasonCode.CLOSED_PULL_REQUEST,
+            "merged_at": None,
+            "merge_verified": False,
+        }
+    )
+    merged_run = _run("20260101T000000Z-merged", merged)
+    closed_run = _run("20260102T000000Z-closed", closed)
+    runs = (merged_run, closed_run) if first_state == "merged" else (closed_run, merged_run)
+
+    candidates, _ = aggregate(runs)
+    report = render_results(runs, PipelineConfig())
+
+    assert candidates == [merged]
+    assert "| merged |" in report
+
+
+def test_later_reenumeration_does_not_replace_pending_merge() -> None:
+    pending = codeql_candidate(
+        candidate_id="pending",
+        state=CandidateState.AWAITING_HUMAN_MERGE,
+        pr_url="https://github.test/pulls/1",
+    )
+    reenumerated = pending.model_copy(
+        update={
+            "state": CandidateState.ENUMERATED,
+            "reason": None,
+            "pr_url": None,
+        }
+    )
+
+    runs = (
+        _run("20260101T000000Z-pending", pending),
+        _run("20260102T000000Z-reenumerated", reenumerated),
+    )
+    candidates, _ = aggregate(runs)
+    report = render_results(runs, PipelineConfig())
+
+    assert candidates == [pending]
+    assert "| awaiting_human_merge |" in report
+
+
+def test_other_terminal_reason_remains_below_pending_merge() -> None:
+    pending = codeql_candidate(
+        candidate_id="terminal",
+        state=CandidateState.AWAITING_HUMAN_MERGE,
+        pr_url="https://github.test/pulls/1",
+    )
+    terminal = pending.model_copy(
+        update={
+            "state": CandidateState.TERMINAL,
+            "reason": ReasonCode.SESSION_FAILED,
+        }
+    )
+    runs = (
+        _run("20260101T000000Z-pending", pending),
+        _run("20260102T000000Z-terminal", terminal),
+    )
+    candidates, _ = aggregate(runs)
+    report = render_results(runs, PipelineConfig())
+
+    assert candidates == [pending]
+    assert "| awaiting_human_merge |" in report
 
 
 def test_lifecycle_progress_ranks_every_candidate_state() -> None:
