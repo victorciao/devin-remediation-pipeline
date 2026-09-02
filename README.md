@@ -53,10 +53,10 @@ is created outside your machine.
   reports to its own directory.
 * **Target checkout** — a local clone of the fork. The program reads its source code to find
   disabled tests and deprecated calls.
-* **Baseline** ([`fixtures/baseline.json`](fixtures/baseline.json)) — stored offline input for
-  SIMULATE and fallback operation: an inventory of every problem present in the fork at one fixed
-  commit, recorded before any of this program existed (see
-  [the discovery report](docs/PHASE0_DISCOVERY.md)).
+* **Baseline** ([`fixtures/baseline.json`](fixtures/baseline.json)) — supplies `current_release`
+  and `current_major`, which the deprecations lane uses to decide what is past end-of-life. It
+  also holds the recorded problem inventory that SIMULATE uses when no target checkout is
+  available.
 
 ## Prerequisites
 
@@ -96,11 +96,10 @@ It writes its reports under the output directory (see
 
 If you skip the clone and leave out `--repo-path`, the program still runs, but it cannot read any
 source code: instead of finding disabled tests and deprecated calls itself, it lists the ones
-recorded in the baseline. The reports say so. Anything that changed in the fork since the
-baseline commit will be missing, so clone the fork if you want a true picture.
+recorded in the baseline. The reports say so. Problems added to the fork after the baseline was
+recorded will be missing, so clone the fork if you want a true picture.
 
-The baseline records the problems found before this program ran. SIMULATE uses those records when
-the target checkout is unavailable.
+When no target checkout is available, SIMULATE uses the problem inventory in the baseline.
 
 Settings can come from a configuration file, from `PIPELINE_*` environment variables, or from
 command-line options, in that order of increasing precedence — so a command-line option always
