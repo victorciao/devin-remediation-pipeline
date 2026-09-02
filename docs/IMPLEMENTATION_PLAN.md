@@ -296,27 +296,6 @@ ones that make up this gate, ships only on convergence plus green CI on this rep
 ### 17.2 Future improvements — not yet implemented
 
 - Concurrent Devin sessions. Today `settled = [runner.process(candidate) for candidate in dispatched]` is strictly serial; parallelizing would overlap per-candidate CI waits and introduce ACU-ceiling accounting races, requiring a runner-loop redesign.
-- Live session-ceiling evidence. Configuration rejects `max_sessions < budget_N`, so `SESSION_CEILING` cannot be provoked by sizing alone; it can only be reached through a session retry (`_MAX_SESSION_ATTEMPTS = 2`) or the ACU ceiling. At defaults, `max_sessions = budget_N + 3 = 8`, and eight serial 90-minute sessions exceed GitHub's hard six-hour job cap. The workflow's `timeout-minutes: 350` bounds the job but does not solve the underlying runtime cost; the real levers are `session_timeout_s` and the session ceiling itself.
-- LIVE mode inside the container. Only SIMULATE is containerized today; live credential and checkout handling requires a separate deployment contract.
-- A scheduled SIMULATE smoke run. The pipeline supports manual/local SIMULATE execution, but scheduling it requires CI ownership, artifact retention and failure-notification policy.
-- End-to-end evidence for the remaining two lane criteria and a medium-tier marker-adoption rerun. These need a fixture fork or live target state that supplies the corresponding external CI and GitHub observations.
-
-### 17.3 Intentionally excluded decisions
-
-- Auto-merge is removed; the pipeline never merges pull requests.
-- The GSheet KPI sink is removed; KPIs are always written locally.
-- The CodeQL CLI alert-check path is removed; LANE 1 uses PR-reference alert evidence.
-
-## 18. Deletion list for the implementer
-
-- Delete `review_loop.py` wholesale: `FindingSeverity`, `ReviewFinding`, `ReviewIteration`, `ReviewLoopResult`, `evaluate_review_iteration`, `run_review_loop`, `apply_review_result`, `review_iteration_from_payload` — the §3 loop is a working agreement between sessions, not runtime code.
-- `session_client.py`: `SessionRole`, `ROLE_OUTPUT_SCHEMAS`, `validated_diff_review`, `_candidate_diff_review_matches`, `_validated_diff_review_head`, `_sent_message_timestamp`, `_message_timestamps`, `_message_processed`, `send_message`, `poll_session_after_message`, `RoleCollisionError`, `PlannerOutputError`, `DiffReviewIncompleteError`, `PhaseBCorrelationTimeoutError`, `PhaseBHeadUnavailableError`, `BranchNotAdvancedError`, `RuntimeOrchestrator.run_planner`/`run_implementer`/`run_reviewer`/`inspect_implementer_diff`/`inspect_reviewer_diff`.
-- `prompts.py`: `PHASE_B_REVIEWER_OUTPUT_SCHEMA`, `render_planner_prompt`, `render_implementer_prompt`, `render_reviewer_prompt`, `render_reviewer_phase_b_prompt`, `validate_planner_output`, `_findings_text`, `_planner_text`.
-- `red_baseline.py`: `DiffInspection`, `classify_implementer_diff`, `inspect_reviewer_diff`, `validate_nested_marker_lifts`, `should_reauthor_baseline` — the LANE 2 red-baseline evaluation itself moves into `verify.py`.
-- `templates/render.py`: `render_degraded_comment_body`, `_planner_text`, `_reviewer_text`. **Keep** `candidate_marker`, `render_issue_title`, `render_issue_body`, `validate_issue_body` — both tiers' issue path uses them; the PR body gains `Closes #<issue_number>`.
-- `github_client.py`: `patch_issue`, `comment_pr`, `publish_degraded`, the PR-comment and issue-patch branches of `publish_artifacts`, and the hard-coded `REQUIRED_CONTEXTS` tuple (replaced by `required_contexts_min` in config plus the §12 check-run rule). **Keep** `create_issue` and `pull_request_for_head`.
-- `state.py`: the reservation fields and branches in `append_if_new_artifact`. **Keep** `MarkerSearchOutcome`, `MarkerArtifact`, `github_marker_search`, `marker_artifact`, `marker_exists`, `marker_search_unavailable`, `marker_search_orphaned`, `marker_search_outcome` — §11's issue dedupe is built on them; drop only `marker_search_orphaned`'s degraded-artifact handling.
-- `schemas.py` enums: `CandidateState.ISSUE_PATCHED`/`COMMENT_CREATED`/`CONVERGED`; `Action.REVIEWER_ONLY_DIFF`; `ReasonCode.DISAGREEMENT_UNRESOLVED`/`DIFF_REVIEW_INCOMPLETE`/`IMPLEMENTER_TEST_EDIT`/`ROLE_COLLISION`/`PHASE_B_CORRELATION_UNAVAILABLE`/`RESERVATION_HELD`/`ARTIFACT_DEGRADED`/`ARTIFACT_ORPHANED`/`BRANCH_NOT_ADVANCED`/`ROLE_COMMIT_MISSING`. **Keep** `CandidateState.ISSUE_CREATED`, `Action.OPEN_ISSUE`, `ReasonCode.MARKER_SEARCH_FAILED`/`MARKER_SEARCH_UNCONFIGURED`.
-- `schemas.py` `Candidate`/`EventRecord` fields: `comment_url`, `artifact_degraded`, `planner_session_id`, `implementer_session_id`, `reviewer_session_id`, `planner_criteria`, `reviewer_criterion_ids`, `role_attempt_evidence`, `diff_reviewed`, `reviewed_head_sha`, `iterations`, `disagreement_summary`, `phase_b_protocol_violation`, `reserved_at`, `reserved_by_run_id`, `unresolved_major`; **keep** `issue_url`, `issue_number`, `marker_search_outcome`; add `success_criterion`, `criterion_evidence`, `suite_scope`, `check_run_conclusions`, `merged_at`, `merge_verified`.
-- `config.py`: `iteration_cap`, `reservation_lease_s`, `DEFAULT_ITERATION_CAP`, `DEFAULT_MAX_SESSIONS` (`max_sessions` keeps its own meaning, §15; `budget_N` default becomes `5`); **keep** `has_issues`; add `required_contexts_min`, `marker_search_enabled`, `alert_analysis_wait_s`, and the `code_scanning_api` member of `alert_source`.
-- `observability/kpis.py`: `_criterion_coverage` plus the criterion-coverage, `disagreement_unresolved`, sessions-per-role and implementer-test-edit KPIs; the verification KPI becomes per-lane criterion satisfaction, and issue counts are reported separately from PR merge rate.
+- Auto-merge. The pipeline never merges pull requests; merging on the pipeline's own judgement would need a merge policy and a human-accountable owner for it.
+- A GSheet KPI sink. KPIs are always written locally; an external sink needs credential handling and a retention owner.
+- A CodeQL CLI alert check. LANE 1 uses PR-reference alert evidence; running the CLI in-pipeline needs the toolchain in the image and a database-build budget.
