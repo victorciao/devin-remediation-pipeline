@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from pipeline.config import Mode, PipelineConfig
@@ -24,6 +25,14 @@ from pipeline.templates.render import (
 )
 
 
+@dataclass(frozen=True)
+class RenderedRun:
+    """The artifacts and reconciled candidates rendered for one run."""
+
+    produced: tuple[Path, ...]
+    candidates: tuple[Candidate, ...]
+
+
 def render_run_artifacts(
     candidates: Sequence[Candidate],
     *,
@@ -35,7 +44,7 @@ def render_run_artifacts(
     token_login: str | None = None,
     token_scopes: Sequence[str] = (),
     run_events: Sequence[RunEventRecord] = (),
-) -> tuple[Path, ...]:
+) -> RenderedRun:
     """Render a complete run without invoking a remote write transport."""
     state_path = (
         output_dir
@@ -152,9 +161,12 @@ def render_run_artifacts(
     kpi_path = output_dir / "reports" / "kpis.md"
     write_kpi_report(kpi_path, list(rendered_candidates), event_log.read(), config)
     produced.extend((run_path, kpi_path))
-    return tuple(produced)
+    return RenderedRun(
+        produced=tuple(produced),
+        candidates=tuple(rendered_candidates),
+    )
 
 
 simulate_run = render_run_artifacts
 
-__all__ = ["render_run_artifacts", "simulate_run"]
+__all__ = ["RenderedRun", "render_run_artifacts", "simulate_run"]

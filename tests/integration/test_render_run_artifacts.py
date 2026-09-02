@@ -21,7 +21,7 @@ from pipeline.http_transport import HttpTransportError
 from pipeline.lanes.codeql import read_alert_fixture
 from pipeline.observability.events import EventLog
 from pipeline.schemas import Action, Candidate, CandidateState, GateName, ReasonCode
-from pipeline.simulation import render_run_artifacts, simulate_run
+from pipeline.simulation import RenderedRun, render_run_artifacts, simulate_run
 from pipeline.state import CandidateStateStore
 from tests.conftest import FIXTURES_DIR, RUBRICS_PATH, TARGET_CHECKOUT, TEMPLATES_DIR
 from tests.factories import codeql_candidate
@@ -96,7 +96,7 @@ def budget_deferred() -> Candidate:
     )
 
 
-def render(mode: Mode, output_dir: Path, **role_outputs: Any) -> tuple[Path, ...]:  # noqa: ANN401
+def render(mode: Mode, output_dir: Path, **role_outputs: Any) -> RenderedRun:  # noqa: ANN401
     """Render one run over the same four candidates in `mode`."""
     return render_run_artifacts(
         [routed_pr(), routed_issue(), gated(), budget_deferred()],
@@ -201,14 +201,14 @@ def test_simulate_run_is_still_the_same_callable(tmp_path: Path) -> None:
     """§14.1 — the rename keeps the old name working for existing callers."""
     assert simulate_run is render_run_artifacts
 
-    produced = simulate_run(
+    rendered = simulate_run(
         [routed_pr()],
         run_id=RUN_ID,
         output_dir=tmp_path / "out",
         config=config_for(Mode.SIMULATE),
     )
 
-    assert all(path.is_file() for path in produced)
+    assert all(path.is_file() for path in rendered.produced)
 
 
 def test_simulate_persists_every_candidate_it_rendered(tmp_path: Path) -> None:

@@ -83,7 +83,7 @@ from pipeline.session_client import (
     SessionInfeasibleError,
     SessionOutputError,
 )
-from pipeline.simulation import simulate_run
+from pipeline.simulation import render_run_artifacts
 from pipeline.simulation_fixtures import simulated_observers
 from pipeline.state import (
     SETTLED_STATES,
@@ -1282,8 +1282,7 @@ def run_once(
             "duplicate detection was unavailable because no GitHub credential was configured; "
             "nothing was published (expected in SIMULATE)"
         )
-    summary = summarize_run(settled)
-    produced = simulate_run(
+    rendered = render_run_artifacts(
         settled,
         run_id=run_id,
         output_dir=output_dir,
@@ -1304,7 +1303,8 @@ def run_once(
             f"marker_search_failed: {ReasonCode.CAPABILITY_UNAVAILABLE.value}; "
             f"dedupe capability is unavailable{failure_detail}"
         )
-    return RunOutcome(run_id=run_id, produced=produced, summary=summary)
+    summary = summarize_run(rendered.candidates)
+    return RunOutcome(run_id=run_id, produced=rendered.produced, summary=summary)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -439,6 +439,52 @@ def test_settled_skip_is_excluded_from_run_verification_denominator(
     assert "Verification Pass Rate Alert" not in report
 
 
+def test_run_summary_uses_settlement_preserved_by_artifact_rendering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI summary and report count the persisted settled row consistently."""
+    output_dir = tmp_path / "out"
+    settled = lane3_candidate(
+        candidate_id="settled",
+        run_id="previous-run",
+        state=CandidateState.AWAITING_HUMAN_MERGE,
+        action=Action.OPEN_PR,
+        tier=Tier.HIGH,
+        score=100.0,
+        issue_number=1,
+        issue_url="https://github.test/issues/1",
+        pr_number=2,
+        pr_url="https://github.test/pull/2",
+    )
+    state_path = output_dir / "state" / SIMULATE_STATE_FILE
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(settled.model_dump(mode="json")) + "\n",
+        encoding="utf-8",
+    )
+    deferred = settled.model_copy(
+        update={
+            "state": CandidateState.DEFERRED,
+            "reason": ReasonCode.BUDGET_OVERFLOW,
+        }
+    )
+    monkeypatch.setattr(entrypoint, "_enumerate", lambda **_kwargs: [deferred])
+    monkeypatch.setattr(entrypoint.CandidateRunner, "process", lambda _self, _candidate: deferred)
+
+    outcome = entrypoint.run_once(
+        config=config_for(Mode.SIMULATE, budget_N=1),
+        repo_path=tmp_path / "nonexistent-target",
+        output_dir=output_dir,
+        baseline_path=baseline_file(tmp_path),
+        base_sha="1" * 40,
+    )
+
+    report = next((output_dir / "reports").glob("run-*.md")).read_text(encoding="utf-8")
+    assert outcome.summary.deferred == 0
+    assert f"- Deferred: {outcome.summary.deferred}" in report
+
+
 def test_an_unconfigured_marker_search_completes_normally(tmp_path: Path) -> None:
     """§14.1 — SIMULATE configures no marker search, so there is nothing to fail: exit 0."""
     output_dir = tmp_path / "out"

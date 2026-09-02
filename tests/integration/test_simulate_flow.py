@@ -19,7 +19,7 @@ from pipeline.observability.events import EventLog
 from pipeline.rubric import resolve_factors
 from pipeline.schemas import Action, Candidate, Lane
 from pipeline.score import apply_score
-from pipeline.simulation import simulate_run
+from pipeline.simulation import RenderedRun, simulate_run
 from pipeline.state import CandidateStateStore
 from pipeline.templates.render import candidate_marker
 from tests.conftest import (
@@ -80,7 +80,7 @@ def three_lane_candidates(tmp_path: Path, config: PipelineConfig) -> list[Candid
 
 
 @pytest.fixture()
-def simulated(tmp_path: Path) -> tuple[PipelineConfig, list[Candidate], tuple[Path, ...]]:
+def simulated(tmp_path: Path) -> tuple[PipelineConfig, list[Candidate], RenderedRun]:
     """Render one whole SIMULATE run into a temporary output directory."""
     config = simulate_config()
     candidates = three_lane_candidates(tmp_path, config)
@@ -94,7 +94,7 @@ def simulated(tmp_path: Path) -> tuple[PipelineConfig, list[Candidate], tuple[Pa
 
 
 def test_full_simulate_flow_makes_no_writes(
-    simulated: tuple[PipelineConfig, list[Candidate], tuple[Path, ...]],
+    simulated: tuple[PipelineConfig, list[Candidate], RenderedRun],
     tmp_path: Path,
 ) -> None:
     """fixture -> gate -> score -> dispatch -> artifacts -> reports, zero remote writes.
@@ -102,18 +102,18 @@ def test_full_simulate_flow_makes_no_writes(
     `simulate_run` takes no transport at all, so the structural proof of "zero remote
     writes" is that a complete run is produced from a credential-free config.
     """
-    config, candidates, produced = simulated
+    config, candidates, rendered = simulated
 
     assert config.mode is Mode.SIMULATE
     assert candidates != []
-    assert produced != ()
-    assert all(path.is_file() for path in produced)
+    assert rendered.produced != ()
+    assert all(path.is_file() for path in rendered.produced)
     assert (tmp_path / "out" / "reports" / f"run-{RUN_ID}.md").is_file()
     assert (tmp_path / "out" / "reports" / "kpis.md").is_file()
 
 
 def test_simulate_flow_covers_all_three_lanes(
-    simulated: tuple[PipelineConfig, list[Candidate], tuple[Path, ...]],
+    simulated: tuple[PipelineConfig, list[Candidate], RenderedRun],
 ) -> None:
     """§17 — the smoke exercises every lane, not just the CodeQL fixture."""
     _, candidates, _ = simulated
@@ -126,7 +126,7 @@ def test_simulate_flow_covers_all_three_lanes(
 
 
 def test_simulate_flow_respects_the_budget(
-    simulated: tuple[PipelineConfig, list[Candidate], tuple[Path, ...]],
+    simulated: tuple[PipelineConfig, list[Candidate], RenderedRun],
 ) -> None:
     """§6 — no run dispatches beyond `budget_N`, however many candidates are enumerated."""
     config, candidates, _ = simulated
@@ -137,7 +137,7 @@ def test_simulate_flow_respects_the_budget(
 
 
 def test_simulate_flow_writes_a_readable_event_log(
-    simulated: tuple[PipelineConfig, list[Candidate], tuple[Path, ...]],
+    simulated: tuple[PipelineConfig, list[Candidate], RenderedRun],
     tmp_path: Path,
 ) -> None:
     """§12 — Layer 1 events are JSONL, one per candidate, all carrying the run ID."""
@@ -155,7 +155,7 @@ def test_simulate_flow_writes_a_readable_event_log(
 
 
 def test_simulate_flow_artifacts_carry_the_candidate_marker(
-    simulated: tuple[PipelineConfig, list[Candidate], tuple[Path, ...]],
+    simulated: tuple[PipelineConfig, list[Candidate], RenderedRun],
     tmp_path: Path,
 ) -> None:
     """§14.1 — every rendered artifact carries its candidate's stable marker."""
@@ -178,8 +178,8 @@ def test_simulate_flow_is_idempotent_across_reruns(tmp_path: Path) -> None:
     before = {row.candidate_id for row in store.rows()}
     second = simulate_run(candidates, run_id="sim-2", output_dir=output, config=config)
 
-    def artifacts(paths: tuple[Path, ...]) -> set[str]:
-        return {path.name for path in paths if not path.name.startswith("run-")}
+    def artifacts(rendered: RenderedRun) -> set[str]:
+        return {path.name for path in rendered.produced if not path.name.startswith("run-")}
 
     assert artifacts(second) == artifacts(first)
     assert {row.candidate_id for row in store.rows()} == before
@@ -196,7 +196,7 @@ def test_simulate_flow_is_idempotent_across_reruns(tmp_path: Path) -> None:
 
 
 def test_simulate_run_leaves_no_secrets_in_its_artifacts(
-    simulated: tuple[PipelineConfig, list[Candidate], tuple[Path, ...]],
+    simulated: tuple[PipelineConfig, list[Candidate], RenderedRun],
     tmp_path: Path,
 ) -> None:
     """§14 — nothing a SIMULATE run writes may contain a credential."""

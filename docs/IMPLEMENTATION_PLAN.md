@@ -236,6 +236,9 @@ or a fork match — never by a state value alone. A per-candidate failure defers
   for.
 - **Layer 3** `reports/kpis.md`: observed human-merge rate (verified externally merged PRs over published PRs); **verification pass rate = candidates whose declared criterion was satisfied / candidates dispatched**, reported overall and per lane since the criteria differ; test-inclusion rate over the candidates whose criterion required a test; issues created and issues adopted, split by tier, with high-tier issues closed by their merged PR counted separately; session-failure rate; deferred-by-reason. Alerts when
   merge rate `< merge_rate_floor = 0.50`, verification pass rate `< verification_pass_rate_floor = 0.80`, publication safety undetermined, or session-failure rate `> session_failure_ceiling = 0.30`. Verification pass rate uses dispatched candidates evidenced by persisted `head_branch` and the current run's event IDs, and is reported overall and per lane. SIMULATE preserves `unconfigured` marker outcomes because it does not perform a search; only LIVE `unconfigured` outcomes contribute to publication-safety uncertainty, while failed and orphaned outcomes count in every mode.
+- Cross-run `RESULTS.md` includes a per-run flow table with one row per run: problems seen, first seen here, issues created, sessions, PRs opened, criterion satisfied, and session failures. A candidate is attributed to the first run in which it appears; unavailable evidence is `n/a`, not `0`.
+- In KPI output, `Problems With Pull Request` counts candidates with a PR, while `Pull Requests Opened` counts distinct `pr_url` values; they differ when one problem gets a second PR.
+- The run prints a one-line verdict with mode, problems, scored, dispatched, deferred, and the reports directory from the same `RunSummary` used by the per-run report, and explicitly says when duplicate detection was unavailable. Reading state written by an incompatible version raises `StateCompatibilityError` naming the file and directing the reader to a fresh output directory; there is no implicit migration.
 
 ## 15. Configuration and modes
 
@@ -255,6 +258,8 @@ or a fork match — never by a state value alone. A per-candidate failure defers
 | `merge_rate_floor` / `verification_pass_rate_floor` / `session_failure_ceiling` | `0.50` / `0.80` / `0.30` | KPI thresholds are always written to local artifacts |
 | `verification_pass_rate_alert` / `publication_safety_alert` | derived | Alert when verification pass rate is below its floor or publication safety is undetermined |
 | Unit-test coverage floor | `80%` | This repository's own unit-test coverage floor is `[tool.coverage.report] fail_under = 80` in `pyproject.toml`, enforced by `pytest --cov` in CI over the six pure-logic modules, currently approximately 94%; it is not a configurable pipeline setting |
+
+`--repo-path` has no default. When it is absent, SIMULATE falls back to the baseline inventory and records that fallback; LIVE aborts with an actionable message. `docker-compose.yml` requires `SUPERSET_CHECKOUT`.
 
 Also configurable: target `owner/repo`, rubrics, templates, and the environment-only GitHub and Devin credentials. **SIMULATE** (default) needs **no credentials**, makes **no** network writes and creates no sessions: discovery from fixtures, gates, scoring, rendering, reporting; every artifact is marked `artifact_simulated = true` with `writes_suppressed
 = <n>`, and any attempted write raises. `docker compose run --rm remediation` must complete a full SIMULATE run offline; the image needs no CodeQL toolchain, since the fork's workflow performs every scan.
