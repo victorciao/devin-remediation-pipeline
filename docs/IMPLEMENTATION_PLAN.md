@@ -56,7 +56,7 @@ A run is triggered by an event on the fork, never by lane state. Every run enume
 - **Weekly cron.** A LANE 3 candidate can become eligible with no code change at all, because a `@deprecated` symbol crosses the EOL threshold when the release number moves. It is also the safety net for a missed event.
 - **`workflow_dispatch`** for a manual LIVE run.
 
-All three are LIVE entry points. SIMULATE is invoked as `docker compose run --rm pipeline`, locally, no credentials, no writes, `sarif_file` input. A scheduled SIMULATE smoke test belongs in this repo's own CI, which §17 covers.
+All three are LIVE entry points. SIMULATE is invoked as `docker compose run --rm remediation`, locally, no credentials, no writes, `sarif_file` input.
 
 ## 6. Candidate lifecycle (single state table)
 
