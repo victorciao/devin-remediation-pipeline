@@ -14,6 +14,7 @@ from pipeline.observability.kpis import (
     NotApplicable,
     compute_kpis,
 )
+from pipeline.observability.scope import written_by_run
 from pipeline.schemas import (
     REMOVED_LEGACY_CANDIDATE_KEYS,
     Candidate,
@@ -87,19 +88,6 @@ def _read_historical_events(path: Path) -> list[EventRecord]:
         }
         events.append(EventRecord.model_validate(payload, strict=False))
     return events
-
-
-def _scope_candidates_to_run(
-    candidates: Iterable[Candidate],
-    events: Sequence[EventRecord],
-) -> tuple[Candidate, ...]:
-    """Keep rows attributed to this run, plus legacy rows without attribution."""
-    run_id = events[0].run_id if events else None
-    return tuple(
-        candidate
-        for candidate in candidates
-        if candidate.run_id is None or run_id is None or candidate.run_id == run_id
-    )
 
 
 def state_path(run_dir: Path) -> Path:
@@ -237,8 +225,8 @@ def render_results(
             "",
             "## Per run",
             "",
-            "| Run | Problems seen | First seen here | Issues created | Sessions | PRs opened "
-            "| Criterion satisfied | Session failures |",
+            "| Run | Rows written by this run | First seen here | Issues created | Sessions | "
+            "PRs opened | Criterion satisfied | Session failures |",
             "|---|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
@@ -248,7 +236,10 @@ def render_results(
     for run in runs:
         run_candidates = [
             candidate
-            for candidate in _scope_candidates_to_run(run.candidates, run.events)
+            for candidate in written_by_run(
+                run.candidates,
+                {event.run_id for event in run.events},
+            )
             if candidate.superseded_by is None
         ]
         run_events = list(run.events)
@@ -343,6 +334,9 @@ def render_results(
             "(excluded from the table above, counted in every total below).",
             "",
             "## KPI snapshot",
+            "",
+            "KPI values are cumulative across every recorded run; the per-run table is scoped "
+            "to each run.",
             "",
         ]
     )

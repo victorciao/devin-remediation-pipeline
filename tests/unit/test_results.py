@@ -29,6 +29,16 @@ def test_results_rendering_is_deterministic() -> None:
     assert render_results((run,), PipelineConfig()) == render_results((run,), PipelineConfig())
 
 
+def test_results_names_the_run_scoped_column_and_cumulative_kpis() -> None:
+    report = render_results((), PipelineConfig())
+
+    assert "| Run | Rows written by this run | First seen here |" in report
+    assert (
+        "KPI values are cumulative across every recorded run; the per-run table is scoped "
+        "to each run."
+    ) in report
+
+
 def test_results_rendering_handles_empty_input() -> None:
     report = render_results((), PipelineConfig())
 
