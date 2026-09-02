@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import uuid
@@ -56,6 +57,7 @@ from pipeline.http_transport import HttpTransportError, UrllibDevinTransport, Ur
 from pipeline.lanes.codeql import enumerate_from_config, read_alert_fixture
 from pipeline.lanes.deprecations import enumerate_deprecations, is_eol
 from pipeline.lanes.skipped_tests import enumerate_skipped_tests
+from pipeline.observability.report import RunSummary, summarize_run
 from pipeline.observers import LocalCheckout, PullRequestAlerts
 from pipeline.prompts import render_fix_prompt
 from pipeline.rubric import load_rubrics
@@ -81,13 +83,16 @@ from pipeline.session_client import (
     SessionInfeasibleError,
     SessionOutputError,
 )
-from pipeline.simulation import simulate_run
+from pipeline.simulation import render_run_artifacts
 from pipeline.simulation_fixtures import simulated_observers
 from pipeline.state import (
+    SETTLED_STATES,
     CandidateStateStore,
     MarkerSearchOutcome,
     ResumeAction,
+    StateCompatibilityError,
     StatePreservationError,
+    has_local_artifact,
 )
 from pipeline.templates.render import (
     ArtifactValidationError,
@@ -105,6 +110,15 @@ from pipeline.verify import Observers, post_pr_criterion_pending, verify_candida
 
 class RunAbort(RuntimeError):
     """Raised when a blocking capability or runtime guard aborts a run."""
+
+
+@dataclass(frozen=True)
+class RunOutcome:
+    """The durable artifacts and headline counts from one run."""
+
+    run_id: str
+    produced: tuple[Path, ...]
+    summary: RunSummary
 
 
 _SIGNOFF_TRAILER = re.compile(r"(?im)^Signed-off-by:[ \t]+[^<>\r\n]*\S[ \t]+<[^>\r\n]+>[ \t]*$")
@@ -209,16 +223,59 @@ class CandidateRunner:
             if self._settled(opened):
                 return opened
             return self._settle_merge(opened)
+        except StatePreservationError:
+            latest = self.state_store.resume(candidate.candidate_id)
+            if latest is not None and latest.state in SETTLED_STATES and has_local_artifact(latest):
+                self.notes.append(
+                    f"{candidate.candidate_id}: settlement preserved: "
+                    f"{latest.state.value} -> {candidate.state.value} not written"
+                )
+                return latest
+            raise
         except (
             ArtifactUnavailableError,
             GitHubResponseError,
             HttpTransportError,
-            StatePreservationError,
             OSError,
         ) as exc:
             self.notes.append(f"{candidate.candidate_id}: capability unavailable, deferred")
             latest = self.state_store.resume(candidate.candidate_id) or candidate
             return self._deferred(latest, ReasonCode.CAPABILITY_UNAVAILABLE, str(exc))
+
+    def reobserve_merge(self, candidate: Candidate) -> Candidate | None:
+        """Re-observe one persisted PR without re-entering candidate publication."""
+        if self.live is None or candidate.pr_number is None:
+            return None
+        try:
+            match = self.live.client.pull_request(candidate.pr_number)
+        except (GitHubResponseError, HttpTransportError) as exc:
+            self.notes.append(
+                f"{candidate.candidate_id}: pull request observation unavailable: {exc}"
+            )
+            return None
+        if match is not None and match.merged_at is not None:
+            self.notes.append(
+                f"{candidate.candidate_id}: merge re-observed externally: {match.url}"
+            )
+            return self._persist(
+                candidate,
+                run_id=candidate.run_id,
+                state=CandidateState.MERGED,
+                pr_number=match.number,
+                pr_url=match.url,
+                merged_at=match.merged_at,
+                merge_verified=True,
+            )
+        if match is not None and match.state == "closed":
+            return self._persist(
+                candidate,
+                run_id=candidate.run_id,
+                state=CandidateState.TERMINAL,
+                reason=ReasonCode.CLOSED_PULL_REQUEST,
+                pr_number=match.number,
+                pr_url=match.url,
+            )
+        return None
 
     @staticmethod
     def _settled(candidate: Candidate) -> bool:
@@ -232,8 +289,6 @@ class CandidateRunner:
     def _reconcile(self, candidate: Candidate) -> Candidate:
         """Adopt persisted and fork-side artifact identity before any write."""
         outcome = self.state_store.marker_search_outcome(candidate.candidate_id)
-        if outcome is MarkerSearchOutcome.UNCONFIGURED and self.config.mode is not Mode.LIVE:
-            outcome = MarkerSearchOutcome.ABSENT
         candidate = candidate.model_copy(update={"marker_search_outcome": outcome.value})
         update: dict[str, object] = {"base_sha": candidate.base_sha or self.base_sha}
         persisted = self.state_store.resume(candidate.candidate_id)
@@ -257,10 +312,16 @@ class CandidateRunner:
         if (
             self.live is not None
             and persisted is not None
-            and persisted.state is CandidateState.AWAITING_HUMAN_MERGE
+            and persisted.state in {CandidateState.AWAITING_HUMAN_MERGE, CandidateState.TERMINAL}
             and persisted.pr_number is not None
         ):
-            match = self.live.client.pull_request(persisted.pr_number)
+            try:
+                match = self.live.client.pull_request(persisted.pr_number)
+            except (GitHubResponseError, HttpTransportError) as exc:
+                match = None
+                self.notes.append(
+                    f"{candidate.candidate_id}: pull request observation unavailable: {exc}"
+                )
             if match is not None and match.merged_at is not None:
                 observed_update = {
                     **update,
@@ -271,6 +332,7 @@ class CandidateRunner:
                 }
                 return self._persist(
                     candidate,
+                    run_id=candidate.run_id if candidate.run_id is not None else self.run_id,
                     state=CandidateState.MERGED,
                     **observed_update,
                 )
@@ -282,12 +344,24 @@ class CandidateRunner:
                 }
                 return self._persist(
                     candidate,
+                    run_id=candidate.run_id if candidate.run_id is not None else self.run_id,
                     state=CandidateState.TERMINAL,
                     reason=ReasonCode.CLOSED_PULL_REQUEST,
                     **observed_update,
                 )
+        if (
+            persisted is not None
+            and persisted.state is CandidateState.MERGED
+            and persisted.merged_at
+        ):
+            return persisted
         if persisted is not None and persisted.merged_at is not None:
-            return self._persist(candidate, state=CandidateState.MERGED, **update)
+            return self._persist(
+                candidate,
+                run_id=candidate.run_id if candidate.run_id is not None else self.run_id,
+                state=CandidateState.MERGED,
+                **update,
+            )
         reconciled = candidate.model_copy(update=update)
         if (
             persisted is not None
@@ -929,7 +1003,7 @@ def _enumerate(
     *,
     config: PipelineConfig,
     baseline: Mapping[str, object],
-    repo_path: Path,
+    repo_path: Path | None,
     repo_name: str,
     target_exists: bool,
     base_sha: str | None,
@@ -953,13 +1027,13 @@ def _enumerate(
     candidates.extend(
         enumerate_from_config(
             config,
-            repo_path=repo_path if target_exists else Path("/nonexistent"),
+            repo_path=repo_path,
             repo=repo_name,
             payload=payload,
             base_sha=base_sha,
         )
     )
-    if target_exists:
+    if repo_path is not None and target_exists:
         skipped, _failures = enumerate_skipped_tests(
             repo_path,
             repo_name=repo_name,
@@ -975,7 +1049,7 @@ def _enumerate(
                 current_major=current_major,
             )
         )
-    if target_exists:
+    if repo_path is not None and target_exists:
         release = baseline.get("current_release")
         candidates.extend(
             enumerate_deprecations(
@@ -1007,23 +1081,26 @@ def _normalize(
     candidates: Sequence[Candidate],
     *,
     state_store: CandidateStateStore,
+    run_id: str | None = None,
 ) -> list[Candidate]:
     """Adopt persisted identity and link drifted LANE 1 alerts before gating."""
     prior_rows = state_store.latest()
     normalized: list[Candidate] = []
     for candidate in candidates:
+        current = (
+            candidate.model_copy(update={"run_id": run_id}) if run_id is not None else candidate
+        )
         prior = prior_rows.get(candidate.candidate_id)
         if prior is not None:
             normalized.append(
-                prior if prior.pr_url is not None or prior.issue_url is not None else candidate
+                prior if prior.pr_url is not None or prior.issue_url is not None else current
             )
             continue
-        current = candidate
         if candidate.lane is Lane.CODEQL:
             drifted = state_store.drift_match(candidate, current_scan=candidates)
             if drifted is not None and drifted.superseded_by is None:
-                state_store.supersede(drifted, candidate)
-                current = candidate.model_copy(
+                state_store.supersede(drifted, current)
+                current = current.model_copy(
                     update={
                         "state": drifted.state,
                         "issue_number": drifted.issue_number,
@@ -1088,19 +1165,19 @@ def _resolve_base_sha(
 def run_once(
     *,
     config: PipelineConfig,
-    repo_path: Path,
+    repo_path: Path | None,
     output_dir: Path,
     baseline_path: Path,
     base_sha: str | None = None,
     head_branch: str | None = None,
     base_branch: str = "master",
-) -> tuple[str, tuple[Path, ...]]:
+) -> RunOutcome:
     """Execute the §6 lifecycle end to end for one run, then report on it."""
     run_id = uuid.uuid4().hex
     baseline = _load_baseline(baseline_path)
     if config.mode is Mode.SIMULATE and config.ci_evidence_mode is not CiEvidenceMode.LOCAL:
         config = config.model_copy(update={"ci_evidence_mode": CiEvidenceMode.LOCAL})
-    target_exists = repo_path.exists()
+    target_exists = repo_path is not None and repo_path.is_dir()
     notes: list[str] = []
     run_events: list[RunEventRecord] = []
     preflight: LivePreflight | None = None
@@ -1152,27 +1229,23 @@ def run_once(
         require_marker_proof=config.mode is Mode.LIVE,
         artifact_simulated=config.mode is Mode.SIMULATE,
     )
-    candidates = _normalize(
-        _enumerate(
-            config=config,
-            baseline=baseline,
-            repo_path=repo_path,
-            repo_name=repo_name,
-            target_exists=target_exists,
-            base_sha=base_sha,
-            preflight=preflight,
-            notes=notes,
-        ),
-        state_store=state_store,
-    )
-    if config.mode is Mode.SIMULATE:
-        candidates = [
-            # Normalize unconfigured markers for candidates bypassing _reconcile.
-            candidate.model_copy(update={"marker_search_outcome": MarkerSearchOutcome.ABSENT.value})
-            if candidate.marker_search_outcome == MarkerSearchOutcome.UNCONFIGURED.value
-            else candidate
-            for candidate in candidates
-        ]
+    try:
+        candidates = _normalize(
+            _enumerate(
+                config=config,
+                baseline=baseline,
+                repo_path=repo_path,
+                repo_name=repo_name,
+                target_exists=target_exists,
+                base_sha=base_sha,
+                preflight=preflight,
+                notes=notes,
+            ),
+            state_store=state_store,
+            run_id=run_id,
+        )
+    except StateCompatibilityError as exc:
+        raise RunAbort(str(exc)) from exc
     dispatched = _select(candidates, config)
 
     live: LiveTarget | None = None
@@ -1193,7 +1266,7 @@ def run_once(
             branch_prefix=head_branch,
         )
     checkout: LocalCheckout | None = None
-    if target_exists:
+    if repo_path is not None and target_exists:
         checkout = LocalCheckout(
             repo_path=repo_path,
             worktree_root=output_dir / "worktrees",
@@ -1227,6 +1300,22 @@ def run_once(
         ci_mode=config.ci_evidence_mode,
     )
     settled = [runner.process(candidate) for candidate in dispatched]
+    reobserved_merges: list[Candidate] = []
+    if live is not None:
+        processed_ids = {
+            candidate.candidate_id
+            for candidate in dispatched
+            if candidate.action in _PUBLISHING_ACTIONS
+        }
+        for candidate in state_store.latest().values():
+            if (
+                candidate.candidate_id not in processed_ids
+                and candidate.state is CandidateState.AWAITING_HUMAN_MERGE
+                and candidate.pr_number is not None
+            ):
+                observed = runner.reobserve_merge(candidate)
+                if observed is not None:
+                    reobserved_merges.append(observed)
 
     notes.extend(_capability_notes(baseline, target_exists=target_exists, config=config))
     if state_store.quarantined_rows:
@@ -1245,14 +1334,19 @@ def run_once(
                 reason_detail=state_store.marker_search_failure_detail or "marker_search_failed",
             )
         )
-    produced = simulate_run(
+    if any(candidate.reason is ReasonCode.MARKER_SEARCH_UNCONFIGURED for candidate in settled):
+        notes.append(
+            "duplicate detection was unavailable because no GitHub credential was configured; "
+            "nothing was published (expected in SIMULATE)"
+        )
+    rendered = render_run_artifacts(
         settled,
         run_id=run_id,
         output_dir=output_dir,
-        baseline=baseline,
         config=config,
         fix_outputs=runner.fix_outputs,
         capability_notes=notes,
+        reobserved_candidates=reobserved_merges,
         token_login=preflight.token_login if preflight is not None else None,
         token_scopes=preflight.token_scopes if preflight is not None else (),
         run_events=run_events,
@@ -1267,7 +1361,8 @@ def run_once(
             f"marker_search_failed: {ReasonCode.CAPABILITY_UNAVAILABLE.value}; "
             f"dedupe capability is unavailable{failure_detail}"
         )
-    return run_id, produced
+    summary = summarize_run(rendered.candidates)
+    return RunOutcome(run_id=run_id, produced=rendered.produced, summary=summary)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1279,10 +1374,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             env=None,
             cli_args=config_args,
         )
-        repo_path = Path(runtime.get("repo_path", "/home/ubuntu/repos/superset"))
+        if config.mode is Mode.LIVE:
+            missing_credentials = [
+                name
+                for name in ("GITHUB_PAT_REMEDIATION", "DEVIN_API_KEY")
+                if not os.environ.get(name)
+            ]
+            if missing_credentials:
+                raise RunAbort(
+                    "LIVE requires environment credentials: " + ", ".join(missing_credentials)
+                )
+        repo_path_value = runtime.get("repo_path")
+        repo_path = Path(repo_path_value) if repo_path_value else None
         output_dir = Path(runtime.get("output_dir", "."))
         baseline_path = Path(runtime.get("baseline", "fixtures/baseline.json"))
-        run_id, produced = run_once(
+        outcome = run_once(
             config=config,
             repo_path=repo_path,
             output_dir=output_dir,
@@ -1301,9 +1407,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     ) as exc:
         print(f"pipeline run aborted: {exc}", file=sys.stderr)
         return 1
-    print(f"run_id={run_id}")
-    for path in produced:
+    print(f"run_id={outcome.run_id}")
+    for path in outcome.produced:
         print(path)
+    summary = outcome.summary
+    verdict = (
+        f"summary: mode={config.mode.value} problems={summary.problems} "
+        f"scored={summary.scored} dispatched={summary.dispatched} "
+        f"deferred={summary.deferred} reports={output_dir / 'reports'}"
+    )
+    if summary.duplicate_detection_unavailable:
+        verdict += (
+            "; duplicate detection unavailable without a GitHub credential; "
+            "nothing was published (expected in SIMULATE)"
+        )
+    print(verdict)
     return 0
 
 

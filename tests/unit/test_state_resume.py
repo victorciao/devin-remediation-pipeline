@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,8 @@ from pipeline.state import (
     MarkerArtifact,
     MarkerSearchOutcome,
     ResumeAction,
+    StateCompatibilityError,
+    StatePreservationError,
     build_marker_index,
     decide_resume,
     github_marker_search,
@@ -87,6 +90,19 @@ def ambiguous_marker(_marker: str) -> MarkerArtifact | None:
 def test_no_persisted_row_has_no_local_artifact() -> None:
     """§14.1 — absence of state proves nothing exists locally."""
     assert has_local_artifact(None) is False
+
+
+def test_unknown_state_field_aborts_as_incompatible_version(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.jsonl"
+    row = codeql_candidate(candidate_id="old").model_dump(mode="json")
+    row["unknown_field_from_newer_version"] = True
+    state_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    with pytest.raises(
+        StateCompatibilityError,
+        match=r"state file .* was written by an incompatible version; use a fresh output directory",
+    ):
+        CandidateStateStore(state_path).rows()
 
 
 @pytest.mark.parametrize(("state", "link"), ARTIFACT_STATE_LINKS)
@@ -784,6 +800,64 @@ def test_suppression_does_not_weaken_the_artifact_reservation(tmp_path: Path) ->
     assert store.append_if_new_artifact(candidate) is False
     assert store.append_if_new_artifact(candidate.model_copy(update={"pr_url": PR_URL})) is False
     assert len(store.rows()) == 1
+
+
+@pytest.mark.parametrize(
+    "states",
+    [
+        [CandidateState.TERMINAL, CandidateState.AWAITING_HUMAN_MERGE],
+        [CandidateState.AWAITING_HUMAN_MERGE, CandidateState.TERMINAL],
+    ],
+)
+def test_artifact_backed_settlement_is_preserved_across_arbitrary_appends(
+    tmp_path: Path,
+    states: list[CandidateState],
+) -> None:
+    """A settled artifact row cannot be moved back into resumable lifecycle states."""
+    store = store_for(tmp_path)
+    current = persisted(
+        CandidateState.AWAITING_HUMAN_MERGE,
+        pr_number=2,
+        pr_url=PR_URL,
+        issue_number=1,
+        issue_url=ISSUE_URL,
+    )
+    store.append(current)
+
+    for state in states:
+        current = current.model_copy(update={"state": state})
+        store.append(current)
+
+    for state in (CandidateState.DEFERRED, CandidateState.PR_CREATED):
+        with pytest.raises(StatePreservationError, match="attempted transition"):
+            store.append(current.model_copy(update={"state": state}))
+        latest = store.resume(current.candidate_id)
+        assert latest is not None
+        assert latest.pr_url == PR_URL
+        assert latest.pr_number == 2
+        assert latest.issue_url == ISSUE_URL
+
+
+def test_merged_artifact_row_rejects_weaker_state_and_merge_evidence(
+    tmp_path: Path,
+) -> None:
+    """A merged row cannot regress state or verified merge evidence."""
+    store = store_for(tmp_path)
+    current = persisted(
+        CandidateState.MERGED,
+        pr_number=2,
+        pr_url=PR_URL,
+        issue_number=1,
+        issue_url=ISSUE_URL,
+        merged_at="2026-09-01T00:00:00Z",
+        merge_verified=True,
+    )
+    store.append(current)
+
+    with pytest.raises(StatePreservationError, match="attempted transition"):
+        store.append(current.model_copy(update={"state": CandidateState.TERMINAL}))
+    with pytest.raises(StatePreservationError, match="merge_verified"):
+        store.append(current.model_copy(update={"merge_verified": False}))
 
 
 # -- durable identity ----------------------------------------------------------------------

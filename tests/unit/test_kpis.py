@@ -1,8 +1,7 @@
-"""§11 observability: the Layer 1 event log, Layer 2 report, Layer 3 rollup and burn-down."""
+"""§11 observability: the Layer 1 event log, Layer 2 report, and Layer 3 rollup."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +10,6 @@ import pytest
 from pipeline.config import Mode, PipelineConfig
 from pipeline.observability.events import EventLog
 from pipeline.observability.kpis import (
-    compute_burndown,
     compute_kpis,
     render_kpi_report,
     write_kpi_report,
@@ -122,7 +120,7 @@ def test_merge_rate_alert_fires_below_the_floor(simulate_config: PipelineConfig)
     """§17 — a merge rate under 0.50 raises the alert."""
     events = [merged("c1"), rejected("c2"), rejected("c3"), rejected("c4")]
 
-    rollup = compute_kpis([], events, {}, simulate_config)
+    rollup = compute_kpis([], events, simulate_config)
 
     assert rollup["merge_rate"] == 0.25
     assert rollup[MERGE_RATE_ALERT] == 1
@@ -132,7 +130,7 @@ def test_merge_rate_at_the_floor_does_not_alert(simulate_config: PipelineConfig)
     """§11 — the alert is `< floor`, so exactly 0.50 is quiet."""
     events = [merged("c1"), merged("c2"), rejected("c3"), rejected("c4")]
 
-    rollup = compute_kpis([], events, {}, simulate_config)
+    rollup = compute_kpis([], events, simulate_config)
 
     assert rollup["merge_rate"] == 0.50
     assert rollup[MERGE_RATE_ALERT] == 0
@@ -151,7 +149,7 @@ def test_an_unverified_external_merge_is_not_counted_as_a_merge(
         merged("c2"),
     ]
 
-    rollup = compute_kpis([], events, {}, simulate_config)
+    rollup = compute_kpis([], events, simulate_config)
 
     assert rollup["merged_clean"] == 1
     assert rollup["merge_rate"] == 0.5
@@ -163,7 +161,7 @@ def test_a_merge_without_a_merged_at_timestamp_is_not_counted(
     """§11 — a PR the pipeline never observed merged contributes nothing to the numerator."""
     events = [merged("c1", merged_at=None), merged("c2")]
 
-    rollup = compute_kpis([], events, {}, simulate_config)
+    rollup = compute_kpis([], events, simulate_config)
 
     assert rollup["merged_clean"] == 1
     assert rollup["merge_rate"] == 0.5
@@ -175,7 +173,7 @@ def test_a_merge_flagged_verified_without_the_reason_cleared_is_not_counted(
     """§11 — `MERGED_EXTERNALLY_UNVERIFIED` disqualifies the event on its own."""
     events = [merged("c1", reason=ReasonCode.MERGED_EXTERNALLY_UNVERIFIED)]
 
-    rollup = compute_kpis([], events, {}, simulate_config)
+    rollup = compute_kpis([], events, simulate_config)
 
     assert rollup["merged_clean"] == 0
     assert rollup["merge_rate"] == 0.0
@@ -187,7 +185,7 @@ def test_merge_rate_alert_is_suppressed_without_pr_events(
     """§11 — a run that opened no PR has no merge rate to alert on."""
     events = [event("c1", terminal_outcome=CandidateState.TERMINAL)]
 
-    rollup = compute_kpis([], events, {}, simulate_config)
+    rollup = compute_kpis([], events, simulate_config)
 
     assert rollup["merge_rate"] is None
     assert rollup[MERGE_RATE_ALERT] == 0
@@ -205,7 +203,7 @@ def test_pending_human_merges_are_not_measurable(
         )
     ]
 
-    rollup = compute_kpis([], events, {}, simulate_config)
+    rollup = compute_kpis([], events, simulate_config)
 
     assert rollup["merge_rate"] is None
     assert rollup[MERGE_RATE_ALERT] == 0
@@ -225,7 +223,7 @@ def test_pending_human_merge_does_not_change_settled_merge_rate(
         ),
     ]
 
-    rollup = compute_kpis([], events, {}, simulate_config)
+    rollup = compute_kpis([], events, simulate_config)
 
     assert rollup["merge_rate"] == 0.5
     assert rollup[MERGE_RATE_ALERT] == 0
@@ -235,7 +233,7 @@ def test_merge_rate_alert_is_suppressed_for_an_empty_run(
     simulate_config: PipelineConfig,
 ) -> None:
     """§11 — the zero-event run is quiet, not alerting."""
-    rollup = compute_kpis([], [], {}, simulate_config)
+    rollup = compute_kpis([], [], simulate_config)
 
     assert rollup[MERGE_RATE_ALERT] == 0
     assert rollup[SESSION_FAILURE_ALERT] == 0
@@ -251,7 +249,7 @@ def test_awaiting_human_merge_is_not_counted_as_edited(
         pr_url=PR_URL,
     )
 
-    rollup = compute_kpis([], [pending], {}, simulate_config)
+    rollup = compute_kpis([], [pending], simulate_config)
 
     assert rollup["edited"] == 0
     assert rollup["awaiting_merge"] == 1
@@ -262,10 +260,10 @@ def test_expected_reason_match_rate_is_unknown_without_observations(
     simulate_config: PipelineConfig,
 ) -> None:
     """No expected-reason observations are reported as unavailable, not disagreement."""
-    rollup = compute_kpis([], [], {}, simulate_config)
+    rollup = compute_kpis([], [], simulate_config)
 
     assert rollup["expected_reason_match_rate"] is None
-    assert "**Expected Reason Match Rate:** n/a" in render_kpi_report([], [], {}, simulate_config)
+    assert "**Expected Reason Match Rate:** n/a" in render_kpi_report([], [], simulate_config)
 
 
 def test_session_failure_at_the_ceiling_does_not_alert(simulate_config: PipelineConfig) -> None:
@@ -273,7 +271,7 @@ def test_session_failure_at_the_ceiling_does_not_alert(simulate_config: Pipeline
     events = [event(f"c{index}", reason=ReasonCode.SESSION_CEILING) for index in range(3)]
     events += [event(f"ok{index}") for index in range(7)]
 
-    rollup = compute_kpis([], events, {}, simulate_config)
+    rollup = compute_kpis([], events, simulate_config)
 
     rate = rollup["session_failure_rate"]
     assert isinstance(rate, float)
@@ -288,8 +286,20 @@ def test_verification_pass_rate_below_floor_alerts(simulate_config: PipelineConf
         event("passed", session_id="session-passed", criterion_evidence=satisfied),
         event("failed", session_id="session-failed"),
     ]
+    candidates = [
+        codeql_candidate(
+            candidate_id="passed",
+            run_id="run-1",
+            session_id="session-passed",
+        ),
+        codeql_candidate(
+            candidate_id="failed",
+            run_id="run-1",
+            session_id="session-failed",
+        ),
+    ]
 
-    rollup = compute_kpis([], events, {}, simulate_config)
+    rollup = compute_kpis(candidates, events, simulate_config)
 
     assert rollup["verification_pass_rate"] == 0.5
     assert rollup[VERIFICATION_PASS_RATE_ALERT] == 1
@@ -304,8 +314,23 @@ def test_verification_pass_rate_at_floor_does_not_alert() -> None:
         for index in range(4)
     ]
     events.append(event("failed", session_id="session-failed"))
+    candidates = [
+        codeql_candidate(
+            candidate_id=f"passed-{index}",
+            run_id="run-1",
+            session_id=f"session-passed-{index}",
+        )
+        for index in range(4)
+    ]
+    candidates.append(
+        codeql_candidate(
+            candidate_id="failed",
+            run_id="run-1",
+            session_id="session-failed",
+        )
+    )
 
-    rollup = compute_kpis([], events, {}, config)
+    rollup = compute_kpis(candidates, events, config)
 
     assert rollup["verification_pass_rate"] == 0.8
     assert rollup[VERIFICATION_PASS_RATE_ALERT] == 0
@@ -313,7 +338,7 @@ def test_verification_pass_rate_at_floor_does_not_alert() -> None:
 
 def test_verification_pass_rate_none_does_not_alert(simulate_config: PipelineConfig) -> None:
     """§11 — no sessions means verification pass rate is not measurable."""
-    rollup = compute_kpis([], [], {}, simulate_config)
+    rollup = compute_kpis([], [], simulate_config)
 
     assert rollup["verification_pass_rate"] is None
     assert rollup[VERIFICATION_PASS_RATE_ALERT] == 0
@@ -325,8 +350,16 @@ def test_verification_pass_rate_uses_dispatched_candidates_and_reports_lanes(
     """§11 — persisted branch evidence supplies the candidate denominator per lane."""
     satisfied = CriterionEvidence(criterion="criterion", satisfied=True)
     candidates = [
-        codeql_candidate(candidate_id="codeql-dispatched", head_branch="devin/codeql"),
-        lane2_candidate(candidate_id="lane2-dispatched", head_branch="devin/lane2"),
+        codeql_candidate(
+            candidate_id="codeql-dispatched",
+            head_branch="devin/codeql",
+            run_id="run-1",
+        ),
+        lane2_candidate(
+            candidate_id="lane2-dispatched",
+            head_branch="devin/lane2",
+            run_id="run-1",
+        ),
     ]
     events = [
         event(
@@ -338,7 +371,7 @@ def test_verification_pass_rate_uses_dispatched_candidates_and_reports_lanes(
         event("lane2-dispatched", lane=Lane.SKIPPED_TESTS),
     ]
 
-    rollup = compute_kpis(candidates, events, {}, simulate_config)
+    rollup = compute_kpis(candidates, events, simulate_config)
 
     assert rollup["verification_pass_rate"] == 0.5
     assert rollup["verification_pass_rate_by_lane"] == {
@@ -350,7 +383,7 @@ def test_verification_pass_rate_uses_dispatched_candidates_and_reports_lanes(
 def test_sessions_are_simulation_labelled_in_both_reports(simulate_config: PipelineConfig) -> None:
     """§14.1 — simulated session counts and safety alerts are visibly labelled."""
     candidate = codeql_candidate(marker_search_outcome="failed", session_id="simulated-session")
-    kpi = render_kpi_report([candidate], [], {}, simulate_config)
+    kpi = render_kpi_report([candidate], [], simulate_config)
     run = render_run_report([candidate], run_id="run", mode=Mode.SIMULATE)
 
     assert "Sessions Created (simulated)" in kpi
@@ -373,38 +406,22 @@ def test_publication_safety_alert_tracks_undetermined_candidates(
     simulate_config: PipelineConfig,
 ) -> None:
     """§11 — any candidate without provable single-write safety raises the alert."""
-    rollup = compute_kpis(safety_candidates, [], {}, simulate_config)
+    rollup = compute_kpis(safety_candidates, [], simulate_config)
 
     assert rollup["publication_safety_undetermined"] == expected_alert
     assert rollup[PUBLICATION_SAFETY_ALERT] == expected_alert
 
 
-def test_suppressed_rows_count_only_in_the_denominator(
-    baseline: Mapping[str, Any], simulate_config: PipelineConfig
+def test_simulate_unconfigured_marker_search_is_not_safety_failure(
+    simulate_config: PipelineConfig,
 ) -> None:
-    """§11 — blocked/suppressed rows are non-terminal and never count as progress."""
-    candidates = [
-        lane2_candidate(candidate_id="lane2-1", state=CandidateState.SUPPRESSED_BY_CONTAINMENT),
-        lane2_candidate(candidate_id="lane2-2", state=CandidateState.BLOCKED_BY_ENCLOSING_SKIP),
-    ]
+    """SIMULATE records an unconfigured search without claiming uncertainty."""
+    candidate = codeql_candidate(marker_search_outcome="unconfigured")
 
-    skipped = compute_burndown(candidates, dict(baseline))[Lane.SKIPPED_TESTS]
+    rollup = compute_kpis([candidate], [], simulate_config)
 
-    assert skipped.completed == 0
-    assert skipped.denominator == baseline["totals"]["skipped_tests"]
-
-
-def test_na_burndown_renders_as_na_in_the_report(
-    baseline: Mapping[str, Any], simulate_config: PipelineConfig
-) -> None:
-    """§11 — the `n/a` representation is explicit in the rendered rollup, not a zero."""
-    degraded = dict(baseline)
-    degraded["baseline_valid_lanes"] = [Lane.SKIPPED_TESTS.value]
-
-    markdown = render_kpi_report([], [], degraded, simulate_config)
-
-    assert f"- **{Lane.CODEQL.value}:** n/a" in markdown
-    assert ReasonCode.CAPABILITY_UNAVAILABLE.value in markdown
+    assert rollup["publication_safety_undetermined"] == 0
+    assert rollup[PUBLICATION_SAFETY_ALERT] == 0
 
 
 def test_role_loop_rates_are_none_when_no_candidate_entered_the_loop(
@@ -421,7 +438,7 @@ def test_role_loop_rates_are_none_when_no_candidate_entered_the_loop(
         for index in range(1, 4)
     ]
 
-    rollup = compute_kpis([], events, {}, simulate_config)
+    rollup = compute_kpis([], events, simulate_config)
 
     assert rollup["test_inclusion_rate"] is None
     assert rollup["verification_pass_rate"] is None
@@ -438,30 +455,10 @@ def test_an_unknown_role_loop_rate_renders_as_na_not_zero(
         reason=ReasonCode.BUDGET_OVERFLOW,
     )
 
-    markdown = render_kpi_report([], [deferred], {}, simulate_config)
+    markdown = render_kpi_report([], [deferred], simulate_config)
 
     assert "- **Test Inclusion Rate:** n/a" in markdown
     assert "- **Verification Pass Rate:** n/a" in markdown
-
-
-def test_burn_down_denominators_stay_keyed_to_candidates_seen(
-    baseline: Mapping[str, Any], simulate_config: PipelineConfig
-) -> None:
-    """§11 — the role-loop denominator change does not touch burn-down accounting."""
-    candidates = [
-        codeql_candidate(candidate_id="codeql-1", state=CandidateState.PR_CREATED),
-        codeql_candidate(
-            candidate_id="codeql-2",
-            state=CandidateState.DEFERRED,
-            reason=ReasonCode.BUDGET_OVERFLOW,
-        ),
-    ]
-
-    burndown = compute_burndown(candidates, dict(baseline))
-
-    assert burndown[Lane.CODEQL].denominator == baseline["totals"]["codeql_open_alerts"]
-    assert burndown[Lane.CODEQL].completed == 0
-    assert burndown[Lane.CODEQL].remaining == baseline["totals"]["codeql_open_alerts"]
 
 
 def test_alerts_are_rendered_visibly_in_the_markdown_rollup(
@@ -473,7 +470,7 @@ def test_alerts_are_rendered_visibly_in_the_markdown_rollup(
         event("c2", reason=ReasonCode.SESSION_CEILING),
     ]
 
-    markdown = render_kpi_report([], events, {}, simulate_config)
+    markdown = render_kpi_report([], events, simulate_config)
 
     assert "ALERT" in markdown.upper()
     assert "Merge Rate Alert" in markdown
@@ -486,7 +483,7 @@ def test_kpi_report_is_written_to_the_local_sink(
     """§11 — the rollup is persisted under `reports/`."""
     path = tmp_path / "reports" / "kpis.md"
 
-    write_kpi_report(path, [], [merged("c1")], {}, simulate_config)
+    write_kpi_report(path, [], [merged("c1")], simulate_config)
 
     assert path.read_text(encoding="utf-8").startswith("# SIMULATED Remediation KPI rollup")
 
@@ -502,8 +499,8 @@ def test_the_kpi_title_says_simulated_only_when_writes_were_suppressed(
     """
     live = simulate_config.model_copy(update={"mode": Mode.LIVE})
 
-    simulated = render_kpi_report([], [merged("c1")], {}, simulate_config)
-    published = render_kpi_report([], [merged("c1")], {}, live)
+    simulated = render_kpi_report([], [merged("c1")], simulate_config)
+    published = render_kpi_report([], [merged("c1")], live)
 
     assert simulated.startswith("# SIMULATED Remediation KPI rollup")
     assert published.startswith("# Remediation KPI rollup")
@@ -567,7 +564,7 @@ def test_dispatch_counts_derive_from_lifecycle_state_not_routing(
 ) -> None:
     """§11 — a candidate routed to a PR that never left `deferred` was not dispatched.
 
-    A LIVE run reported `Dispatched Pr: 1` for a candidate whose only durable row was
+    A LIVE run reported one problem with a pull request for a candidate whose only durable row was
     `deferred/capability_unavailable`; the routing decision alone is not evidence of an
     artifact.
     """
@@ -604,10 +601,37 @@ def test_dispatch_counts_derive_from_lifecycle_state_not_routing(
         ),
     ]
 
-    rollup = compute_kpis(candidates, [], {}, simulate_config)
+    rollup = compute_kpis(candidates, [], simulate_config)
 
     assert rollup["dispatched_pr"] == 1
     assert rollup["dispatched_issue"] == 1
+
+
+def test_pull_requests_opened_counts_distinct_urls() -> None:
+    candidates = [
+        dispatched_pr_candidate(
+            "codeql-1",
+            state=CandidateState.PR_CREATED,
+            pr_url="https://example.invalid/pr/1",
+        ),
+        dispatched_pr_candidate(
+            "codeql-2",
+            state=CandidateState.PR_CREATED,
+            pr_url="https://example.invalid/pr/1",
+        ),
+        dispatched_pr_candidate(
+            "codeql-3",
+            state=CandidateState.PR_CREATED,
+            pr_url="https://example.invalid/pr/2",
+        ),
+    ]
+
+    rollup = compute_kpis(
+        candidates, [event("codeql-4", pr_url="https://example.invalid/pr/3")], PipelineConfig()
+    )
+
+    assert rollup["dispatched_pr"] == 4
+    assert rollup["pull_requests_opened"] == 3
 
 
 @pytest.mark.parametrize(
@@ -634,7 +658,6 @@ def test_every_post_dispatch_state_counts_as_dispatched(
             )
         ],
         [],
-        {},
         simulate_config,
     )
 
@@ -655,9 +678,7 @@ def test_a_candidate_holding_no_artifact_url_is_never_dispatched(
     simulate_config: PipelineConfig,
 ) -> None:
     """§11 — the artifact URL is the evidence; routing and state alone are not."""
-    rollup = compute_kpis(
-        [dispatched_pr_candidate("codeql-1", state=state)], [], {}, simulate_config
-    )
+    rollup = compute_kpis([dispatched_pr_candidate("codeql-1", state=state)], [], simulate_config)
 
     assert rollup["dispatched_pr"] == 0
 
@@ -749,7 +770,7 @@ def test_deferral_counts_come_from_durable_state_not_the_routing_action(
         ),
     ]
 
-    rollup = compute_kpis(candidates, [], {}, simulate_config)
+    rollup = compute_kpis(candidates, [], simulate_config)
 
     assert rollup["deferred"] == 2
     assert rollup["deferred_by_reason"] == {

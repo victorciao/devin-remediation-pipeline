@@ -12,7 +12,6 @@ from pipeline.config import PipelineConfig
 from pipeline.observability.kpis import (
     KpiValue,
     NotApplicable,
-    compute_burndown,
     compute_kpis,
 )
 from pipeline.schemas import (
@@ -20,6 +19,7 @@ from pipeline.schemas import (
     Candidate,
     CandidateState,
     EventRecord,
+    ReasonCode,
 )
 
 _SHORT_ID_LENGTH = 12
@@ -87,6 +87,19 @@ def _read_historical_events(path: Path) -> list[EventRecord]:
         }
         events.append(EventRecord.model_validate(payload, strict=False))
     return events
+
+
+def _scope_candidates_to_run(
+    candidates: Iterable[Candidate],
+    events: Sequence[EventRecord],
+) -> tuple[Candidate, ...]:
+    """Keep rows attributed to this run, plus legacy rows without attribution."""
+    run_id = events[0].run_id if events else None
+    return tuple(
+        candidate
+        for candidate in candidates
+        if candidate.run_id is None or run_id is None or candidate.run_id == run_id
+    )
 
 
 def state_path(run_dir: Path) -> Path:
@@ -196,14 +209,14 @@ def _kpi_cell(value: KpiValue) -> str:
 
 def render_results(
     runs: Sequence[RunArtifacts],
-    baseline: dict[str, object],
     config: PipelineConfig,
 ) -> str:
     """Render the cross-run results report; every number comes from the artifacts."""
+    runs = tuple(sorted(runs, key=lambda run: run.run_dir.name))
     candidates, events = aggregate(runs)
     ordered = _sorted_candidates(candidates)
     published = [candidate for candidate in ordered if any(_artifact_urls(candidate, events))]
-    metrics = compute_kpis(candidates, events, baseline, config)
+    metrics = compute_kpis(candidates, events, config)
     lines = [
         "# Remediation results",
         "",
@@ -219,6 +232,79 @@ def render_results(
             lines.append(f"- `{run.run_dir.name}` (state `{run.state_path.name}`): {run_ids}")
     else:
         lines.append("- no run directory was supplied")
+    lines.extend(
+        [
+            "",
+            "## Per run",
+            "",
+            "| Run | Problems seen | First seen here | Issues created | Sessions | PRs opened "
+            "| Criterion satisfied | Session failures |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    earlier_candidate_ids: set[str] = set()
+    earlier_issue_urls: set[str] = set()
+    earlier_pr_urls: set[str] = set()
+    for run in runs:
+        run_candidates = [
+            candidate
+            for candidate in _scope_candidates_to_run(run.candidates, run.events)
+            if candidate.superseded_by is None
+        ]
+        run_events = list(run.events)
+        run_metrics = compute_kpis(run_candidates, run_events, config)
+        run_candidate_ids = {candidate.candidate_id for candidate in run_candidates}
+        first_seen = len(run_candidate_ids - earlier_candidate_ids)
+        run_issue_urls = {
+            candidate.issue_url
+            for candidate in run_candidates
+            if candidate.issue_url is not None
+            and candidate.state is not CandidateState.DEFERRED
+            and not candidate.issue_adopted
+        }
+        run_pr_urls = {
+            candidate.pr_url
+            for candidate in run_candidates
+            if candidate.pr_url is not None and candidate.state is not CandidateState.DEFERRED
+        }
+        criterion_ids = {
+            event.candidate_id
+            for event in run_events
+            if event.criterion_evidence is not None and event.criterion_evidence.satisfied is True
+        }
+        session_failures = sum(
+            event.reason
+            in {
+                ReasonCode.SESSION_CEILING,
+                ReasonCode.SESSION_FAILED,
+                ReasonCode.SESSION_BLOCKED,
+            }
+            for event in run_events
+        )
+        criterion_evidence_available = any(
+            event.criterion_evidence is not None for event in run_events
+        )
+        lines.append(
+            "| "
+            + " | ".join(
+                (
+                    f"`{run.run_dir.name}`",
+                    str(len(run_candidates)),
+                    str(first_seen),
+                    str(len(run_issue_urls - earlier_issue_urls)),
+                    _kpi_cell(run_metrics["sessions_created"]),
+                    str(len(run_pr_urls - earlier_pr_urls)),
+                    _cell(len(criterion_ids) if criterion_evidence_available else None),
+                    _cell(session_failures if run_events else None),
+                )
+            )
+            + " |"
+        )
+        earlier_candidate_ids.update(run_candidate_ids)
+        earlier_issue_urls.update(run_issue_urls)
+        earlier_pr_urls.update(run_pr_urls)
+    if not runs:
+        lines.append("| _no run directory was supplied_ | | | | | | | |")
     lines.extend(
         [
             "",
@@ -263,16 +349,12 @@ def render_results(
     for name, value in metrics.items():
         if name in _KPI_SECTION_KEYS:
             continue
-        lines.append(f"- **{name.replace('_', ' ').title()}:** {_kpi_cell(value)}")
-    lines.extend(["", "## Burn-down by lane", ""])
-    for lane, burndown in compute_burndown(candidates, baseline).items():
-        if isinstance(burndown.denominator, NotApplicable):
-            lines.append(f"- **{lane.value}:** n/a ({burndown.denominator.reason.value})")
-        else:
-            lines.append(
-                f"- **{lane.value}:** {burndown.completed}/{burndown.denominator} complete; "
-                f"{burndown.remaining} remaining"
-            )
+        label = name.replace("_", " ").title()
+        if name == "dispatched_pr":
+            label = "Problems With Pull Request"
+        elif name == "pull_requests_opened":
+            label = "Pull Requests Opened"
+        lines.append(f"- **{label}:** {_kpi_cell(value)}")
     lines.extend(["", "## Deferred by reason", ""])
     deferred = metrics["deferred_by_reason"]
     if isinstance(deferred, dict) and deferred:
@@ -307,12 +389,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Render RESULTS.md from persisted remediation run artifacts.",
     )
     parser.add_argument("--run-dir", action="append", default=[], type=Path, required=True)
-    parser.add_argument("--baseline", type=Path, default=Path("fixtures/baseline.json"))
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
-    baseline: dict[str, object] = json.loads(args.baseline.read_text(encoding="utf-8"))
     runs = [read_run(run_dir) for run_dir in args.run_dir]
-    report = render_results(runs, baseline, PipelineConfig())
+    report = render_results(runs, PipelineConfig())
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(report, encoding="utf-8")
     return 0

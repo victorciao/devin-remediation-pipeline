@@ -1,0 +1,12 @@
+/state/
+/reports/
+/docker-output/
+/run-output/
+/live-output*/
+/.pytest_cache/
+/.mypy_cache/
+/.ruff_cache/
+/.coverage
+__pycache__/
+.venv/
+*.egg-info/

@@ -9,9 +9,10 @@ from pipeline.observability.results import (
     LIFECYCLE_PROGRESS,
     RunArtifacts,
     aggregate,
+    read_run,
     render_results,
 )
-from pipeline.schemas import CandidateState, CriterionEvidence, ReasonCode, Tier
+from pipeline.schemas import CandidateState, CriterionEvidence, EventRecord, Lane, ReasonCode, Tier
 from tests.factories import codeql_candidate
 
 
@@ -25,13 +26,11 @@ def test_results_rendering_is_deterministic() -> None:
     )
     run = RunArtifacts(Path("/runs/one"), Path("candidates-live.jsonl"), (candidate,), ())
 
-    assert render_results((run,), {}, PipelineConfig()) == render_results(
-        (run,), {}, PipelineConfig()
-    )
+    assert render_results((run,), PipelineConfig()) == render_results((run,), PipelineConfig())
 
 
 def test_results_rendering_handles_empty_input() -> None:
-    report = render_results((), {}, PipelineConfig())
+    report = render_results((), PipelineConfig())
 
     assert "no run directory was supplied" in report
     assert "no candidate reached an issue or a pull request" in report
@@ -57,7 +56,7 @@ def test_unpublished_candidates_are_excluded_but_counted() -> None:
         (),
     )
 
-    report = render_results((run,), {}, PipelineConfig())
+    report = render_results((run,), PipelineConfig())
 
     assert "`published`" in report
     assert "`unpublished`" not in report
@@ -91,7 +90,7 @@ def test_later_narrow_run_cannot_erase_a_proven_terminal_outcome() -> None:
     )
 
     candidates, _ = aggregate(runs)
-    report = render_results(runs, {}, PipelineConfig())
+    report = render_results(runs, PipelineConfig())
 
     assert candidates == [proven]
     assert "https://github.test/issues/1" in report
@@ -122,6 +121,201 @@ def test_later_more_advanced_run_wins_over_deferred() -> None:
     )
 
     assert candidates == [advanced]
+
+
+def test_per_run_first_seen_counts_a_candidate_only_in_its_first_run() -> None:
+    first_candidate = codeql_candidate(
+        candidate_id="repeated",
+        state=CandidateState.ISSUE_CREATED,
+        issue_url="https://github.test/issues/1",
+    )
+    later_candidate = first_candidate.model_copy(update={"state": CandidateState.SESSION_DONE})
+    first = RunArtifacts(
+        Path("/runs/20260101T000000Z-first"),
+        Path("first.jsonl"),
+        (first_candidate,),
+        (),
+    )
+    later = RunArtifacts(
+        Path("/runs/20260102T000000Z-later"),
+        Path("later.jsonl"),
+        (later_candidate,),
+        (),
+    )
+
+    report = render_results((later, first), PipelineConfig())
+    rows = [line for line in report.splitlines() if line.startswith("| `2026010")]
+
+    assert rows[0].startswith("| `20260101T000000Z-first` | 1 | 1 |")
+    assert rows[1].startswith("| `20260102T000000Z-later` | 1 | 0 |")
+
+
+def test_per_run_missing_evidence_renders_na_instead_of_zero() -> None:
+    candidate = codeql_candidate(candidate_id="without-evidence")
+    run = RunArtifacts(
+        Path("/runs/20260101T000000Z-missing"),
+        Path("missing.jsonl"),
+        (candidate,),
+        (),
+    )
+
+    report = render_results((run,), PipelineConfig())
+
+    assert "| `20260101T000000Z-missing` | 1 | 1 | 0 | 0 | 0 | n/a | n/a |" in report
+
+
+def test_per_run_artifact_counts_are_differenced_by_url() -> None:
+    first_candidate = codeql_candidate(
+        candidate_id="first",
+        state=CandidateState.ISSUE_CREATED,
+        issue_url="https://github.test/issues/1",
+        pr_url="https://github.test/pulls/1",
+    )
+    later_candidate = first_candidate.model_copy(update={"state": CandidateState.PR_CREATED})
+    first = RunArtifacts(
+        Path("/runs/20260101T000000Z-first"), Path("first"), (first_candidate,), ()
+    )
+    later = RunArtifacts(
+        Path("/runs/20260102T000000Z-later"), Path("later"), (later_candidate,), ()
+    )
+
+    report = render_results((first, later), PipelineConfig())
+    rows = [line for line in report.splitlines() if line.startswith("| `2026010")]
+
+    assert "| `20260101T000000Z-first` | 1 | 1 | 1 | 0 | 1 |" in rows[0]
+    assert "| `20260102T000000Z-later` | 1 | 0 | 0 | 0 | 0 |" in rows[1]
+
+
+def test_per_run_problems_excludes_superseded_rows() -> None:
+    superseded = codeql_candidate(
+        candidate_id="old",
+        superseded_by="new",
+        issue_url="https://github.test/issues/old",
+    )
+    current = codeql_candidate(candidate_id="new", supersedes="old")
+    run = RunArtifacts(
+        Path("/runs/20260101T000000Z-superseded"), Path("state"), (superseded, current), ()
+    )
+
+    report = render_results((run,), PipelineConfig())
+
+    assert "| `20260101T000000Z-superseded` | 1 | 1 |" in report
+
+
+def test_per_run_rows_use_event_run_id_attribution() -> None:
+    reobserved = codeql_candidate(
+        candidate_id="reobserved",
+        run_id="previous-run",
+        state=CandidateState.MERGED,
+        pr_url="https://github.test/pulls/1",
+    )
+    run_event = EventRecord(
+        run_id="current-run",
+        lane=Lane.CODEQL,
+        candidate_id="reobserved",
+    )
+    run = RunArtifacts(
+        Path("/runs/20260101T000000Z-current"),
+        Path("state"),
+        (reobserved,),
+        (run_event,),
+    )
+
+    report = render_results((run,), PipelineConfig())
+
+    assert "| `20260101T000000Z-current` | 0 | 0 | 0 | 0 | 0 | n/a | 0 |" in report
+
+
+def test_read_run_keeps_rows_written_by_other_runs(tmp_path: Path) -> None:
+    run_dir = tmp_path / "20260101T000000Z-current"
+    state_dir = run_dir / "state"
+    reports_dir = run_dir / "reports"
+    state_dir.mkdir(parents=True)
+    reports_dir.mkdir()
+    current = codeql_candidate(candidate_id="current", run_id="current-run")
+    reobserved = codeql_candidate(candidate_id="reobserved", run_id="previous-run")
+    legacy = codeql_candidate(candidate_id="legacy", run_id=None)
+    (state_dir / "candidates-live.jsonl").write_text(
+        "".join(f"{candidate.model_dump_json()}\n" for candidate in (current, reobserved, legacy)),
+        encoding="utf-8",
+    )
+    (reports_dir / "events.jsonl").write_text(
+        EventRecord(
+            run_id="current-run",
+            lane=Lane.CODEQL,
+            candidate_id="current",
+        ).model_dump_json()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    run = read_run(run_dir)
+
+    assert [candidate.candidate_id for candidate in run.candidates] == [
+        "current",
+        "reobserved",
+        "legacy",
+    ]
+
+
+def test_reobserved_merge_is_latest_cumulative_state_but_not_per_run_problem(
+    tmp_path: Path,
+) -> None:
+    pr_url = "https://github.test/pulls/1"
+    pending = codeql_candidate(
+        candidate_id="reobserved",
+        run_id="previous-run",
+        state=CandidateState.AWAITING_HUMAN_MERGE,
+        pr_url=pr_url,
+        pr_number=1,
+    )
+    merged = pending.model_copy(
+        update={
+            "state": CandidateState.MERGED,
+            "merged_at": "2026-09-01T00:00:00Z",
+            "merge_verified": True,
+        }
+    )
+    previous_event = EventRecord(
+        run_id="previous-run",
+        lane=Lane.CODEQL,
+        candidate_id="reobserved",
+        terminal_outcome=CandidateState.AWAITING_HUMAN_MERGE,
+        pr_url=pr_url,
+        pr_number=1,
+    )
+    merged_event = EventRecord(
+        run_id="current-run",
+        lane=Lane.CODEQL,
+        candidate_id="reobserved",
+        terminal_outcome=CandidateState.MERGED,
+        pr_url=pr_url,
+        pr_number=1,
+        merged_at="2026-09-01T00:00:00Z",
+        merge_verified=True,
+    )
+    runs = (
+        RunArtifacts(
+            Path("/runs/20260101T000000Z-previous"),
+            Path("previous.jsonl"),
+            (pending,),
+            (previous_event,),
+        ),
+        RunArtifacts(
+            Path("/runs/20260102T000000Z-current"),
+            Path("current.jsonl"),
+            (merged,),
+            (merged_event,),
+        ),
+    )
+
+    candidates, _ = aggregate(runs)
+    report = render_results(runs, PipelineConfig())
+
+    assert candidates == [merged]
+    assert "| merged |" in report
+    assert "**Merged Clean:** 1" in report
+    assert "| `20260102T000000Z-current` | 0 | 0 | 0 | 0 | 0 | n/a | 0 |" in report
 
 
 def test_lifecycle_progress_ranks_every_candidate_state() -> None:

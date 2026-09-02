@@ -11,13 +11,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import SecretStr
 
 from pipeline.config import (
     BUDGET_HARD_MAX,
     CiEvidenceMode,
     ConfigError,
-    IssueSink,
     Mode,
     PipelineConfig,
     load_config,
@@ -33,6 +31,7 @@ from pipeline.schemas import (
     Tier,
 )
 from tests.conftest import RUBRICS_PATH, TEMPLATES_DIR
+from tests.factories import codeql_candidate
 from tests.fakes import FakeGitHubTransport
 
 
@@ -45,8 +44,6 @@ def live_config(**overrides: Any) -> PipelineConfig:  # noqa: ANN401
     """A LIVE configuration carrying placeholder credentials (never real secrets)."""
     return config(
         mode=Mode.LIVE,
-        github_token=SecretStr("placeholder-github-token"),
-        devin_api_key=SecretStr("placeholder-devin-key"),
         **overrides,
     )
 
@@ -83,7 +80,7 @@ def _baseline(valid_lanes: list[str]) -> dict[str, object]:
 def test_live_discovery_never_synthesizes_candidates_from_the_baseline_fixture(
     tmp_path: Path,
 ) -> None:
-    """§7: `fixtures/baseline.json` is the SIMULATE input and burn-down denominator only."""
+    """§7: `fixtures/baseline.json` is the SIMULATE input only."""
     from pipeline.__main__ import _enumerate
 
     notes: list[str] = []
@@ -175,14 +172,6 @@ def test_budget_above_the_hard_max_is_clamped_rather_than_a_startup_error() -> N
     assert loaded.budget_N == BUDGET_HARD_MAX
 
 
-def test_documented_issue_sink_value_issues_is_settable() -> None:
-    """§15: `issue_sink=issues` is valid and legacy `github` fails loudly."""
-    loaded = load_config(env={"PIPELINE_ISSUE_SINK": "issues"}, cli_args=())
-    assert loaded.issue_sink is IssueSink.ISSUES
-    with pytest.raises(ConfigError):
-        load_config(env={"PIPELINE_ISSUE_SINK": "github"}, cli_args=())
-
-
 def test_live_requires_a_non_empty_required_contexts_min() -> None:
     """§15 LIVE preconditions: `required_contexts_min` non-empty, checked before any write."""
     with pytest.raises(ConfigError):
@@ -211,7 +200,8 @@ def test_verification_pass_rate_is_per_dispatched_candidate() -> None:
         _event(candidate_id="cand", session_id="s1"),
         _event(candidate_id="cand", session_id="s1", pr_url="https://github.test/pull/1"),
     ]
-    metrics = compute_kpis([], events, _baseline([]), config())
+    candidates = [codeql_candidate(candidate_id="cand", run_id="run", session_id="s1")]
+    metrics = compute_kpis(candidates, events, config())
     assert metrics["verification_pass_rate"] == 1.0, (
         "the pass rate counted state rows instead of dispatched candidates"
     )
@@ -219,7 +209,7 @@ def test_verification_pass_rate_is_per_dispatched_candidate() -> None:
 
 def test_kpis_report_issues_created_separately_from_issues_adopted() -> None:
     """§14 Layer 3: issues created and issues adopted, split by tier."""
-    metrics = compute_kpis([], [], _baseline([]), config())
+    metrics = compute_kpis([], [], config())
     assert {"issues_created", "issues_adopted"} <= set(metrics), (
         "the KPI rollup does not distinguish created from adopted issues"
     )
@@ -234,7 +224,7 @@ def test_candidate_state_rows_account_for_every_candidate() -> None:
         stable_locator="tests/x.py::test_y",
         state=CandidateState.ENUMERATED,
     )
-    metrics = compute_kpis([candidate], [], _baseline([]), config())
+    metrics = compute_kpis([candidate], [], config())
     assert metrics["candidates_seen"] == 1
     accounted = [metrics["active"], metrics["completed"]]
     assert sum(value for value in accounted if isinstance(value, int)) == 1

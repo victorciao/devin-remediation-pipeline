@@ -392,7 +392,7 @@ def fetch_alerts(
 def enumerate_from_config(
     config: PipelineConfig,
     *,
-    repo_path: Path,
+    repo_path: Path | None,
     repo: str | None = None,
     payload: object | None = None,
     api_reader: AlertReader | None = None,

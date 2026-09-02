@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from typing import Any
 
 import pytest
-from pydantic import SecretStr
 
 from pipeline.config import ConfigError, Mode, PipelineConfig
 from pipeline.schemas import EventRecord, Lane, ReasonCode, RetryDecision
@@ -58,8 +57,6 @@ CLASS_NODEID = "tests/integration_tests/sqllab_tests.py::TestSqlLab"
 def live_config(**overrides: Any) -> PipelineConfig:  # noqa: ANN401
     return PipelineConfig(
         mode=Mode.LIVE,
-        github_token=SecretStr("placeholder-github-token"),
-        devin_api_key=SecretStr("placeholder-devin-key"),
         **overrides,
     )
 

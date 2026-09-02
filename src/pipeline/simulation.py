@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from pipeline.config import Mode, PipelineConfig
@@ -10,7 +11,12 @@ from pipeline.observability.events import EventLog, append_candidate_events
 from pipeline.observability.kpis import write_kpi_report
 from pipeline.observability.report import write_run_report
 from pipeline.schemas import Action, Candidate, Lane, RunEventRecord
-from pipeline.state import CandidateStateStore
+from pipeline.state import (
+    SETTLED_STATES,
+    CandidateStateStore,
+    StatePreservationError,
+    has_local_artifact,
+)
 from pipeline.templates.render import (
     render_issue_body,
     render_pr_body,
@@ -19,19 +25,27 @@ from pipeline.templates.render import (
 )
 
 
+@dataclass(frozen=True)
+class RenderedRun:
+    """The artifacts and reconciled candidates rendered for one run."""
+
+    produced: tuple[Path, ...]
+    candidates: tuple[Candidate, ...]
+
+
 def render_run_artifacts(
     candidates: Sequence[Candidate],
     *,
     run_id: str,
     output_dir: Path,
-    baseline: dict[str, object],
     config: PipelineConfig,
     fix_outputs: Mapping[str, Mapping[str, object]] | None = None,
     capability_notes: Sequence[str] = (),
     token_login: str | None = None,
     token_scopes: Sequence[str] = (),
     run_events: Sequence[RunEventRecord] = (),
-) -> tuple[Path, ...]:
+    reobserved_candidates: Sequence[Candidate] = (),
+) -> RenderedRun:
     """Render a complete run without invoking a remote write transport."""
     state_path = (
         output_dir
@@ -43,13 +57,42 @@ def render_run_artifacts(
         state_path,
         artifact_simulated=config.mode is Mode.SIMULATE,
     )
+    report_notes = list(capability_notes)
     rendered_candidates = [
-        candidate.model_copy(update={"artifact_simulated": config.mode is Mode.SIMULATE})
+        candidate.model_copy(
+            update={
+                "run_id": candidate.run_id if candidate.run_id is not None else run_id,
+                "artifact_simulated": config.mode is Mode.SIMULATE,
+            }
+        )
         for candidate in candidates
     ]
-    for candidate in rendered_candidates:
-        store.append(candidate)
+    for index, candidate in enumerate(rendered_candidates):
+        try:
+            store.append(candidate)
+        except StatePreservationError:
+            latest = store.latest().get(candidate.candidate_id)
+            if (
+                latest is None
+                or latest.state not in SETTLED_STATES
+                or not has_local_artifact(latest)
+            ):
+                raise
+            report_notes.append(
+                f"{candidate.candidate_id}: settlement preserved: "
+                f"{latest.state.value} -> {candidate.state.value} not written"
+            )
+            rendered_candidates[index] = latest
 
+    observed_candidates: list[Candidate] = []
+    observed_indexes: dict[str, int] = {}
+    for candidate in [*rendered_candidates, *reobserved_candidates]:
+        candidate_id = candidate.candidate_id
+        if candidate_id in observed_indexes:
+            observed_candidates[observed_indexes[candidate_id]] = candidate
+            continue
+        observed_indexes[candidate_id] = len(observed_candidates)
+        observed_candidates.append(candidate)
     fixes = fix_outputs or {}
     pr_template = (config.templates_dir / "superset/PULL_REQUEST_TEMPLATE.md").read_text(
         encoding="utf-8"
@@ -112,7 +155,7 @@ def render_run_artifacts(
     event_log = EventLog(events_path)
     append_candidate_events(
         event_log,
-        rendered_candidates,
+        observed_candidates,
         run_id=run_id,
         token_login=token_login,
         token_scopes=token_scopes,
@@ -123,15 +166,19 @@ def render_run_artifacts(
         run_path,
         rendered_candidates,
         run_id=run_id,
-        capability_notes=capability_notes,
+        capability_notes=report_notes,
         mode=config.mode,
+        reobserved_candidates=reobserved_candidates,
     )
     kpi_path = output_dir / "reports" / "kpis.md"
-    write_kpi_report(kpi_path, list(rendered_candidates), event_log.read(), baseline, config)
+    write_kpi_report(kpi_path, observed_candidates, event_log.read(), config)
     produced.extend((run_path, kpi_path))
-    return tuple(produced)
+    return RenderedRun(
+        produced=tuple(produced),
+        candidates=tuple(rendered_candidates),
+    )
 
 
 simulate_run = render_run_artifacts
 
-__all__ = ["render_run_artifacts", "simulate_run"]
+__all__ = ["RenderedRun", "render_run_artifacts", "simulate_run"]

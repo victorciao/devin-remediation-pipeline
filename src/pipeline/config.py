@@ -16,7 +16,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    SecretStr,
     ValidationError,
     ValidationInfo,
     ValidatorFunctionWrapHandler,
@@ -74,20 +73,12 @@ class CiEvidenceMode(str, Enum):
     LOCAL = "local"
 
 
-class IssueSink(str, Enum):
-    """Manager-facing artifact sink values."""
-
-    ISSUES = "issues"
-    PR_COMMENT = "pr_comment"
-
-
 class PipelineConfig(BaseModel):
-    """The §13 configuration surface with its shipped defaults."""
+    """The pipeline configuration model with its shipped defaults."""
 
     model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True)
 
     mode: Mode = Mode.SIMULATE
-    coverage_bar: float = Field(default=0.80, ge=0.0, le=1.0, strict=True)
     budget_N: int = Field(default=DEFAULT_BUDGET_N, ge=1, le=BUDGET_HARD_MAX, strict=True)
     score_cap: float = Field(default=200, gt=0, strict=True)
     tier_high_min: float = Field(default=60, gt=0, strict=True)
@@ -114,14 +105,11 @@ class PipelineConfig(BaseModel):
     required_contexts_min: tuple[str, ...] = DEFAULT_REQUIRED_CONTEXTS_MIN
     only_lanes: tuple[Lane, ...] = ()
     has_issues: bool = True
-    issue_sink: IssueSink = IssueSink.ISSUES
     marker_search_enabled: bool = True
     version_source: str = ".github/ISSUE_TEMPLATE/bug-report.yml"
     lane2_class_breadth_max: int = Field(default=5, ge=1, strict=True)
     target_owner: str = Field(default="victorciao", min_length=1)
     target_repo: str = Field(default="superset", min_length=1)
-    github_token: SecretStr | None = None
-    devin_api_key: SecretStr | None = None
     rubrics_path: Path = Path("config/rubrics.yaml")
     templates_dir: Path = Path("templates")
     session_snapshot_id: str | None = None
@@ -164,7 +152,6 @@ class PipelineConfig(BaseModel):
     @field_validator(
         "alert_source",
         "ci_evidence_mode",
-        "issue_sink",
         mode="before",
     )
     @classmethod
@@ -175,9 +162,7 @@ class PipelineConfig(BaseModel):
         normalized = value.strip().lower()
         if info.field_name == "alert_source":
             return AlertSource(normalized)
-        if info.field_name == "ci_evidence_mode":
-            return CiEvidenceMode(normalized)
-        return IssueSink(normalized)
+        return CiEvidenceMode(normalized)
 
     @field_validator("required_contexts_min", "local_item_scope", mode="before")
     @classmethod
@@ -213,16 +198,6 @@ class PipelineConfig(BaseModel):
             return tuple(shlex.split(value))
         return value
 
-    @field_validator("github_token", "devin_api_key", mode="before")
-    @classmethod
-    def normalize_secret(cls, value: object) -> SecretStr | None:
-        """Wrap environment-provided credentials without exposing their values."""
-        if value is None or isinstance(value, SecretStr):
-            return value
-        if isinstance(value, str):
-            return SecretStr(value)
-        raise TypeError("credential must be a string")
-
     @field_validator("rubrics_path", "templates_dir", "alert_fixture_path", mode="before")
     @classmethod
     def normalize_path(cls, value: object) -> object:
@@ -250,8 +225,6 @@ class PipelineConfig(BaseModel):
         """Re-assert cross-field safety rules on construction and assignment."""
         if self.tier_high_min <= self.tier_medium_min:
             raise ConfigError("tier_high_min must be greater than tier_medium_min")
-        if self.mode == Mode.LIVE and (self.github_token is None or self.devin_api_key is None):
-            raise ConfigError("mode=live requires github_token and devin_api_key")
         if self.mode == Mode.LIVE and not self.required_contexts_min:
             raise ConfigError("mode=live requires non-empty required_contexts_min")
         if self.max_sessions < self.budget_N:
@@ -300,6 +273,7 @@ def _parse_bool(value: str) -> bool:
 def _parse_cli(args: Sequence[str]) -> tuple[dict[str, object], bool]:
     values: dict[str, object] = {}
     explicit_budget_flag = False
+    field_names = {name.lower(): name for name in PipelineConfig.model_fields}
     index = 0
     while index < len(args):
         token = args[index]
@@ -319,7 +293,10 @@ def _parse_cli(args: Sequence[str]) -> tuple[dict[str, object], bool]:
                 raise ConfigError(f"missing value for --{key}")
             raw_value = args[index]
         normalized_key = key.replace("-", "_")
-        if normalized_key in {
+        field_name = field_names.get(normalized_key.lower())
+        if field_name is None:
+            raise ConfigError(f"unrecognized CLI option: --{key}")
+        if field_name in {
             "budget_N",
             "score_cap",
             "tier_high_min",
@@ -329,9 +306,8 @@ def _parse_cli(args: Sequence[str]) -> tuple[dict[str, object], bool]:
             "lane2_class_breadth_max",
             "max_sessions",
         }:
-            values[normalized_key] = _parse_int(normalized_key, raw_value)
-        elif normalized_key in {
-            "coverage_bar",
+            values[field_name] = _parse_int(field_name, raw_value)
+        elif field_name in {
             "merge_rate_floor",
             "verification_pass_rate_floor",
             "session_failure_ceiling",
@@ -339,23 +315,18 @@ def _parse_cli(args: Sequence[str]) -> tuple[dict[str, object], bool]:
             "session_timeout_s",
             "alert_analysis_wait_s",
         }:
-            values[normalized_key] = _parse_float(normalized_key, raw_value)
-        elif normalized_key in {"has_issues", "marker_search_enabled"}:
-            values[normalized_key] = _parse_bool(raw_value)
+            values[field_name] = _parse_float(field_name, raw_value)
+        elif field_name in {"has_issues", "marker_search_enabled"}:
+            values[field_name] = _parse_bool(raw_value)
         else:
-            values[normalized_key] = raw_value
+            values[field_name] = raw_value
         index += 1
     return values, explicit_budget_flag
 
 
 def _env_values(env: Mapping[str, str]) -> dict[str, object]:
     values: dict[str, object] = {}
-    if "DEVIN_API_KEY" in env:
-        values["devin_api_key"] = SecretStr(env["DEVIN_API_KEY"])
-    if "GITHUB_PAT_REMEDIATION" in env:
-        values["github_token"] = SecretStr(env["GITHUB_PAT_REMEDIATION"])
     field_names = {
-        "COVERAGE_BAR": "coverage_bar",
         "BUDGET_N": "budget_N",
         "SCORE_CAP": "score_cap",
         "TIER_HIGH_MIN": "tier_high_min",
@@ -380,13 +351,10 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
         "LOCAL_ITEM_SCOPE": "local_item_scope",
         "INTEGRATION_SUITE_CHECK_CONTEXT": "integration_suite_check_context",
         "ONLY_LANES": "only_lanes",
-        "ISSUE_SINK": "issue_sink",
         "VERSION_SOURCE": "version_source",
         "MODE": "mode",
         "TARGET_OWNER": "target_owner",
         "TARGET_REPO": "target_repo",
-        "GITHUB_TOKEN": "github_token",
-        "DEVIN_API_KEY": "devin_api_key",
         "RUBRICS_PATH": "rubrics_path",
         "TEMPLATES_DIR": "templates_dir",
         "SESSION_SNAPSHOT_ID": "session_snapshot_id",
@@ -408,7 +376,6 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
         }:
             values[field_name] = _parse_int(field_name, raw_value)
         elif name in {
-            "COVERAGE_BAR",
             "SCORE_CAP",
             "TIER_HIGH_MIN",
             "TIER_MEDIUM_MIN",
@@ -423,11 +390,7 @@ def _env_values(env: Mapping[str, str]) -> dict[str, object]:
         elif name in {"HAS_ISSUES", "MARKER_SEARCH_ENABLED"}:
             values[field_name] = _parse_bool(raw_value)
         else:
-            values[field_name] = (
-                SecretStr(raw_value)
-                if field_name in {"github_token", "devin_api_key"}
-                else raw_value
-            )
+            values[field_name] = raw_value
     return values
 
 

@@ -19,22 +19,26 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import SecretStr
 
 from pipeline import __main__ as entrypoint
 from pipeline.config import Mode, PipelineConfig
+from pipeline.github_client import GitHubClient
 from pipeline.http_transport import HttpTransportError
 from pipeline.lanes.codeql import read_alert_fixture
 from pipeline.observability.events import EventLog
 from pipeline.schemas import (
+    Action,
+    Candidate,
     CandidateState,
     EventRecord,
     Lane,
     ReasonCode,
     RunEventRecord,
+    Tier,
 )
-from pipeline.state import MarkerSearchOutcome
+from pipeline.state import CandidateStateStore, MarkerSearchOutcome
 from tests.conftest import FIXTURES_DIR, RUBRICS_PATH, TARGET_CHECKOUT, TEMPLATES_DIR
+from tests.factories import lane3_candidate
 from tests.fakes import FakeGitHubTransport, WriteRecord
 
 MARKER_SEARCH_FAILED = "marker_search_failed"
@@ -110,12 +114,224 @@ def config_for(mode: Mode, **fields: Any) -> PipelineConfig:  # noqa: ANN401
     """A config in `mode` pointed at the shipped rubrics, templates and alert fixture."""
     return PipelineConfig(
         mode=mode,
-        github_token=SecretStr("placeholder-token"),
-        devin_api_key=SecretStr("placeholder-key"),
         rubrics_path=RUBRICS_PATH,
         templates_dir=TEMPLATES_DIR,
         alert_fixture_path=FIXTURES_DIR / "codeql_alerts.json",
         **{"ci_wait_timeout_s": 1, **fields},
+    )
+
+
+def persisted_awaiting(
+    output_dir: Path, state: CandidateState = CandidateState.AWAITING_HUMAN_MERGE
+) -> Candidate:
+    """Persist one settled PR row that a later run can re-observe."""
+    candidate = lane3_candidate(
+        candidate_id="persisted-awaiting",
+        run_id="previous-run",
+        state=state,
+        action=Action.OPEN_PR,
+        reason=ReasonCode.MANUAL_MERGE_REQUIRED,
+        issue_number=1,
+        issue_url="https://github.test/victorciao/superset/issues/1",
+        pr_number=2,
+        pr_url="https://github.test/victorciao/superset/pull/2",
+    )
+    state_path = output_dir / "state" / LIVE_STATE_FILE
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(candidate.model_dump(mode="json")) + "\n",
+        encoding="utf-8",
+    )
+    return candidate
+
+
+def run_merge_sweep(
+    tmp_path: Path,
+    transport: FakeGitHubTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, Candidate]:
+    """Run LIVE with no enumerated candidates and one persisted PR to sweep."""
+    output_dir = tmp_path / "out"
+    persisted = persisted_awaiting(output_dir)
+    transport.completed_workflow_runs = True
+    monkeypatch.setattr(entrypoint, "UrllibGitHubTransport", lambda: transport)
+    monkeypatch.setattr(entrypoint, "UrllibDevinTransport", FakeDevinTransport)
+    monkeypatch.setattr(entrypoint, "_enumerate", lambda **_kwargs: [])
+    entrypoint.run_once(
+        config=config_for(Mode.LIVE),
+        repo_path=TARGET_CHECKOUT,
+        output_dir=output_dir,
+        baseline_path=baseline_file(tmp_path),
+        base_sha="1" * 40,
+        head_branch="devin/merge-sweep",
+        base_branch="master",
+    )
+    return output_dir, persisted
+
+
+def test_merge_sweep_reobserves_an_unenumerated_merged_pr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A merged PR remains observable after its source alert disappears."""
+    transport = FakeGitHubTransport(pr_merged_at="2026-09-01T00:00:00Z")
+    output_dir, persisted = run_merge_sweep(tmp_path, transport, monkeypatch)
+
+    rows = read_rows(output_dir / "state" / LIVE_STATE_FILE)
+    latest = {row["candidate_id"]: row for row in rows}[persisted.candidate_id]
+    assert latest["state"] == CandidateState.MERGED.value
+    assert latest["merge_verified"] is True
+    assert latest["merged_at"] == "2026-09-01T00:00:00Z"
+    assert sum(path.endswith("/pulls/2") for path in transport.reads) == 1
+    report = (output_dir / "reports" / "kpis.md").read_text(encoding="utf-8")
+    assert "**Merge Rate:** 1.0" in report
+    run_report = next((output_dir / "reports").glob("run-*.md")).read_text(encoding="utf-8")
+    assert "merge re-observed externally" in run_report
+    assert "- Merges re-observed: 1" in run_report
+    assert "- Candidates seen: 0" in run_report
+    assert latest["run_id"] == persisted.run_id
+    assert "**Verification Pass Rate:** n/a" in report
+
+
+def test_merge_sweep_reobserves_a_budget_deferred_enumerated_pr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A budget-deferred enumerated PR still receives external merge observation."""
+    transport = FakeGitHubTransport(pr_merged_at="2026-09-01T00:00:00Z")
+    output_dir = tmp_path / "out"
+    persisted = persisted_awaiting(output_dir)
+    deferred = persisted.model_copy(
+        update={
+            "state": CandidateState.DEFERRED,
+            "reason": ReasonCode.BUDGET_OVERFLOW,
+            "action": Action.DEFERRED,
+        }
+    )
+    transport.completed_workflow_runs = True
+    monkeypatch.setattr(entrypoint, "UrllibGitHubTransport", lambda: transport)
+    monkeypatch.setattr(entrypoint, "UrllibDevinTransport", FakeDevinTransport)
+    monkeypatch.setattr(entrypoint, "_enumerate", lambda **_kwargs: [deferred])
+    monkeypatch.setattr(entrypoint, "_select", lambda _candidates, _config: [deferred])
+
+    entrypoint.run_once(
+        config=config_for(Mode.LIVE),
+        repo_path=TARGET_CHECKOUT,
+        output_dir=output_dir,
+        baseline_path=baseline_file(tmp_path),
+        base_sha="1" * 40,
+        head_branch="devin/merge-sweep",
+        base_branch="master",
+    )
+
+    latest = {
+        row["candidate_id"]: row for row in read_rows(output_dir / "state" / LIVE_STATE_FILE)
+    }[persisted.candidate_id]
+    assert latest["state"] == CandidateState.MERGED.value
+    assert latest["merge_verified"] is True
+    assert sum(path.endswith("/pulls/2") for path in transport.reads) == 1
+    report = (output_dir / "reports" / "kpis.md").read_text(encoding="utf-8")
+    assert "**Merged Clean:** 1" in report
+    assert "- **Candidates Seen:** 1" in report
+    events = EventLog(output_dir / "reports" / "events.jsonl").read()
+    assert sum(event.candidate_id == persisted.candidate_id for event in events) == 1
+    run_report = next((output_dir / "reports").glob("run-*.md")).read_text(encoding="utf-8")
+    assert "- Merges re-observed: 1" in run_report
+
+
+def test_merge_sweep_records_an_unenumerated_closed_pr_as_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A human-closed PR becomes a durable closed-pull-request terminal row."""
+    transport = FakeGitHubTransport(pr_state="closed")
+    output_dir, persisted = run_merge_sweep(tmp_path, transport, monkeypatch)
+
+    latest = {
+        row["candidate_id"]: row for row in read_rows(output_dir / "state" / LIVE_STATE_FILE)
+    }[persisted.candidate_id]
+    assert latest["state"] == CandidateState.TERMINAL.value
+    assert latest["reason"] == ReasonCode.CLOSED_PULL_REQUEST.value
+    assert sum(path.endswith("/pulls/2") for path in transport.reads) == 1
+    run_report = next((output_dir / "reports").glob("run-*.md")).read_text(encoding="utf-8")
+    assert "- Merges re-observed: 0" in run_report
+    assert "- Closed PRs re-observed: 1" in run_report
+
+
+def test_merge_sweep_ignores_an_open_pr_without_rewriting_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An open PR remains pending and is not counted as a current-run candidate."""
+    transport = FakeGitHubTransport(pr_state="open")
+    output_dir, persisted = run_merge_sweep(tmp_path, transport, monkeypatch)
+
+    state_path = output_dir / "state" / LIVE_STATE_FILE
+    assert state_path.read_text(encoding="utf-8") == (
+        json.dumps(persisted.model_dump(mode="json")) + "\n"
+    )
+    assert sum(path.endswith("/pulls/2") for path in transport.reads) == 1
+    run_report = next((output_dir / "reports").glob("run-*.md")).read_text(encoding="utf-8")
+    assert "- Candidates seen: 0" in run_report
+
+
+class UnreachablePullRequestTransport(FakeGitHubTransport):
+    """Fail only the PR read used by the merge re-observation sweep."""
+
+    def get(self, path: str) -> object:
+        if path.endswith("/pulls/2"):
+            self.reads.append(path)
+            raise HttpTransportError("service unavailable", status_code=503)
+        return super().get(path)
+
+
+def test_merge_sweep_keeps_unreachable_pr_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreachable PR is noted and cannot abort the otherwise successful run."""
+    transport = UnreachablePullRequestTransport()
+    output_dir, persisted = run_merge_sweep(tmp_path, transport, monkeypatch)
+
+    latest = {
+        row["candidate_id"]: row for row in read_rows(output_dir / "state" / LIVE_STATE_FILE)
+    }[persisted.candidate_id]
+    assert latest == persisted.model_dump(mode="json")
+    assert sum(path.endswith("/pulls/2") for path in transport.reads) == 1
+    state_path = output_dir / "state" / LIVE_STATE_FILE
+    assert state_path.read_text(encoding="utf-8") == (
+        json.dumps(persisted.model_dump(mode="json")) + "\n"
+    )
+    run_report = next((output_dir / "reports").glob("run-*.md")).read_text(encoding="utf-8")
+    assert "- Candidates seen: 0" in run_report
+    assert (
+        "persisted-awaiting: pull request observation unavailable: service unavailable"
+        in run_report
+    )
+
+
+def test_simulate_does_not_reobserve_persisted_pull_requests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SIMULATE never constructs or calls the LIVE merge-observation client."""
+    output_dir = tmp_path / "out"
+    persisted = persisted_awaiting(output_dir).model_dump(mode="json")
+    state_path = output_dir / "state" / SIMULATE_STATE_FILE
+    state_path.write_text(json.dumps(persisted) + "\n", encoding="utf-8")
+    monkeypatch.setattr(entrypoint, "_enumerate", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        GitHubClient,
+        "pull_request",
+        lambda *_args, **_kwargs: pytest.fail("SIMULATE must not read pull requests"),
+    )
+
+    entrypoint.run_once(
+        config=config_for(Mode.SIMULATE),
+        repo_path=tmp_path / "nonexistent-target",
+        output_dir=output_dir,
+        baseline_path=baseline_file(tmp_path),
+        base_sha="1" * 40,
     )
 
 
@@ -172,7 +388,7 @@ def test_the_kpi_rollup_survives_the_abort(aborted_run: AbortedRun) -> None:
     """§11 — the rollup is written too, and reports nothing as dispatched."""
     rollup = (aborted_run.output_dir / "reports" / "kpis.md").read_text(encoding="utf-8")
 
-    assert "**Dispatched Pr:** 0" in rollup
+    assert "**Problems With Pull Request:** 0" in rollup
     assert "**Dispatched Issue:** 0" in rollup
 
 
@@ -355,11 +571,10 @@ def test_a_live_run_keeps_its_durable_state_in_its_own_file(aborted_run: Aborted
 
 
 def test_simulated_rows_are_invisible_to_a_live_run(tmp_path: Path) -> None:
-    """§14.1 — a simulated publication must never satisfy a LIVE dedupe check.
+    """§14.1 — simulated state is marked and isolated from LIVE state.
 
-    Both modes share one output directory in practice, and SIMULATE stamps publication states
-    on rows for which nothing exists on the remote; reading those rows in LIVE would skip the
-    very first write of every candidate the simulation had already "published".
+    SIMULATE does not perform marker searches, so its candidates remain unconfigured and are
+    not dispatched. Its state file is still separate and explicitly marked simulated.
     """
     output_dir = tmp_path / "out"
     entrypoint.run_once(
@@ -370,27 +585,127 @@ def test_simulated_rows_are_invisible_to_a_live_run(tmp_path: Path) -> None:
         base_sha="1" * 40,
     )
     simulated = read_rows(output_dir / "state" / SIMULATE_STATE_FILE)
-    dispatched_by_simulate = {
-        row["candidate_id"] for row in simulated if row["state"] == CandidateState.DISPATCHING.value
-    }
+    simulated_ids = {row["candidate_id"] for row in simulated}
 
     aborted = live_run(output_dir, tmp_path)
-    live_states = {row["candidate_id"]: row["state"] for row in aborted.rows()}
+    live_rows = aborted.rows()
 
-    assert dispatched_by_simulate != set()
+    assert simulated_ids
+    assert all(row["artifact_simulated"] is True for row in simulated)
     assert read_rows(output_dir / "state" / SIMULATE_STATE_FILE) == simulated
-    assert dispatched_by_simulate <= set(live_states)
-    assert all(
-        live_states[candidate_id] == CandidateState.DEFERRED.value
-        for candidate_id in dispatched_by_simulate
+    assert all(row["artifact_simulated"] is False for row in live_rows)
+
+
+def test_settled_skip_is_excluded_from_run_verification_denominator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prior settled PR does not count as a dispatch in this run's KPI denominator."""
+    output_dir = tmp_path / "out"
+    settled = lane3_candidate(
+        candidate_id="settled",
+        run_id="previous-run",
+        state=CandidateState.AWAITING_HUMAN_MERGE,
+        action=Action.OPEN_PR,
+        tier=Tier.HIGH,
+        score=100.0,
+        risk=3,
+        issue_number=1,
+        issue_url="https://github.test/issues/1",
+        pr_number=2,
+        pr_url="https://github.test/pull/2",
+        head_branch="devin/remediation/settled",
+        session_id="previous-session",
     )
+    state_path = output_dir / "state" / SIMULATE_STATE_FILE
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(settled.model_dump(mode="json")) + "\n",
+        encoding="utf-8",
+    )
+    dispatched = lane3_candidate(candidate_id="fresh")
+    monkeypatch.setattr(
+        entrypoint,
+        "_enumerate",
+        lambda **_kwargs: [dispatched, settled],
+    )
+    state_store_type = CandidateStateStore
+
+    def configured_state_store(path: Path, **kwargs: Any) -> Any:  # noqa: ANN401
+        """Give this seam test an explicit empty marker index in SIMULATE."""
+        kwargs.pop("marker_search", None)
+        return state_store_type(
+            path,
+            marker_search=lambda _marker: None,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(entrypoint, "CandidateStateStore", configured_state_store)
+
+    entrypoint.run_once(
+        config=config_for(Mode.SIMULATE, budget_N=2),
+        repo_path=tmp_path / "nonexistent-target",
+        output_dir=output_dir,
+        baseline_path=baseline_file(tmp_path),
+        base_sha="1" * 40,
+    )
+
+    report = (output_dir / "reports" / "kpis.md").read_text(encoding="utf-8")
+    assert "**Verification Pass Rate:** 1.0" in report
+    assert "Verification Pass Rate Alert" not in report
+
+
+def test_run_summary_uses_settlement_preserved_by_artifact_rendering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI summary and report count the persisted settled row consistently."""
+    output_dir = tmp_path / "out"
+    settled = lane3_candidate(
+        candidate_id="settled",
+        run_id="previous-run",
+        state=CandidateState.AWAITING_HUMAN_MERGE,
+        action=Action.OPEN_PR,
+        tier=Tier.HIGH,
+        score=100.0,
+        issue_number=1,
+        issue_url="https://github.test/issues/1",
+        pr_number=2,
+        pr_url="https://github.test/pull/2",
+    )
+    state_path = output_dir / "state" / SIMULATE_STATE_FILE
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(settled.model_dump(mode="json")) + "\n",
+        encoding="utf-8",
+    )
+    deferred = settled.model_copy(
+        update={
+            "state": CandidateState.DEFERRED,
+            "reason": ReasonCode.BUDGET_OVERFLOW,
+        }
+    )
+    monkeypatch.setattr(entrypoint, "_enumerate", lambda **_kwargs: [deferred])
+    monkeypatch.setattr(entrypoint.CandidateRunner, "process", lambda _self, _candidate: deferred)
+
+    outcome = entrypoint.run_once(
+        config=config_for(Mode.SIMULATE, budget_N=1),
+        repo_path=tmp_path / "nonexistent-target",
+        output_dir=output_dir,
+        baseline_path=baseline_file(tmp_path),
+        base_sha="1" * 40,
+    )
+
+    report = next((output_dir / "reports").glob("run-*.md")).read_text(encoding="utf-8")
+    assert outcome.summary.deferred == 0
+    assert f"- Deferred: {outcome.summary.deferred}" in report
 
 
 def test_an_unconfigured_marker_search_completes_normally(tmp_path: Path) -> None:
     """§14.1 — SIMULATE configures no marker search, so there is nothing to fail: exit 0."""
     output_dir = tmp_path / "out"
 
-    _run_id, produced = entrypoint.run_once(
+    outcome = entrypoint.run_once(
         config=config_for(Mode.SIMULATE),
         repo_path=tmp_path / "nonexistent-target",
         output_dir=output_dir,
@@ -401,13 +716,13 @@ def test_an_unconfigured_marker_search_completes_normally(tmp_path: Path) -> Non
     events = EventLog(output_dir / "reports" / "events.jsonl").read_run_events()
     rows = read_rows(output_dir / "state" / SIMULATE_STATE_FILE)
 
-    assert produced != ()
+    assert outcome.produced != ()
     assert list((output_dir / "reports").glob("run-*.md")) != []
     assert [event for event in events if event.event_type == "marker_search_failure"] == []
     assert rows
     published = [row for row in rows if row["action"] != "log_only"]
     assert all(
-        row["marker_search_outcome"] == MarkerSearchOutcome.ABSENT.value for row in published
+        row["marker_search_outcome"] == MarkerSearchOutcome.UNCONFIGURED.value for row in published
     )
     assert all(row["marker_search_outcome"] is None for row in rows if row["action"] == "log_only")
     assert "Publication safety undetermined: 0" in next(

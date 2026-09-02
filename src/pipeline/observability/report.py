@@ -4,10 +4,53 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
 from pipeline.config import Mode
-from pipeline.schemas import Action, Candidate, CandidateState
+from pipeline.schemas import Action, Candidate, CandidateState, ReasonCode
+
+
+@dataclass(frozen=True)
+class RunSummary:
+    """Counts shared by the per-run report and command-line verdict."""
+
+    problems: int
+    scored: int
+    dispatched: int
+    deferred: int
+    duplicate_detection_unavailable: bool
+
+
+_DISPATCHED_STATES = {
+    CandidateState.ISSUE_CREATED,
+    CandidateState.SESSION_DONE,
+    CandidateState.VERIFIED,
+    CandidateState.PR_CREATED,
+    CandidateState.AWAITING_HUMAN_MERGE,
+    CandidateState.MERGED,
+    CandidateState.TERMINAL,
+}
+
+
+def summarize_run(candidates: Iterable[Candidate]) -> RunSummary:
+    """Compute the headline counts rendered in a run report."""
+    rows = list(candidates)
+    dispatched = sum(
+        candidate.action in {Action.OPEN_PR, Action.OPEN_ISSUE}
+        and candidate.state in _DISPATCHED_STATES
+        and candidate.tier is not None
+        for candidate in rows
+    )
+    return RunSummary(
+        problems=len(rows),
+        scored=sum(candidate.score is not None for candidate in rows),
+        dispatched=dispatched,
+        deferred=sum(candidate.state is CandidateState.DEFERRED for candidate in rows),
+        duplicate_detection_unavailable=any(
+            candidate.reason is ReasonCode.MARKER_SEARCH_UNCONFIGURED for candidate in rows
+        ),
+    )
 
 
 def _criterion_satisfied(candidate: Candidate) -> str:
@@ -22,9 +65,17 @@ def render_run_report(
     run_id: str,
     capability_notes: Iterable[str] = (),
     mode: Mode = Mode.SIMULATE,
+    reobserved_candidates: Iterable[Candidate] = (),
 ) -> str:
     """Render a deterministic per-run summary in Markdown."""
     rows = list(candidates)
+    reobserved_rows = list(reobserved_candidates)
+    summary = summarize_run(rows)
+    closed_reobservations = sum(
+        candidate.state is CandidateState.TERMINAL
+        and candidate.reason is ReasonCode.CLOSED_PULL_REQUEST
+        for candidate in reobserved_rows
+    )
     notes = list(capability_notes)
     note_lines = [f"- {note}" for note in notes] if notes else ["- None"]
     gated = Counter(
@@ -84,7 +135,10 @@ def render_run_report(
     gated_count = sum(candidate.gate_passed is False for candidate in rows)
     unpublished_count = sum(candidate.state is CandidateState.DISPATCHING for candidate in rows)
     safety_undetermined_count = sum(
-        candidate.marker_search_outcome in {"failed", "orphaned", "unconfigured"}
+        (
+            candidate.marker_search_outcome in {"failed", "orphaned"}
+            or (mode is Mode.LIVE and candidate.marker_search_outcome == "unconfigured")
+        )
         and candidate.issue_url is None
         and candidate.pr_url is None
         for candidate in rows
@@ -136,8 +190,13 @@ def render_run_report(
             f"# Run {run_id}",
             "",
             f"- mode: {mode.value}",
-            f"- Candidates seen: {len(rows)}",
-            f"- Scored: {sum(candidate.score is not None for candidate in rows)}",
+            f"- Candidates seen: {summary.problems}",
+            "- Merges re-observed: "
+            f"{sum(candidate.state is CandidateState.MERGED for candidate in reobserved_rows)}",
+            f"- Closed PRs re-observed: {closed_reobservations}",
+            f"- Scored: {summary.scored}",
+            f"- Dispatched: {summary.dispatched}",
+            f"- Deferred: {summary.deferred}",
             f"- Deferred by budget: {deferred_by_reason.get('budget_overflow', 0)}",
             f"- Deferred by session ceiling: {deferred_by_reason.get('session_ceiling', 0)}",
             f"- Deferred by capability/other: {deferred_other}",
@@ -219,6 +278,7 @@ def write_run_report(
     run_id: str,
     capability_notes: Iterable[str] = (),
     mode: Mode = Mode.SIMULATE,
+    reobserved_candidates: Iterable[Candidate] = (),
 ) -> None:
     """Write a Layer 2 report."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -228,9 +288,10 @@ def write_run_report(
             run_id=run_id,
             capability_notes=capability_notes,
             mode=mode,
+            reobserved_candidates=reobserved_candidates,
         ),
         encoding="utf-8",
     )
 
 
-__all__ = ["render_run_report", "write_run_report"]
+__all__ = ["RunSummary", "render_run_report", "summarize_run", "write_run_report"]

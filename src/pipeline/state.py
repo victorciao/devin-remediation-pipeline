@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from pipeline.dedupe import find_drift_match
 from pipeline.schemas import Candidate, CandidateState
 
@@ -20,6 +22,13 @@ DURABLE_IDENTITY_FIELDS = (
     "issue_number",
     "head_sha",
     "merged_at",
+)
+SETTLED_STATES = frozenset(
+    {
+        CandidateState.MERGED,
+        CandidateState.AWAITING_HUMAN_MERGE,
+        CandidateState.TERMINAL,
+    }
 )
 
 
@@ -33,6 +42,10 @@ class ResumeAction(str, Enum):
 
 class StatePreservationError(RuntimeError):
     """Raised when a resume write would discard durable artifact identity."""
+
+
+class StateCompatibilityError(RuntimeError):
+    """Raised when persisted state was written by an incompatible version."""
 
 
 class MarkerSearchOutcome(str, Enum):
@@ -138,6 +151,26 @@ def has_local_artifact(candidate: Candidate | None) -> bool:
     return candidate is not None and any(
         link is not None for link in (candidate.issue_url, candidate.pr_url)
     )
+
+
+def settlement_violation(previous: Candidate, candidate: Candidate) -> str | None:
+    """Return a reason when a candidate row would weaken durable settlement."""
+    previous_row = previous.model_dump(mode="json")
+    current_row = candidate.model_dump(mode="json")
+    for field in DURABLE_IDENTITY_FIELDS:
+        if previous_row.get(field) is not None and current_row.get(field) is None:
+            return f"state append discarded persisted {field}"
+    if previous.merge_verified and not candidate.merge_verified:
+        return "state append discarded persisted merge_verified"
+    if previous.state in SETTLED_STATES and has_local_artifact(previous):
+        if candidate.state not in SETTLED_STATES or (
+            previous.state is CandidateState.MERGED and candidate.state is not CandidateState.MERGED
+        ):
+            return (
+                f"state append attempted transition "
+                f"{previous.state.value} -> {candidate.state.value}"
+            )
+    return None
 
 
 def decide_resume(
@@ -246,6 +279,11 @@ class CandidateStateStore:
                             handle.write(line + "\n")
                         self._quarantine_seen.add(line)
                         self.quarantined_rows += 1
+                except ValidationError as exc:
+                    raise StateCompatibilityError(
+                        f"state file {self._path} was written by an incompatible version; "
+                        "use a fresh output directory"
+                    ) from exc
         return rows
 
     def rows(self) -> list[Candidate]:
@@ -379,11 +417,9 @@ class CandidateStateStore:
             candidate = candidate.model_copy(update={"artifact_simulated": True})
         latest = self.latest().get(candidate.candidate_id)
         if latest is not None:
-            previous_row = latest.model_dump(mode="json")
-            current_row = candidate.model_dump(mode="json")
-            for field in DURABLE_IDENTITY_FIELDS:
-                if previous_row.get(field) is not None and current_row.get(field) is None:
-                    raise StatePreservationError(f"state append discarded persisted {field}")
+            violation = settlement_violation(latest, candidate)
+            if violation is not None:
+                raise StatePreservationError(violation)
         if latest is not None and latest.model_dump(mode="json") == candidate.model_dump(
             mode="json"
         ):
@@ -444,6 +480,8 @@ class CandidateStateStore:
 __all__ = [
     "CandidateStateStore",
     "DURABLE_IDENTITY_FIELDS",
+    "SETTLED_STATES",
+    "settlement_violation",
     "ResumeAction",
     "ResumeDecision",
     "StatePreservationError",
